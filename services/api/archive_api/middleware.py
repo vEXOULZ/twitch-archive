@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import math
 import time
 from collections.abc import Awaitable, Callable
@@ -9,6 +10,33 @@ from typing import Any
 
 from cachetools import TTLCache
 from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+
+GZIP_MIN_SIZE = 1024  # shared with the app's GZipMiddleware
+
+
+class JsonBody:
+    """A rendered JSON response body, plus its gzip form made on first use.
+
+    Cached responses are served from these bytes, so a cache hit neither
+    re-encodes the JSON nor (for gzip clients) re-compresses it.
+    """
+
+    __slots__ = ("raw", "_gzipped")
+
+    def __init__(self, value: Any) -> None:
+        self.raw: bytes = JSONResponse(value).body  # byte-identical to an uncached JSONResponse
+        self._gzipped: bytes | None = None
+
+    def response(self, request: Request) -> Response:
+        if len(self.raw) >= GZIP_MIN_SIZE and "gzip" in request.headers.get("accept-encoding", ""):
+            if self._gzipped is None:
+                self._gzipped = gzip.compress(self.raw, compresslevel=9)
+            # GZipMiddleware passes responses that already carry Content-Encoding through
+            # untouched, so set the headers it would have added.
+            return Response(self._gzipped, media_type="application/json",
+                            headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+        return Response(self.raw, media_type="application/json")
 
 
 class ResponseCache:
@@ -26,13 +54,13 @@ class ResponseCache:
         if self.enabled:
             self._cache[key] = value
 
-    async def get_or_set(self, key: str, factory: Callable[[], Awaitable[Any]]) -> Any:
-        """Cached value for ``key``, else ``await factory()`` (not cached if it raises)."""
-        value = self.get(key)
-        if value is None:
-            value = await factory()
-            self.set(key, value)
-        return value
+    async def get_or_render(self, key: str, factory: Callable[[], Awaitable[Any]]) -> JsonBody:
+        """Cached body for ``key``, else ``await factory()`` rendered (not cached if it raises)."""
+        body = self.get(key)
+        if body is None:
+            body = JsonBody(await factory())
+            self.set(key, body)
+        return body
 
 
 def client_ip(request: Request) -> str:
