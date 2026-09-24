@@ -1,9 +1,10 @@
 """Postgres-backed job queue and runner.
 
-A job is a list of named steps (see ``KINDS``). ``jobs.step`` holds the step
-being (or next to be) run, and ``jobs.payload`` carries state between steps, so
-a restarted worker resumes where it stopped. Steps are written to be
-idempotent: re-running one after a crash is safe.
+A job is a list of named steps (see ``KINDS``). ``jobs.step`` is the first step
+that has not finished: the runner advances it (together with ``jobs.payload``,
+which carries state between steps) only after a step returns, so a restarted
+worker never repeats a finished step. A step interrupted part-way is re-run, so
+steps must tolerate that (most checkpoint their own progress in the payload).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import logging
 import traceback
 from typing import Any
 
-from sqlalchemy import Select, or_, select, update
+from sqlalchemy import Select, func, or_, select, update
 
 from archive_common.db import execute, get_sessionmaker
 from archive_common.models import Job
@@ -91,7 +92,7 @@ async def retry(job_id: int) -> Job | None:
             return None
         job.state = "queued"
         job.attempts = 0
-        job.payload = {k: v for k, v in (job.payload or {}).items() if k != "not_before"}
+        job.not_before = None
         await s.commit()
         return job
 
@@ -164,13 +165,9 @@ class Runner:
     async def _claim(self) -> Job | None:
         busy = set(self.running_keys.values())
         async with get_sessionmaker()() as s:
-            not_before = Job.payload["not_before"].astext
             stmt = (
                 select(Job)
-                .where(
-                    Job.state == "queued",
-                    or_(not_before.is_(None), not_before <= _now().isoformat()),
-                )
+                .where(Job.state == "queued", or_(Job.not_before.is_(None), Job.not_before <= func.now()))
                 .order_by(Job.id)
                 .with_for_update(skip_locked=True)
                 .limit(50)
@@ -192,18 +189,25 @@ class Runner:
             await self._set(job.id, state="failed", last_error=f"unknown kind {job.kind}")
             return
         ctx = JobContext(job.id, job.kind, job.vod_id, dict(job.payload or {}), self.deps)
-        ctx.payload.pop("not_before", None)
         start = steps.index(job.step) if job.step in steps else 0
-        ctx.log.info("running %s (vod=%s) from step %s", job.kind, job.vod_id, steps[start])
+        # The step to resume from. Advanced as soon as a step returns, so the error
+        # paths below record progress even if the checkpoint write itself failed.
+        current: str | None = steps[start]
+        ctx.log.info("running %s (vod=%s) from step %s", job.kind, job.vod_id, current)
         try:
-            for step in steps[start:]:
-                await self._set(job.id, step=step, payload=ctx.payload, vod_id=ctx.vod_id)
-                ctx.log.info("step %s", step)
-                await STEPS[step](ctx)
-            await self._set(job.id, state="done", step=None, payload=ctx.payload, vod_id=ctx.vod_id, last_error=None)
+            for i in range(start, len(steps)):
+                ctx.log.info("step %s", steps[i])
+                await STEPS[steps[i]](ctx)
+                current = steps[i + 1] if i + 1 < len(steps) else None
+                if current is not None:
+                    await self._set(job.id, step=current, payload=ctx.payload, vod_id=ctx.vod_id)
+            await self._set(job.id, state="done", step=None, payload=ctx.payload, vod_id=ctx.vod_id,
+                            last_error=None, not_before=None)
             ctx.log.info("job %s finished", job.kind)
         except asyncio.CancelledError:
-            await asyncio.shield(self._set(job.id, state="queued", payload=ctx.payload, vod_id=ctx.vod_id))
+            await asyncio.shield(
+                self._set(job.id, state="queued", step=current, payload=ctx.payload, vod_id=ctx.vod_id)
+            )
             raise
         except Exception as exc:
             attempts = job.attempts + 1
@@ -211,16 +215,17 @@ class Runner:
                 err = str(exc)
             else:
                 err = "".join(traceback.format_exception(exc))[-4000:]
+            not_before = None
             if attempts >= MAX_ATTEMPTS:
                 state = "failed"
                 ctx.log.error("job failed permanently: %s", exc)
             else:
                 state = "queued"
                 delay = 60 * 2**attempts
-                ctx.payload["not_before"] = (_now() + dt.timedelta(seconds=delay)).isoformat()
+                not_before = _now() + dt.timedelta(seconds=delay)
                 ctx.log.warning("job step failed (%s); retry %d in %ds", exc, attempts, delay)
-            await self._set(job.id, state=state, attempts=attempts, last_error=err, payload=ctx.payload,
-                            vod_id=ctx.vod_id)
+            await self._set(job.id, state=state, step=current, attempts=attempts, last_error=err,
+                            payload=ctx.payload, vod_id=ctx.vod_id, not_before=not_before)
 
     async def shutdown(self) -> None:
         for task in list(self.running.values()):
