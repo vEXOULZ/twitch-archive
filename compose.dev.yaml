@@ -1,0 +1,24 @@
+# Local development database (matches the default ARCHIVE_DATABASE_URL).
+#
+#   docker compose -f compose.dev.yaml up -d
+#   docker compose -f compose.dev.yaml exec -T db pg_restore -U postgres -d archive --no-owner < archive.dump
+#   alembic upgrade head
+name: twitch-archive-dev
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: archive
+    ports:
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d archive"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:

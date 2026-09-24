@@ -1,0 +1,43 @@
+# Production stack. Postgres runs natively on the host; host networking lets
+# the containers reach it on 127.0.0.1:5432 without changing pg_hba.
+#
+#   docker compose build
+#   docker compose up -d
+#   docker compose logs -f worker
+name: twitch-archive
+
+x-service: &service
+  restart: unless-stopped
+  network_mode: host
+  init: true
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  api:
+    <<: *service
+    build: { context: ., dockerfile: docker/api.Dockerfile }
+    image: twitch-archive-api:latest
+    env_file: [.env, secrets/api.env]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('ARCHIVE_API_PORT','3030'), timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    <<: *service
+    build: { context: ., dockerfile: docker/worker.Dockerfile }
+    image: twitch-archive-worker:latest
+    env_file: [.env, secrets/worker.env]
+    volumes:
+      - ${ARCHIVE_HOST_DATA_DIR:-./data}:/data
+    stop_grace_period: 60s  # let ffmpeg / uploads be cancelled cleanly; jobs resume on start
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('ARCHIVE_ADMIN_PORT','3031'), timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

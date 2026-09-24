@@ -1,0 +1,21 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      # The database and contract tests skip here: they need a restored copy of the live DB.
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+      # Not `docker compose build`: compose.yaml needs .env and secrets/, which only exist on the server.
+      - run: docker build -q -f docker/api.Dockerfile . && docker build -q -f docker/worker.Dockerfile .

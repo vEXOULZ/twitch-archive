@@ -1,0 +1,26 @@
+[project]
+name = "twitch-archive"
+version = "0.1.0"
+description = "Twitch stream archiver (worker) + read-only VOD API, Python rewrite of the Feathers archive backend"
+requires-python = ">=3.11"
+dependencies = ["archive-common", "archive-api", "archive-worker"]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/common", "services/api", "services/worker"]
+
+[tool.uv.sources]
+archive-common = { workspace = true }
+archive-api = { workspace = true }
+archive-worker = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "respx>=0.21", "psycopg2-binary>=2.9"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
