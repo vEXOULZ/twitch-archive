@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import datetime as dt
 import json
 import logging
 import math
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.models import Log, Vod
 
+from .errors import LegacyError
 from .middleware import ResponseCache
 from .serialize import LOGS, js_iso
 
@@ -33,13 +35,6 @@ log = logging.getLogger(__name__)
 PAGE = 200
 _lt = Log.__table__
 _vt = Vod.__table__
-
-
-class CommentsError(Exception):
-    def __init__(self, status: int, msg: str) -> None:
-        super().__init__(msg)
-        self.status = status
-        self.msg = msg
 
 
 def _js_to_fixed1(value: float) -> str:
@@ -85,41 +80,39 @@ class Comments:
             try:
                 offset = float(offset_raw)
             except ValueError:
-                offset = None
+                pass
             if offset is not None and not math.isfinite(offset):
                 offset = None
         if offset is None and not cursor:
-            raise CommentsError(400, "Missing request params")
+            raise LegacyError(400, "Missing request params")
 
         if offset is not None:
             fixed = _js_to_fixed1(offset)
-            vod_created = (
-                await conn.execute(select(_vt.c.createdAt).where(_vt.c.id == vod_id))
-            ).scalar_one_or_none()
-            if vod_created is None:
-                raise CommentsError(500, f"Failed to retrieve vod {vod_id}")
-            key = f"offset:{vod_id}:{fixed}"
-            cached = self.cache.get(key)
-            if cached is not None:
-                return cached
-            result = await self._offset_search(conn, vod_id, int(float(fixed)), vod_created)
+
+            async def by_offset() -> dict:
+                # Only pages of existing vods are cached, so a hit skips the vod lookup.
+                vod_created = (
+                    await conn.execute(select(_vt.c.createdAt).where(_vt.c.id == vod_id))
+                ).scalar_one_or_none()
+                if vod_created is None:
+                    raise LegacyError(500, f"Failed to retrieve vod {vod_id}")
+                result = await self._offset_search(conn, vod_id, int(float(fixed)), vod_created)
+                if result is None:
+                    raise LegacyError(500, f"Failed to retrieve comments from offset {fixed}")
+                return result
+
+            return await self.cache.get_or_set(f"offset:{vod_id}:{fixed}", by_offset)
+
+        async def by_cursor() -> dict:
+            cursor_json = _decode_cursor(cursor or "")
+            if cursor_json is None:
+                raise LegacyError(500, "Failed to parse cursor")
+            result = await self._cursor_search(conn, vod_id, cursor_json)
             if result is None:
-                raise CommentsError(500, f"Failed to retrieve comments from offset {fixed}")
-            self.cache.set(key, result)
+                raise LegacyError(500, f"Failed to retrieve comments from cursor {cursor}")
             return result
 
-        key = f"cursor:{vod_id}:{cursor}"
-        cached = self.long_cache.get(key)
-        if cached is not None:
-            return cached
-        cursor_json = _decode_cursor(cursor or "")
-        if cursor_json is None:
-            raise CommentsError(500, "Failed to parse cursor")
-        result = await self._cursor_search(conn, vod_id, cursor_json)
-        if result is None:
-            raise CommentsError(500, f"Failed to retrieve comments from cursor {cursor}")
-        self.long_cache.set(key, result)
-        return result
+        return await self.long_cache.get_or_set(f"cursor:{vod_id}:{cursor}", by_cursor)
 
     async def _rows(self, conn: AsyncConnection, *where) -> list[dict]:
         stmt = (
@@ -140,7 +133,7 @@ class Comments:
                 conn,
                 _lt.c.vod_id == vod_id,
                 _lt.c["_id"] >= seq,
-                _lt.c.createdAt >= _parse_ts(created),
+                _lt.c.createdAt >= dt.datetime.fromisoformat(created),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -188,9 +181,3 @@ class Comments:
         if value is not None:
             self.long_cache.set(key, value)
         return value
-
-
-def _parse_ts(value: str):
-    import datetime as dt
-
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))

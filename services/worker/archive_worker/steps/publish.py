@@ -83,7 +83,7 @@ async def describe(ctx: JobContext) -> None:
     if not entries:
         ctx.log.info("no %s uploads to describe", ctx.video_type)
         return
-    duration = float(ctx.payload.get("duration") or await vod_duration(ctx))
+    duration = await vod_duration(ctx, vod)
     windows = {p.number: p for p in planning.plan_parts(duration, vod.chapters, s.restricted_games, s.split_duration)}
     base = planning.base_description(s.domain_name, vod.id, vod.title, s.youtube_description)
     for entry in entries:

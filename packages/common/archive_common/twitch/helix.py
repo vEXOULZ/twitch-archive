@@ -91,6 +91,10 @@ class Helix:
         data = await self.get("/videos", {"user_id": user_id, "type": video_type, "first": first})
         return data.get("data") or []
 
+    async def video_for_stream(self, user_id: str, stream_id: str) -> dict | None:
+        """The archive video recorded from ``stream_id``, if Twitch has made one yet."""
+        return next((v for v in await self.list_videos(user_id) if str(v.get("stream_id")) == stream_id), None)
+
     async def get_game(self, game_id: str) -> dict | None:
         if game_id in self._games:
             return self._games[game_id]
@@ -108,22 +112,3 @@ class Helix:
         data = await self.get("/chat/badges/global")
         return data.get("data")
 
-
-def parse_helix_duration(value: str) -> int:
-    """Helix durations look like '3h2m1s'."""
-    total = 0
-    num = ""
-    for ch in value or "":
-        if ch.isdigit():
-            num += ch
-            continue
-        if num:
-            total += int(num) * {"h": 3600, "m": 60, "s": 1}.get(ch, 0)
-        num = ""
-    return total
-
-
-def format_hhmmss(seconds: float) -> str:
-    """Always zero-padded HH:MM:SS (hours may exceed 99 for very long streams)."""
-    s = max(0, int(seconds))
-    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"

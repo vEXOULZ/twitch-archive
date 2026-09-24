@@ -52,42 +52,32 @@ class Gql:
 
     # ── Playback tokens ───────────────────────────────────────────────────
 
-    async def vod_access_token(self, vod_id: str) -> AccessToken:
+    async def _playback_token(self, *, is_live: bool, login: str = "", vod_id: str = "") -> dict | None:
         data = await self.post(
             self._persisted(
                 "PlaybackAccessToken",
                 self.settings.gql_hash_playback_token,
                 {
-                    "isLive": False,
-                    "isVod": True,
-                    "login": "",
+                    "isLive": is_live,
+                    "isVod": not is_live,
+                    "login": login,
                     "platform": "web",
                     "playerType": "site",
                     "vodID": vod_id,
                 },
             )
         )
-        tok = (data.get("data") or {}).get("videoPlaybackAccessToken")
+        key = "streamPlaybackAccessToken" if is_live else "videoPlaybackAccessToken"
+        return (data.get("data") or {}).get(key)
+
+    async def vod_access_token(self, vod_id: str) -> AccessToken:
+        tok = await self._playback_token(is_live=False, vod_id=vod_id)
         if not tok:
             raise GqlError(f"No VOD playback token for {vod_id} (deleted or sub-only?)")
         return AccessToken(tok["value"], tok["signature"])
 
     async def live_access_token(self, login: str) -> AccessToken:
-        data = await self.post(
-            self._persisted(
-                "PlaybackAccessToken",
-                self.settings.gql_hash_playback_token,
-                {
-                    "isLive": True,
-                    "isVod": False,
-                    "login": login,
-                    "platform": "web",
-                    "playerType": "site",
-                    "vodID": "",
-                },
-            )
-        )
-        tok = (data.get("data") or {}).get("streamPlaybackAccessToken")
+        tok = await self._playback_token(is_live=True, login=login)
         if not tok:
             raise GqlError(f"No live playback token for {login} (offline?)")
         return AccessToken(tok["value"], tok["signature"])

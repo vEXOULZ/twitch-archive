@@ -6,14 +6,11 @@ import asyncio
 import shutil
 from pathlib import Path
 
-from sqlalchemy import select
-
-from archive_common.db import get_sessionmaker
-from archive_common.models import Vod
-from archive_common.twitch.helix import format_hhmmss
+from archive_common.timeutil import format_hhmmss
 
 from .. import ffmpeg, planning
 from ..context import JobContext, StepError
+from ..vods import upsert_vod, vod_id_for_stream
 from .capture import capture
 from .metadata import vod_duration
 
@@ -24,18 +21,12 @@ async def resolve_vod(ctx: JobContext) -> None:
         return
     stream_id = str(ctx.payload["stream_id"])
     for attempt in range(30):
-        async with get_sessionmaker()() as s:
-            vod_id = (
-                await s.execute(select(Vod.id).where(Vod.stream_id == stream_id).limit(1))
-            ).scalar_one_or_none()
+        vod_id = await vod_id_for_stream(stream_id)
         if vod_id is None and ctx.deps.helix.configured:
-            for video in await ctx.deps.helix.list_videos(ctx.settings.twitch_id):
-                if str(video.get("stream_id")) == stream_id:
-                    from ..monitor import upsert_vod  # avoid import cycle at module load
-
-                    await upsert_vod(video)
-                    vod_id = video["id"]
-                    break
+            video = await ctx.deps.helix.video_for_stream(ctx.settings.twitch_id, stream_id)
+            if video:
+                await upsert_vod(video)
+                vod_id = video["id"]
         if vod_id:
             ctx.vod_id = vod_id
             await ctx.save()
@@ -85,7 +76,7 @@ async def ensure_source(ctx: JobContext) -> None:
 async def split(ctx: JobContext) -> None:
     s = ctx.settings
     vod = await ctx.get_vod()
-    duration = float(ctx.payload.get("duration") or await vod_duration(ctx))
+    duration = await vod_duration(ctx, vod)
     all_parts = planning.plan_parts(duration, vod.chapters, s.restricted_games, s.split_duration)
     if not all_parts:
         raise StepError("nothing to upload (VOD is empty or entirely restricted)")
@@ -123,9 +114,9 @@ async def dmca_edit(ctx: JobContext) -> None:
     if plan.empty:
         raise StepError("no blocking claims to mute or black out")
     targets = [Path(p["path"]) for p in ctx.payload.get("parts", [])] if ctx.kind == "part_dmca" else [ctx.source_mp4]
+    work = ctx.work_dir / "dmca"
     edited: list[Path] = []
     for src in targets:
-        work = ctx.work_dir / "dmca"
         cur = src
         for i, (a, b) in enumerate(plan.blackout):
             nxt = work / f"{src.stem}-black{i}.mp4"

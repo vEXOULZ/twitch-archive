@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 
 from archive_common import http
-from archive_common.twitch.helix import format_hhmmss
+from archive_common.timeutil import format_hhmmss
 
 from .. import hls
 from ..context import JobContext, StepError
@@ -54,8 +54,9 @@ async def _download_all(items: list[tuple[str, Path]], concurrency: int) -> list
 
 
 async def _resolve_variant(ctx: JobContext) -> str:
-    tok = await ctx.deps.gql.vod_access_token(ctx.require_vod_id())
-    master = await http.request("GET", hls.vod_master_url(ctx.require_vod_id(), tok.value, tok.signature))
+    vod_id = ctx.require_vod_id()
+    tok = await ctx.deps.gql.vod_access_token(vod_id)
+    master = await http.request("GET", hls.vod_master_url(vod_id, tok.value, tok.signature))
     variants = hls.parse_master(master.text)
     if not variants:
         raise StepError("no variants in VOD master playlist")
@@ -93,28 +94,31 @@ async def _sync_segments(ctx: JobContext, pl: hls.MediaPlaylist, base: str) -> t
     """Download missing segments and rewrite the local playlist. Returns (missing, failed)."""
     d = ctx.hls_dir
     d.mkdir(parents=True, exist_ok=True)
+    have = set(await asyncio.to_thread(os.listdir, d))  # one listing instead of a stat per segment
     todo: list[tuple[str, Path]] = []
     init_name = None
     if pl.init_uri:
         init_name = hls.local_name(pl.init_uri)
-        if not (d / init_name).exists():
+        if init_name not in have:
             todo.append((_abs(base, pl.init_uri), d / init_name))
 
     entries: list[tuple[str, float, bool]] = []
     for seg in pl.segments:
         name = hls.local_name(seg.uri)
         plain = hls.unmuted_name(name)
-        if (d / plain).exists():
+        if plain in have:
             name = plain  # captured before Twitch muted it
-        elif not (d / name).exists():
+        elif name not in have:
             todo.append((_abs(base, seg.uri), d / name))
         entries.append((name, seg.duration, False))
 
     failures = await _download_all(todo, ctx.settings.segment_concurrency) if todo else []
     for dest, exc in failures[:5]:
         ctx.log.warning("segment %s failed: %s", dest.name, exc)
+    failed = {dest.name for dest, _ in failures}
+    have.update(dest.name for _, dest in todo if dest.name not in failed)
 
-    present = [e for e in entries if (d / e[0]).exists()]
+    present = [e for e in entries if e[0] in have]
     playlist = hls.write_local_playlist(present, init_name=init_name, target_duration=pl.target_duration)
     (d / "index.m3u8").write_text(playlist, encoding="utf-8")
     ctx.payload["fmp4"] = bool(init_name)
@@ -132,9 +136,17 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
     no_change = 0
     errors = 0
     while True:
-        video = await helix.get_video(vod_id) if helix.configured else {"id": vod_id}
+        video, fetched = await asyncio.gather(
+            helix.get_video(vod_id) if helix.configured else asyncio.sleep(0, {"id": vod_id}),
+            _fetch_vod_playlist(ctx),
+            return_exceptions=True,
+        )
+        if isinstance(video, BaseException):
+            raise video
         try:
-            pl, base = await _fetch_vod_playlist(ctx)
+            if isinstance(fetched, BaseException):
+                raise fetched
+            pl, base = fetched
             errors = 0
         except Exception as exc:  # token/usher/playlist failures
             errors += 1
@@ -161,8 +173,7 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
             ctx.log.info("VOD %s no longer on Twitch; capture finished", vod_id)
             break
         if pl.ended and not failed:
-            stream = await helix.get_stream(s.twitch_id) if helix.configured else None
-            if not stream or str(stream.get("id")) != str(video.get("stream_id")):
+            if not await _still_live(ctx, str(video.get("stream_id"))):
                 ctx.log.info("VOD playlist ended and the stream is offline; capture finished")
                 break
         sig = (len(pl.segments), pl.segments[-1].uri if pl.segments else None)
@@ -177,10 +188,6 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
         raise StepError("nothing was captured")
     ctx.payload["capture_done"] = True
     await ctx.save()
-
-
-async def capture_step(ctx: JobContext) -> None:
-    await capture(ctx, one_shot=False)
 
 
 # ── Live stream recording ─────────────────────────────────────────────────
@@ -309,9 +316,11 @@ async def live_record(ctx: JobContext) -> None:
     ctx.log.info("live recording finished: %d segments", len(entries))
 
 
-async def _still_live(ctx: JobContext) -> bool:
+async def _still_live(ctx: JobContext, stream_id: str | None = None) -> bool:
+    """Is the channel live with ``stream_id`` (default: the job's stream)?"""
     helix = ctx.deps.helix
     if not helix.configured:
         return False
     stream = await helix.get_stream(ctx.settings.twitch_id)
-    return bool(stream and str(stream.get("id")) == str(ctx.payload.get("stream_id")))
+    expected = stream_id if stream_id is not None else ctx.payload.get("stream_id")
+    return bool(stream and str(stream.get("id")) == str(expected))

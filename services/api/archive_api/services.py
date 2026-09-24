@@ -26,14 +26,18 @@ async def _games_for(conn: AsyncConnection, vod_ids: list[str]) -> dict[str, lis
     return out
 
 
+async def _attach_games(conn: AsyncConnection, vods: list[dict]) -> None:
+    games = await _games_for(conn, [v["id"] for v in vods])
+    for vod in vods:
+        vod["games"] = games[vod["id"]]
+
+
 async def _vods_by_id(conn: AsyncConnection, vod_ids: list[str]) -> dict[str, dict]:
     if not vod_ids:
         return {}
     rows = await conn.execute(select(*VODS.columns()).where(VODS.table.c.id.in_(vod_ids)))
     vods = {r["id"]: VODS.to_json(r) for r in rows.mappings()}
-    games = await _games_for(conn, list(vods))
-    for vid, vod in vods.items():
-        vod["games"] = games[vid]
+    await _attach_games(conn, list(vods.values()))
     return vods
 
 
@@ -89,9 +93,7 @@ class VodsService(Service):
         super().__init__(VODS, settings, {"chapters": fq.chapter_name_filter(VODS.table.c.chapters)})
 
     async def embed(self, conn: AsyncConnection, items: list[dict]) -> None:
-        games = await _games_for(conn, [i["id"] for i in items])
-        for item in items:
-            item["games"] = games[item["id"]]
+        await _attach_games(conn, items)
 
 
 class GamesService(Service):

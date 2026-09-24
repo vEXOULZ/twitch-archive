@@ -33,3 +33,12 @@ class FeathersError(Exception):
 def legacy_error(status: int, msg: str) -> JSONResponse:
     """Body used by the custom (non-service) routes: {error: true, msg}."""
     return JSONResponse({"error": True, "msg": msg}, status_code=status)
+
+
+class LegacyError(Exception):
+    """Raised by the custom routes; rendered with ``legacy_error``."""
+
+    def __init__(self, status: int, msg: str) -> None:
+        super().__init__(msg)
+        self.status = status
+        self.msg = msg

@@ -11,8 +11,9 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from archive_common import http
-from archive_common.db import get_sessionmaker
-from archive_common.models import Emote, Log
+from archive_common.db import execute, get_sessionmaker
+from archive_common.models import Emote, Log, Vod
+from archive_common.timeutil import hhmmss_to_seconds, parse_ts
 
 from .. import planning
 from ..context import JobContext, StepError
@@ -21,15 +22,8 @@ CHAT_BATCH = 2500
 DEFAULT_COLOR = "#999999"
 
 
-def hhmmss_to_seconds(value: str | None) -> int:
-    total = 0
-    for piece in (value or "0").split(":"):
-        total = total * 60 + int(float(piece or 0))
-    return total
-
-
-async def vod_duration(ctx: JobContext) -> float:
-    vod = await ctx.get_vod()
+async def vod_duration(ctx: JobContext, vod: Vod | None = None) -> float:
+    vod = vod or await ctx.get_vod()
     return float(ctx.payload.get("duration") or hhmmss_to_seconds(vod.duration))
 
 
@@ -62,12 +56,6 @@ async def chapters(ctx: JobContext) -> None:
 # ── Chat replay ───────────────────────────────────────────────────────────
 
 
-def _parse_ts(value: str | None) -> dt.datetime:
-    if not value:
-        return dt.datetime.now(dt.timezone.utc)
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
 def comment_row(vod_id: str, node: dict) -> dict:
     commenter = node.get("commenter") or {}
     message = node.get("message") or {}
@@ -79,7 +67,7 @@ def comment_row(vod_id: str, node: dict) -> dict:
         "message": message.get("fragments") or [],
         "user_badges": message.get("userBadges") or [],
         "user_color": message.get("userColor") or DEFAULT_COLOR,
-        "created_at": _parse_ts(node.get("createdAt")),
+        "created_at": parse_ts(node.get("createdAt")) or dt.datetime.now(dt.timezone.utc),
     }
 
 
@@ -181,9 +169,9 @@ async def fetch_emotes(ctx: JobContext, twitch_id: str) -> dict[str, list[dict]]
 async def emotes(ctx: JobContext) -> None:
     vod_id = ctx.require_vod_id()
     values = await fetch_emotes(ctx, ctx.settings.twitch_id)
-    async with get_sessionmaker()() as s:
-        stmt = insert(Emote).values(vod_id=vod_id, **values)
-        stmt = stmt.on_conflict_do_update(
+    stmt = insert(Emote).values(vod_id=vod_id, **values)
+    await execute(
+        stmt.on_conflict_do_update(
             index_elements=[Emote.vod_id],
             set_={
                 "ffz_emotes": stmt.excluded.ffz_emotes,
@@ -192,8 +180,7 @@ async def emotes(ctx: JobContext) -> None:
                 "updatedAt": func.now(),
             },
         )
-        await s.execute(stmt)
-        await s.commit()
+    )
     ctx.log.info(
         "emotes: ffz=%d bttv=%d 7tv=%d",
         len(values["ffz_emotes"]), len(values["bttv_emotes"]), len(values["seventv_emotes"]),
