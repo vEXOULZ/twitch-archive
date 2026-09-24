@@ -14,9 +14,9 @@ import logging
 import traceback
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import Select, or_, select, update
 
-from archive_common.db import get_sessionmaker
+from archive_common.db import execute, get_sessionmaker
 from archive_common.models import Job
 
 from .context import Deps, JobContext, StepError
@@ -63,25 +63,25 @@ async def enqueue(kind: str, vod_id: str | None, payload: dict[str, Any] | None 
     return job
 
 
+def _matching(stmt: Select, kind: str, vod_id: str | None, stream_id: str | None) -> Select:
+    stmt = stmt.where(Job.kind == kind)
+    if vod_id is not None:
+        stmt = stmt.where(Job.vod_id == vod_id)
+    if stream_id is not None:
+        stmt = stmt.where(Job.payload["stream_id"].astext == str(stream_id))
+    return stmt.limit(1)
+
+
 async def find_active(kind: str, *, vod_id: str | None = None, stream_id: str | None = None) -> Job | None:
+    stmt = _matching(select(Job).where(Job.state.in_(ACTIVE)), kind, vod_id, stream_id)
     async with get_sessionmaker()() as s:
-        stmt = select(Job).where(Job.kind == kind, Job.state.in_(ACTIVE))
-        if vod_id is not None:
-            stmt = stmt.where(Job.vod_id == vod_id)
-        if stream_id is not None:
-            stmt = stmt.where(Job.payload["stream_id"].astext == str(stream_id))
-        return (await s.execute(stmt.limit(1))).scalar_one_or_none()
+        return (await s.execute(stmt)).scalar_one_or_none()
 
 
 async def exists_any(kind: str, *, vod_id: str | None = None, stream_id: str | None = None) -> bool:
     """Any job (including finished/failed) — used so the monitor enqueues once per stream."""
     async with get_sessionmaker()() as s:
-        stmt = select(Job.id).where(Job.kind == kind)
-        if vod_id is not None:
-            stmt = stmt.where(Job.vod_id == vod_id)
-        if stream_id is not None:
-            stmt = stmt.where(Job.payload["stream_id"].astext == str(stream_id))
-        return (await s.execute(stmt.limit(1))).first() is not None
+        return (await s.execute(_matching(select(Job.id), kind, vod_id, stream_id))).first() is not None
 
 
 async def retry(job_id: int) -> Job | None:
@@ -184,9 +184,7 @@ class Runner:
         return None
 
     async def _set(self, job_id: int, **values: Any) -> None:
-        async with get_sessionmaker()() as s:
-            await s.execute(update(Job).where(Job.id == job_id).values(**values))
-            await s.commit()
+        await execute(update(Job).where(Job.id == job_id).values(**values))
 
     async def _run(self, job: Job) -> None:
         steps = KINDS.get(job.kind)
@@ -214,15 +212,15 @@ class Runner:
             else:
                 err = "".join(traceback.format_exception(exc))[-4000:]
             if attempts >= MAX_ATTEMPTS:
+                state = "failed"
                 ctx.log.error("job failed permanently: %s", exc)
-                await self._set(job.id, state="failed", attempts=attempts, last_error=err, payload=ctx.payload,
-                                vod_id=ctx.vod_id)
             else:
+                state = "queued"
                 delay = 60 * 2**attempts
                 ctx.payload["not_before"] = (_now() + dt.timedelta(seconds=delay)).isoformat()
                 ctx.log.warning("job step failed (%s); retry %d in %ds", exc, attempts, delay)
-                await self._set(job.id, state="queued", attempts=attempts, last_error=err, payload=ctx.payload,
-                                vod_id=ctx.vod_id)
+            await self._set(job.id, state=state, attempts=attempts, last_error=err, payload=ctx.payload,
+                            vod_id=ctx.vod_id)
 
     async def shutdown(self) -> None:
         for task in list(self.running.values()):

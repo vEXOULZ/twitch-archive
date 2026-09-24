@@ -13,6 +13,7 @@ from sqlalchemy import delete, select
 
 from archive_common.db import get_sessionmaker
 from archive_common.models import Job, Log, Vod
+from archive_common.twitch.gql import GQL_URL
 from archive_worker import jobs
 from archive_worker.steps import metadata
 
@@ -73,7 +74,7 @@ async def _nosleep(*_a, **_k):
 async def test_chat_crawl_is_idempotent(db, make_ctx, monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", _nosleep)
     await _vod()
-    route = respx.post("https://gql.twitch.tv/gql").mock(side_effect=_gql)
+    route = respx.post(GQL_URL).mock(side_effect=_gql)
     ctx = make_ctx("chat", VOD)
     await metadata.chat(ctx)
     await metadata.chat(ctx)  # resumes from the max stored offset; duplicates are ignored

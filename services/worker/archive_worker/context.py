@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import update
 
 from archive_common.config import Settings
-from archive_common.db import get_sessionmaker
+from archive_common.db import execute, get_sessionmaker
 from archive_common.models import Job, Vod
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
@@ -86,11 +86,7 @@ class JobContext:
     # ── Persistence ───────────────────────────────────────────────────────
 
     async def save(self) -> None:
-        async with get_sessionmaker()() as s:
-            await s.execute(
-                update(Job).where(Job.id == self.job_id).values(payload=self.payload, vod_id=self.vod_id)
-            )
-            await s.commit()
+        await execute(update(Job).where(Job.id == self.job_id).values(payload=self.payload, vod_id=self.vod_id))
 
     async def get_vod(self) -> Vod:
         async with get_sessionmaker()() as s:
@@ -100,6 +96,4 @@ class JobContext:
             return vod
 
     async def update_vod(self, **values: Any) -> None:
-        async with get_sessionmaker()() as s:
-            await s.execute(update(Vod).where(Vod.id == self.require_vod_id()).values(**values))
-            await s.commit()
+        await execute(update(Vod).where(Vod.id == self.require_vod_id()).values(**values))

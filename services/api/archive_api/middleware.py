@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from cachetools import TTLCache
@@ -25,8 +26,13 @@ class ResponseCache:
         if self.enabled:
             self._cache[key] = value
 
-    def clear(self) -> None:
-        self._cache.clear()
+    async def get_or_set(self, key: str, factory: Callable[[], Awaitable[Any]]) -> Any:
+        """Cached value for ``key``, else ``await factory()`` (not cached if it raises)."""
+        value = self.get(key)
+        if value is None:
+            value = await factory()
+            self.set(key, value)
+        return value
 
 
 def client_ip(request: Request) -> str:

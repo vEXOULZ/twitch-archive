@@ -10,11 +10,13 @@ import asyncio
 import datetime as dt
 import hashlib
 import hmac
+import json
 import logging
 import random
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
@@ -23,8 +25,9 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from sqlalchemy.dialects.postgresql import insert
 
+from archive_common import http
 from archive_common.config import Settings
-from archive_common.db import get_sessionmaker
+from archive_common.db import execute, get_sessionmaker
 from archive_common.models import AppState
 
 log = logging.getLogger(__name__)
@@ -48,11 +51,8 @@ async def load_token() -> dict | None:
 
 
 async def save_token(value: dict) -> None:
-    async with get_sessionmaker()() as s:
-        stmt = insert(AppState).values(key=STATE_KEY, value=value)
-        stmt = stmt.on_conflict_do_update(index_elements=[AppState.key], set_={"value": value})
-        await s.execute(stmt)
-        await s.commit()
+    stmt = insert(AppState).values(key=STATE_KEY, value=value)
+    await execute(stmt.on_conflict_do_update(index_elements=[AppState.key], set_={"value": value}))
 
 
 # ── OAuth consent flow (admin endpoints) ──────────────────────────────────
@@ -64,8 +64,6 @@ def _sign(settings: Settings, payload: str) -> str:
 
 
 def consent_url(settings: Settings) -> str:
-    from urllib.parse import urlencode
-
     ts = str(int(time.time()))
     params = {
         "client_id": settings.google_client_id,
@@ -88,8 +86,6 @@ def verify_state(settings: Settings, state: str, max_age: int = 900) -> bool:
 
 
 async def exchange_code(settings: Settings, code: str) -> dict:
-    from archive_common import http
-
     resp = await http.request(
         "POST",
         TOKEN_URI,
@@ -140,8 +136,10 @@ class YouTube:
         return self._creds
 
     async def _service(self):
+        # Built per call: the service wraps an httplib2.Http, which is not safe to share
+        # across the worker threads that concurrent jobs use.
         creds = await self._credentials()
-        return build("youtube", "v3", credentials=creds, cache_discovery=False)
+        return await asyncio.to_thread(build, "youtube", "v3", credentials=creds, cache_discovery=False)
 
     async def check(self) -> dict[str, Any]:
         """Force a token refresh against Google.
@@ -234,14 +232,15 @@ class YouTube:
         time.sleep(delay)
         return retries
 
-    async def get_snippet(self, video_id: str) -> dict | None:
-        service = await self._service()
+    async def get_snippet(self, video_id: str, service=None) -> dict | None:
+        service = service or await self._service()
         resp = await asyncio.to_thread(service.videos().list(part="snippet", id=video_id).execute)
         items = resp.get("items") or []
         return items[0]["snippet"] if items else None
 
     async def update_description(self, video_id: str, description: str) -> None:
-        snippet = await self.get_snippet(video_id)
+        service = await self._service()
+        snippet = await self.get_snippet(video_id, service)
         if snippet is None:
             log.warning("YouTube video %s not found; skipping description update", video_id)
             return
@@ -253,14 +252,11 @@ class YouTube:
                 "categoryId": snippet.get("categoryId", "20"),
             },
         }
-        service = await self._service()
         await asyncio.to_thread(service.videos().update(part="snippet", body=body).execute)
 
 
 async def import_legacy_token(path: Path) -> None:
     """Import youtube.auth from the legacy config/config.json."""
-    import json
-
     cfg = json.loads(path.read_text(encoding="utf-8"))
     auth = (cfg.get("youtube") or {}).get("auth") or {}
     if not auth.get("refresh_token"):

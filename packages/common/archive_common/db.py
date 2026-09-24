@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 
+from sqlalchemy import Executable
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from .config import get_settings
@@ -26,3 +27,10 @@ def get_engine() -> AsyncEngine:
 @lru_cache
 def get_sessionmaker() -> async_sessionmaker:
     return async_sessionmaker(get_engine(), expire_on_commit=False)
+
+
+async def execute(stmt: Executable) -> None:
+    """Run one write statement in its own transaction."""
+    async with get_sessionmaker()() as s:
+        await s.execute(stmt)
+        await s.commit()

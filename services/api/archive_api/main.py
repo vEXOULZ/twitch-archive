@@ -6,6 +6,7 @@ contract; see tests/api_contract.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -23,8 +24,8 @@ from archive_common.db import get_engine
 from archive_common.http import close_client
 from archive_common.twitch.helix import Helix
 
-from .comments import Comments, CommentsError
-from .errors import FeathersError, legacy_error
+from .comments import Comments
+from .errors import FeathersError, LegacyError, legacy_error
 from .middleware import RateLimiter, ResponseCache, client_ip
 from .services import build_services
 
@@ -74,6 +75,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def feathers_error(_: Request, exc: FeathersError):
         return exc.response()
 
+    @app.exception_handler(LegacyError)
+    async def legacy(_: Request, exc: LegacyError):
+        return legacy_error(exc.status, exc.msg)
+
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException):
         if exc.status_code == 405:
@@ -106,25 +111,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def register(name: str) -> None:
         svc = services[name]
 
+        async def query(method, arg: str):
+            async with engine.connect() as conn:
+                return await method(conn, arg)
+
         @app.get(f"/{name}", name=f"{name}-find")
         async def find(request: Request):
-            key = f"{name}?{request.url.query}"
-            cached = service_cache.get(key)
-            if cached is None:
-                async with engine.connect() as conn:
-                    cached = await svc.find(conn, request.url.query)
-                service_cache.set(key, cached)
-            return JSONResponse(cached)
+            qs = request.url.query
+            return JSONResponse(await service_cache.get_or_set(f"{name}?{qs}", lambda: query(svc.find, qs)))
 
         @app.get(f"/{name}/{{item_id}}", name=f"{name}-get")
         async def get(item_id: str):
-            key = f"{name}/{item_id}"
-            cached = service_cache.get(key)
-            if cached is None:
-                async with engine.connect() as conn:
-                    cached = await svc.get(conn, item_id)
-                service_cache.set(key, cached)
-            return JSONResponse(cached)
+            return JSONResponse(await service_cache.get_or_set(f"{name}/{item_id}", lambda: query(svc.get, item_id)))
 
         async def disallowed(request: Request):
             raise FeathersError(405, f"Provider 'rest' can not call '{request.method.lower()}'. (disallow)")
@@ -140,32 +138,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/vods/{vod_id}/comments")
     async def vod_comments(vod_id: str, request: Request):
         params = request.query_params
-        try:
-            async with engine.connect() as conn:
-                body = await comments.handle(conn, vod_id, params.get("content_offset_seconds"), params.get("cursor"))
-        except CommentsError as exc:
-            return legacy_error(exc.status, exc.msg)
+        async with engine.connect() as conn:
+            body = await comments.handle(conn, vod_id, params.get("content_offset_seconds"), params.get("cursor"))
         return JSONResponse(body)
 
     # ── Badges ────────────────────────────────────────────────────────────
 
     @app.get("/v2/badges")
     async def badges():
-        cached = badges_cache.get("badges")
-        if cached is not None:
-            return JSONResponse(cached)
-        if not helix.configured:
-            return legacy_error(500, "Twitch credentials are not configured")
-        try:
-            body = {
-                "channel": await helix.channel_badges(settings.twitch_id),
-                "global": await helix.global_badges(),
-            }
-        except httpx.HTTPError as exc:
-            log.warning("failed to fetch badges: %s", exc)
-            return legacy_error(500, "Something went wrong trying to retrieve channel badges..")
-        badges_cache.set("badges", body)
-        return JSONResponse(body)
+        async def fetch() -> dict:
+            if not helix.configured:
+                raise LegacyError(500, "Twitch credentials are not configured")
+            try:
+                channel, glob = await asyncio.gather(helix.channel_badges(settings.twitch_id), helix.global_badges())
+            except httpx.HTTPError as exc:
+                log.warning("failed to fetch badges: %s", exc)
+                raise LegacyError(500, "Something went wrong trying to retrieve channel badges..") from exc
+            return {"channel": channel, "global": glob}
+
+        return JSONResponse(await badges_cache.get_or_set("badges", fetch))
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon():

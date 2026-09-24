@@ -81,8 +81,3 @@ async def request(
             return resp
     raise AssertionError("unreachable")
 
-
-def status_of(exc: BaseException) -> int | None:
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code
-    return None

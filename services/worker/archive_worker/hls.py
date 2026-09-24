@@ -8,6 +8,7 @@ and writing a local playlist that ffmpeg can read.
 
 from __future__ import annotations
 
+import datetime as dt
 import random
 import re
 from dataclasses import dataclass, field
@@ -121,11 +122,9 @@ def base_url(url: str) -> str:
 class Segment:
     uri: str
     duration: float
-    title: str = ""
     sequence: int = 0
     discontinuity: bool = False
     ad: bool = False
-    program_date_time: str | None = None
 
 
 @dataclass
@@ -136,8 +135,6 @@ class MediaPlaylist:
     init_uri: str | None = None
     ended: bool = False
     total_seconds: float | None = None
-    version: int = 3
-
 
 
 def parse_media(text: str) -> MediaPlaylist:
@@ -146,7 +143,7 @@ def parse_media(text: str) -> MediaPlaylist:
     title = ""
     disc = False
     pdt: str | None = None
-    ad_ranges: list[tuple[str, float]] = []  # (start date, duration) of stitched ads
+    ad_ranges: list[tuple[dt.datetime, dt.datetime]] = []  # [start, end) of stitched ads
     seq = None
     for raw in text.splitlines():
         line = raw.strip()
@@ -156,8 +153,6 @@ def parse_media(text: str) -> MediaPlaylist:
             pl.target_duration = int(float(line.split(":", 1)[1]))
         elif line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
             pl.media_sequence = int(line.split(":", 1)[1])
-        elif line.startswith("#EXT-X-VERSION:"):
-            pl.version = int(line.split(":", 1)[1])
         elif line.startswith("#EXT-X-MAP:"):
             pl.init_uri = parse_attrs(line.split(":", 1)[1]).get("URI")
         elif line.startswith("#EXT-X-TWITCH-TOTAL-SECS:"):
@@ -171,7 +166,9 @@ def parse_media(text: str) -> MediaPlaylist:
         elif line.startswith("#EXT-X-DATERANGE:"):
             a = parse_attrs(line.split(":", 1)[1])
             if a.get("CLASS") == "twitch-stitched-ad" or a.get("ID", "").startswith("stitched-ad-"):
-                ad_ranges.append((a.get("START-DATE", ""), float(a.get("DURATION", "0") or 0)))
+                start = _parse_date(a.get("START-DATE", ""))
+                if start:
+                    ad_ranges.append((start, start + dt.timedelta(seconds=float(a.get("DURATION", "0") or 0))))
         elif line.startswith("#EXTINF:"):
             val = line.split(":", 1)[1]
             dur, _, title = val.partition(",")
@@ -181,32 +178,19 @@ def parse_media(text: str) -> MediaPlaylist:
                 seq = pl.media_sequence
             is_ad = "Amazon" in title or title.startswith("stitched-ad")
             if not is_ad and pdt and ad_ranges:
-                is_ad = any(_in_range(pdt, start, d) for start, d in ad_ranges)
-            pl.segments.append(
-                Segment(
-                    uri=line,
-                    duration=duration,
-                    title=title,
-                    sequence=seq,
-                    discontinuity=disc,
-                    ad=is_ad,
-                    program_date_time=pdt,
-                )
-            )
+                t = _parse_date(pdt)
+                is_ad = t is not None and any(start <= t < end for start, end in ad_ranges)
+            pl.segments.append(Segment(uri=line, duration=duration, sequence=seq, discontinuity=disc, ad=is_ad))
             seq += 1
             duration, title, disc, pdt = None, "", False, None
     return pl
 
 
-def _in_range(pdt: str, start: str, duration: float) -> bool:
-    from datetime import datetime, timedelta
-
+def _parse_date(value: str) -> dt.datetime | None:
     try:
-        t = datetime.fromisoformat(pdt.replace("Z", "+00:00"))
-        s = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        return dt.datetime.fromisoformat(value)
     except ValueError:
-        return False
-    return s <= t < s + timedelta(seconds=duration)
+        return None
 
 
 # ── Muted segments ────────────────────────────────────────────────────────

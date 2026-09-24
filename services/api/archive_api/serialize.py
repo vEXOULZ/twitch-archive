@@ -12,6 +12,7 @@ import datetime as dt
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import cached_property
 from decimal import Decimal
 from typing import Any
 
@@ -51,14 +52,13 @@ class Field:
 
 @dataclass(frozen=True)
 class Resource:
-    name: str
     table: Table
     fields: tuple[Field, ...]
     id_key: str
     # extra accepted query names -> JSON key (raw column names Sequelize also accepted)
     aliases: Mapping[str, str]
 
-    @property
+    @cached_property
     def by_key(self) -> dict[str, Field]:
         return {f.key: f for f in self.fields}
 
@@ -85,7 +85,6 @@ def _t(model) -> Table:
 _vt, _gt, _et, _lt, _st = _t(Vod), _t(Game), _t(Emote), _t(Log), _t(Stream)
 
 VODS = Resource(
-    "vods",
     _vt,
     (
         Field("id", _vt.c.id),
@@ -105,7 +104,6 @@ VODS = Resource(
 )
 
 GAMES = Resource(
-    "games",
     _gt,
     (
         Field("id", _gt.c.id, _as_str),
@@ -127,7 +125,6 @@ GAMES = Resource(
 )
 
 EMOTES = Resource(
-    "emotes",
     _et,
     (
         Field("vodId", _et.c.vod_id),
@@ -142,7 +139,6 @@ EMOTES = Resource(
 )
 
 LOGS = Resource(
-    "logs",
     _lt,
     (
         Field("id", _lt.c.id, lambda v: str(v) if isinstance(v, uuid.UUID) else v),
@@ -161,7 +157,6 @@ LOGS = Resource(
 )
 
 STREAMS = Resource(
-    "streams",
     _st,
     (
         Field("id", _st.c.id, _as_str),

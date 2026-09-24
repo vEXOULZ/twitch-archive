@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from archive_common.twitch.helix import format_hhmmss
+from archive_common.timeutil import format_hhmmss
 
 # ── Chapters ──────────────────────────────────────────────────────────────
 #

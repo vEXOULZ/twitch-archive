@@ -15,13 +15,13 @@ from fastapi import Body, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import delete, select, text, update
 
-from archive_common.db import get_sessionmaker
+from archive_common.db import execute, get_sessionmaker
 from archive_common.models import Emote, Game, Job, Log, Vod
-from archive_common.twitch.helix import format_hhmmss, parse_helix_duration
+from archive_common.timeutil import format_hhmmss, parse_helix_duration
 
 from . import jobs, youtube
 from .context import Deps
-from .monitor import upsert_vod
+from .vods import upsert_vod
 
 
 class AdminError(Exception):
@@ -40,6 +40,10 @@ def _require(body: dict, *keys: str) -> None:
     for key in keys:
         if body.get(key) in (None, ""):
             raise AdminError(400, f"Missing parameter: {key}")
+
+
+def _helix_hhmmss(video: dict) -> str:
+    return format_hhmmss(parse_helix_duration(video.get("duration", "")))
 
 
 def _job_json(job: Job) -> dict:
@@ -117,6 +121,18 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             payload["stream_id"] = vod.stream_id
         return payload
 
+    async def source_payload(vod: Vod, body: dict) -> dict:
+        """type_payload plus an optional local ``path`` to use instead of downloading."""
+        payload = await type_payload(vod, vtype(body))
+        if body.get("path"):
+            payload["path"] = body["path"]
+        return payload
+
+    def single_part(payload: dict, body: dict) -> int:
+        part = int(body["part"])
+        payload.update(start_part=part, end_part=part)
+        return part
+
     # ── Health / jobs ─────────────────────────────────────────────────────
 
     @app.get("/healthz")
@@ -170,14 +186,11 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             raise AdminError(400, "Vod data already exists")
         video = await helix_video(body["vodId"])
         await upsert_vod(video)
-        async with get_sessionmaker()() as s:
-            await s.execute(
-                update(Vod)
-                .where(Vod.id == video["id"])
-                .values(duration=format_hhmmss(parse_helix_duration(video.get("duration", ""))),
-                        thumbnail_url=video.get("thumbnail_url"))
-            )
-            await s.commit()
+        await execute(
+            update(Vod)
+            .where(Vod.id == video["id"])
+            .values(duration=_helix_hhmmss(video), thumbnail_url=video.get("thumbnail_url"))
+        )
         await enqueue("chapters", video["id"])
         job = await enqueue("emotes", video["id"])
         return _ok(f"Created vod {video['id']}", job)
@@ -187,7 +200,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         _require(body, "vodId", "title", "createdAt", "duration")
         if await vod_exists(body["vodId"]):
             raise AdminError(400, f"{body['vodId']} already exists!")
-        created = dt.datetime.fromisoformat(str(body["createdAt"]).replace("Z", "+00:00"))
+        created = dt.datetime.fromisoformat(str(body["createdAt"]))
         async with get_sessionmaker()() as s:
             s.add(
                 Vod(
@@ -218,10 +231,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         _require(body, "vodId")
         await require_vod(body["vodId"])
         video = await helix_video(body["vodId"])
-        duration = format_hhmmss(parse_helix_duration(video.get("duration", "")))
-        async with get_sessionmaker()() as s:
-            await s.execute(update(Vod).where(Vod.id == str(body["vodId"])).values(duration=duration))
-            await s.commit()
+        duration = _helix_hhmmss(video)
+        await execute(update(Vod).where(Vod.id == str(body["vodId"])).values(duration=duration))
         return _ok("Saved duration!", duration=duration)
 
     # ── Download / upload pipelines ───────────────────────────────────────
@@ -231,11 +242,10 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         """Download the whole VOD (or use ``path``), split, upload. Optional part range."""
         _require(body, "vodId")
         vod = await require_vod(body["vodId"])
-        t = vtype(body)
-        payload = await type_payload(vod, t)
-        for src, dst in (("path", "path"), ("startPart", "start_part"), ("endPart", "end_part")):
+        payload = await source_payload(vod, body)
+        for src, dst in (("startPart", "start_part"), ("endPart", "end_part")):
             if body.get(src) not in (None, ""):
-                payload[dst] = int(body[src]) if dst != "path" else body[src]
+                payload[dst] = int(body[src])
         job = await enqueue("download", vod.id, payload)
         await enqueue("emotes", vod.id)
         return _ok("Starting download..", job)
@@ -256,11 +266,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def reupload(body: dict = Body(...)) -> dict:
         _require(body, "vodId", "part")
         vod = await require_vod(body["vodId"])
-        payload = await type_payload(vod, vtype(body))
-        part = int(body["part"])
-        payload.update(start_part=part, end_part=part)
-        if body.get("path"):
-            payload["path"] = body["path"]
+        payload = await source_payload(vod, body)
+        part = single_part(payload, body)
         job = await enqueue("reupload", vod.id, payload)
         return _ok(f"Re-uploading {vod.id} part {part}..", job)
 
@@ -268,10 +275,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def dmca(body: dict = Body(...)) -> dict:
         _require(body, "vodId", "receivedClaims")
         vod = await require_vod(body["vodId"])
-        payload = await type_payload(vod, vtype(body))
+        payload = await source_payload(vod, body)
         payload["claims"] = body["receivedClaims"]
-        if body.get("path"):
-            payload["path"] = body["path"]
         job = await enqueue("dmca", vod.id, payload)
         return _ok(f"Muting the DMCA content for {vod.id}...", job)
 
@@ -279,11 +284,9 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def part_dmca(body: dict = Body(...)) -> dict:
         _require(body, "vodId", "part", "receivedClaims")
         vod = await require_vod(body["vodId"])
-        payload = await type_payload(vod, vtype(body))
-        part = int(body["part"])
-        payload.update(claims=body["receivedClaims"], start_part=part, end_part=part)
-        if body.get("path"):
-            payload["path"] = body["path"]
+        payload = await source_payload(vod, body)
+        payload["claims"] = body["receivedClaims"]
+        part = single_part(payload, body)
         job = await enqueue("part_dmca", vod.id, payload)
         return _ok(f"Trimming DMCA Content from {vod.id} Vod Part {part}", job)
 
