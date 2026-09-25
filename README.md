@@ -34,7 +34,7 @@ flowchart LR
 **How it differs from the old Node app:**
 
 - **Twitch download is up to date.** It uses the new `PlaybackAccessToken` hash, the usher `/vod/v2/` playlists, and the chunked → 1080p fallback on 403. fMP4 init segments are handled. All GQL hashes and client IDs are settings, so the next Twitch rotation is a config change.
-- **Jobs are durable.** Every job is a list of steps, and progress is stored in Postgres (the `jobs` table). A restart or crash resumes a job at the step it was on. Failed steps are retried with backoff (3 attempts).
+- **Jobs are durable.** Every job is a list of steps, and progress is stored in Postgres (the `jobs` table). A restart or crash resumes a job at the first unfinished step; finished steps never run again. Failed steps are retried with backoff (3 attempts).
 - **No Redis.** Caches and the rate limiter live in process memory.
 - **No config file writes.** The YouTube OAuth token is kept in the `app_state` table.
 - **Fixed bugs:** `/v2/badges` (it crashed on every request), `$select`, `chapters[name]` (regex injection, and it now combines with other filters), duplicate `streams` inserts, reupload offsets, and splitting VODs that have no chapters.
@@ -133,6 +133,7 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_YOUTUBE_DESCRIPTION` | `VOD` | Last line of every description |
 | `ARCHIVE_YOUTUBE_KEEPALIVE_HOURS` | `24` | How often the worker refreshes the YouTube token; see [§3](#3-youtube-oauth-setup) |
 | `ARCHIVE_RESTRICTED_GAMES` | `[]` | Chapters of these games are left out of uploads |
+| `ARCHIVE_MANUAL_STEPS` | `{}` | Steps a job pauses before until you resume it, per job kind, e.g. `{"archive":["upload"]}`; see [Manual steps](#manual-steps) |
 | `ARCHIVE_SPLIT_DURATION` | `10800` | Maximum YouTube part length in seconds |
 | `ARCHIVE_KEEP_HLS` / `ARCHIVE_KEEP_MP4` | `false` | Keep files after upload |
 | `ARCHIVE_DRY_RUN` | `false` | Same as `run --dry-run` |
@@ -208,13 +209,28 @@ H=(-H "Authorization: Bearer $KEY" -H "Content-Type: application/json")
 ### Jobs
 
 ```bash
-curl -s "${H[@]}" "$A/admin/jobs"                       # latest 50; filters: ?state=failed&vodId=...&limit=
-curl -s "${H[@]}" "$A/admin/jobs/42"                    # one job: step, attempts, lastError, payload
+curl -s "${H[@]}" "$A/admin/jobs"                       # latest 50 plus counts per state; filters below
+curl -s "${H[@]}" "$A/admin/jobs?state=running,stopped" # states and/or groups, comma-separated
+curl -s "${H[@]}" "$A/admin/jobs?kind=archive&vodId=...&limit=100"
+curl -s "${H[@]}" "$A/admin/jobs/42"                    # one job: step, steps, attempts, lastError, payload
+curl -s "${H[@]}" "$A/admin/kinds"                      # every job kind, its steps and its manual steps
+curl -s "${H[@]}" -X POST "$A/admin/jobs" -d '{"kind":"download","vodId":"...","payload":{"type":"vod"}}'
+curl -s "${H[@]}" -X POST "$A/admin/jobs/42/pause"      # queued: now; running: when the current step ends
+curl -s "${H[@]}" -X POST "$A/admin/jobs/42/resume"     # run a paused job from its current step
+curl -s "${H[@]}" -X POST "$A/admin/jobs/42/resume" -d '{"once":true}'   # run one step, then pause again
 curl -s "${H[@]}" -X POST "$A/admin/jobs/42/retry"      # re-queue a failed job from the step it failed on
-curl -s "${H[@]}" -X POST "$A/admin/jobs/42/cancel"     # only queued jobs can be cancelled
+curl -s "${H[@]}" -X POST "$A/admin/jobs/42/cancel"     # queued/paused: now; running: stops mid-step
 ```
 
-Job states are `queued`, `running`, `done`, `failed` and `cancelled`. A job whose step fails is retried after 2 minutes, then again after 4 minutes. On its third failure it is marked `failed` and keeps its files, so `retry` picks up from the same step.
+Job states are `queued`, `running`, `paused`, `done`, `failed` and `cancelled`. The `state` filter also takes groups: `waiting` (`queued`, including jobs waiting out a retry backoff), `stopped` (`paused`, `failed`, `cancelled`: they need you), `active` (`queued`, `running`, `paused`) and `finished` (`done`, `failed`, `cancelled`). A job whose step fails is retried after 2 minutes, then again after 4 minutes. On its third failure it is marked `failed` and keeps its files, so `retry` picks up from the same step. Cancelling a running job stops it immediately; the step's partial files stay on disk.
+
+`POST /admin/jobs` starts any kind directly. Body fields: `kind` (required), `vodId`, `payload` (the same keys the specific routes put there, e.g. `type`, `stream_id`, `path`, `start_part`), `fromStep` (skip the steps before it), `pauseBefore` (this job's manual steps, see below) and `paused` (create it paused).
+
+#### Manual steps
+
+A job can stop before chosen steps and wait for you. `ARCHIVE_MANUAL_STEPS` sets them per kind for every job, including the ones the monitor starts, e.g. `{"archive":["upload"],"live":["upload"]}` archives and splits automatically but leaves every upload for you to approve. A job's own `pauseBefore` (from `POST /admin/jobs`) replaces the setting for that job; `[]` means no manual steps. The worker refuses to start if the setting names an unknown kind or step.
+
+When a job reaches a manual step it becomes `paused` at that step. Look at it (`GET /admin/jobs?state=paused`), then `resume` it, `resume` with `{"once":true}` to run just that step, or `cancel` it. Steps that already finished are never re-run, so resuming continues exactly where it stopped.
 
 Job kinds and their steps:
 
@@ -455,7 +471,7 @@ Pushes and pull requests run CI (`.github/workflows/tests.yml`): the unit tests 
 packages/common/archive_common/   settings, DB models, Twitch Helix/GQL clients, http helper
 services/api/archive_api/         FastAPI app, Feathers query parser, serializers, comments port
 services/worker/archive_worker/   monitor, job runner, steps/, hls, ffmpeg, youtube, admin API
-migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes)
+migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before, 0003 manual step control)
 tests/api_contract/               golden responses from the legacy API + replay tests
 tests/worker/                     HLS parsing, planning, capture (respx), ffmpeg, DB-backed steps/runner
 deploy/                           roles.sql, example secrets
@@ -478,6 +494,6 @@ uv run python tests/api_contract/capture_golden.py http://legacy-host:3030
 Then restore a matching dump locally (`pg_dump -Fc archive` on the server, then `pg_restore` as in §1) so the replay compares against the same data.
 
 **Conventions:**
-- Steps must be idempotent. They store their progress in `ctx.payload` and call `ctx.save()`.
+- The runner saves `ctx.payload` after each step returns, so a finished step is never re-run. A step interrupted part-way is re-run, so long steps save their own progress in `ctx.payload` with `ctx.save()` and skip work already done.
 - Every ffmpeg output is written to `*.part` and renamed on success.
 - Pure logic lives in `planning.py` and `hls.py`, so it can be tested without I/O.
