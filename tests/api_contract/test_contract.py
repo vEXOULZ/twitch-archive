@@ -23,33 +23,32 @@ KNOWN_DIFFERENCES = {
 }
 
 
+# Fields added for the new sites. Legacy responses never had them; everything else must match.
+ADDED_VOD_FIELDS = {"duration_seconds"}
+ADDED_CHAPTER_FIELDS = {"imageTemplate", "length"}
+
+
+def _without_additions(node):
+    """``node`` with the added vod/chapter fields removed (vods may be nested, e.g. games[].vod)."""
+    if isinstance(node, list):
+        return [_without_additions(v) for v in node]
+    if not isinstance(node, dict):
+        return node
+    out = {k: _without_additions(v) for k, v in node.items() if k not in ADDED_VOD_FIELDS}
+    if isinstance(node.get("chapters"), list):
+        out["chapters"] = [
+            {k: v for k, v in c.items() if k not in ADDED_CHAPTER_FIELDS} if isinstance(c, dict) else c
+            for c in node["chapters"]
+        ]
+    return out
+
+
+def test_golden_has_no_added_fields() -> None:
+    assert _without_additions(GOLDEN) == GOLDEN
+
+
 def _is_unordered_list(path: str) -> bool:
     return "$sort" not in urlsplit(path).query
-
-
-@pytest.fixture(scope="module")
-async def client():
-    from archive_common.config import Settings, get_settings
-
-    get_settings.cache_clear()
-    settings = get_settings()
-    settings.rate_limit_points = 1_000_000
-    try:
-        import sqlalchemy
-        from archive_common.db import get_engine
-
-        async with get_engine().connect() as conn:
-            await conn.execute(sqlalchemy.text("select 1"))
-    except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"database unavailable: {exc}")
-
-    from archive_api.main import create_app
-
-    app = create_app(settings)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-    assert isinstance(settings, Settings)
 
 
 @pytest.mark.parametrize("entry", GOLDEN, ids=[e["path"][:90] for e in GOLDEN])
@@ -59,7 +58,7 @@ async def test_golden(client: httpx.AsyncClient, entry: dict) -> None:
         pytest.skip("intentional deviation from legacy behaviour")
     resp = await client.get(path)
     assert resp.status_code == entry["status"], resp.text[:500]
-    body = resp.json()
+    body = _without_additions(resp.json())
     expected = entry["body"]
 
     if resp.status_code >= 400:

@@ -27,8 +27,11 @@ from archive_common.twitch.helix import Helix
 
 from .comments import Comments
 from .errors import FeathersError, LegacyError, legacy_error
-from .middleware import GZIP_MIN_SIZE, RateLimiter, ResponseCache, client_ip
+from .games_played import games_played
+from .middleware import GZIP_MIN_SIZE, JsonBody, RateLimiter, ResponseCache, client_ip
 from .services import build_services
+from .status import stream_status
+from .third_party_emotes import fetch_third_party_emotes
 
 log = logging.getLogger("archive_api")
 
@@ -44,6 +47,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     service_cache = ResponseCache(settings.cache_ttl_seconds)
     comments = Comments(ResponseCache(300), ResponseCache(24 * 3600))
     badges_cache = ResponseCache(3600, maxsize=4)
+    status_cache = ResponseCache(45, maxsize=1)
+    # A complete emote list is kept for hours; one with a failed provider is retried sooner.
+    emotes_cache, emotes_partial_cache = ResponseCache(6 * 3600, maxsize=1), ResponseCache(300, maxsize=1)
     limiter = RateLimiter(settings.rate_limit_points, settings.rate_limit_window_seconds)
     helix = Helix(settings)
 
@@ -135,6 +141,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     for name in SERVICES:
         register(name)
+
+    # ── Additions for the new sites (not in the legacy API) ───────────────
+
+    @app.get("/v1/games-played")
+    async def games_played_route(request: Request):
+        async def fetch() -> list[dict]:
+            async with engine.connect() as conn:
+                return await games_played(conn)
+
+        return (await service_cache.get_or_render("v1/games-played", fetch)).response(request)
+
+    @app.get("/v1/status")
+    async def status_route(request: Request):
+        async def fetch() -> dict:
+            async with engine.connect() as conn:
+                return await stream_status(conn, helix, settings.twitch_id)
+
+        return (await status_cache.get_or_render("status", fetch)).response(request)
+
+    @app.get("/v1/emotes/third-party")
+    async def third_party_emotes(request: Request):
+        body = emotes_cache.get("emotes") or emotes_partial_cache.get("emotes")
+        if body is None:
+            value = await fetch_third_party_emotes(settings.twitch_id)
+            body = JsonBody(value)
+            (emotes_partial_cache if value["failed"] else emotes_cache).set("emotes", body)
+        return body.response(request)
 
     # ── Chat replay ───────────────────────────────────────────────────────
 
