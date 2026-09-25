@@ -56,6 +56,7 @@ def _job_json(job: Job) -> dict:
         "attempts": job.attempts,
         "lastError": job.last_error,
         "payload": job.payload,
+        "notBefore": job.not_before.isoformat() if job.not_before else None,
         "createdAt": job.created_at.isoformat() if job.created_at else None,
         "updatedAt": job.updated_at.isoformat() if job.updated_at else None,
     }

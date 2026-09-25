@@ -130,6 +130,8 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
     s = ctx.settings
     helix = ctx.deps.helix
     vod_id = ctx.require_vod_id()
+    # ensure_source runs this inside its own step; the flag stops a retry of that
+    # step from capturing again.
     if ctx.payload.get("capture_done"):
         return
     last_sig = None
@@ -221,8 +223,6 @@ def _load_entries(path: Path) -> list[tuple[str, float, bool]]:
 
 async def live_record(ctx: JobContext) -> None:
     """Record the live stream (pre-mute audio), skipping Twitch ad segments."""
-    if ctx.payload.get("capture_done"):
-        return
     s = ctx.settings
     login = ctx.payload.get("login") or s.twitch_username
     d = ctx.hls_dir
@@ -311,8 +311,6 @@ async def live_record(ctx: JobContext) -> None:
     playlist = hls.write_local_playlist(entries, init_name=init_name)
     (d / "index.m3u8").write_text(playlist, encoding="utf-8")
     ctx.payload["fmp4"] = bool(init_name)
-    ctx.payload["capture_done"] = True
-    await ctx.save()
     ctx.log.info("live recording finished: %d segments", len(entries))
 
 

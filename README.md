@@ -34,7 +34,7 @@ flowchart LR
 **How it differs from the old Node app:**
 
 - **Twitch download is up to date.** It uses the new `PlaybackAccessToken` hash, the usher `/vod/v2/` playlists, and the chunked → 1080p fallback on 403. fMP4 init segments are handled. All GQL hashes and client IDs are settings, so the next Twitch rotation is a config change.
-- **Jobs are durable.** Every job is a list of steps, and progress is stored in Postgres (the `jobs` table). A restart or crash resumes a job at the step it was on. Failed steps are retried with backoff (3 attempts).
+- **Jobs are durable.** Every job is a list of steps, and progress is stored in Postgres (the `jobs` table). A restart or crash resumes a job at the first unfinished step; finished steps never run again. Failed steps are retried with backoff (3 attempts).
 - **No Redis.** Caches and the rate limiter live in process memory.
 - **No config file writes.** The YouTube OAuth token is kept in the `app_state` table.
 - **Fixed bugs:** `/v2/badges` (it crashed on every request), `$select`, `chapters[name]` (regex injection, and it now combines with other filters), duplicate `streams` inserts, reupload offsets, and splitting VODs that have no chapters.
@@ -455,7 +455,7 @@ Pushes and pull requests run CI (`.github/workflows/tests.yml`): the unit tests 
 packages/common/archive_common/   settings, DB models, Twitch Helix/GQL clients, http helper
 services/api/archive_api/         FastAPI app, Feathers query parser, serializers, comments port
 services/worker/archive_worker/   monitor, job runner, steps/, hls, ffmpeg, youtube, admin API
-migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes)
+migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before)
 tests/api_contract/               golden responses from the legacy API + replay tests
 tests/worker/                     HLS parsing, planning, capture (respx), ffmpeg, DB-backed steps/runner
 deploy/                           roles.sql, example secrets
@@ -478,6 +478,6 @@ uv run python tests/api_contract/capture_golden.py http://legacy-host:3030
 Then restore a matching dump locally (`pg_dump -Fc archive` on the server, then `pg_restore` as in §1) so the replay compares against the same data.
 
 **Conventions:**
-- Steps must be idempotent. They store their progress in `ctx.payload` and call `ctx.save()`.
+- The runner saves `ctx.payload` after each step returns, so a finished step is never re-run. A step interrupted part-way is re-run, so long steps save their own progress in `ctx.payload` with `ctx.save()` and skip work already done.
 - Every ffmpeg output is written to `*.part` and renamed on success.
 - Pure logic lives in `planning.py` and `hls.py`, so it can be tested without I/O.

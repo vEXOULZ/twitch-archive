@@ -122,7 +122,7 @@ async def test_live_record_skips_ads_and_handles_rollover(make_ctx, settings, mo
     await cap.live_record(ctx)
 
     assert not ad.called
-    assert ctx.payload["capture_done"] and ctx.payload["last_seq"] == 13
+    assert ctx.payload["last_seq"] == 13
     text = (ctx.hls_dir / "index.m3u8").read_text()
     names = [line for line in text.splitlines() if line.endswith(".ts")]
     assert names == ["000000010.ts", "000000011.ts", "000000013.ts"]
