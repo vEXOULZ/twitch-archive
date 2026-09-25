@@ -116,12 +116,10 @@ async def dmca_edit(ctx: JobContext) -> None:
     edited: list[Path] = []
     for src in targets:
         cur = src
-        for i, (a, b) in enumerate(plan.blackout):
-            nxt = work / f"{src.stem}-black{i}.mp4"
-            ctx.log.info("blackout %s %.0f-%.0f", src.name, a, b)
-            await ffmpeg.blackout(cur, nxt, a, b, work)
-            if cur != src:
-                cur.unlink(missing_ok=True)
+        if plan.blackout:
+            nxt = work / f"{src.stem}-black.mp4"
+            ctx.log.info("blackout %s: %s", src.name, ", ".join(f"{a:.0f}-{b:.0f}" for a, b in plan.blackout))
+            await ffmpeg.blackout(cur, nxt, plan.blackout, work)
             cur = nxt
         if plan.mute:
             nxt = work / f"{src.stem}-muted.mp4"

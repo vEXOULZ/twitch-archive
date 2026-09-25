@@ -71,22 +71,39 @@ async def hls_to_mp4(playlist: Path, out: Path, *, fmp4: bool = False) -> Path:
     )
 
 
-async def cut(src: Path, out: Path, start: float, duration: float) -> Path:
-    """Stream-copy ``duration`` seconds starting at ``start``.
+# Input seeking (``-ss`` before ``-i``) jumps straight to a keyframe; output seeking
+# (``-ss`` after ``-i``) then trims exactly, but reads every packet before its target.
+# Seeking in two stages gets both: the jump lands SEEK_MARGIN seconds early, well
+# over Twitch's 2 s keyframe interval, and the exact trim only reads that margin.
+# With stream copy the result is packet-for-packet identical to output seeking alone.
+SEEK_MARGIN = 30.0
 
-    ``-ss`` after ``-i`` (output seeking) avoids the seek artefacts upstream saw
-    with input seeking; ``-t`` is a length, not an end timestamp.
+
+def _seek_args(src: Path, start: float) -> list[str]:
+    """Input arguments that start reading ``src`` at ``start`` seconds."""
+    if start <= 0:
+        return ["-i", str(src)]
+    margin = min(SEEK_MARGIN, start)
+    return ["-ss", f"{start - margin:.3f}", "-i", str(src), "-ss", f"{margin:.3f}"]
+
+
+async def cut(src: Path, out: Path, start: float, duration: float | None = None, *,
+              faststart: bool = True) -> Path:
+    """Stream-copy ``duration`` seconds (default: to the end) starting at ``start``.
+
+    ``faststart=False`` skips the second pass that moves the index to the front,
+    for intermediate files that are only joined again.
     """
+    length = ["-t", f"{duration:.3f}"] if duration is not None else []  # a length, not an end
     return await _ffmpeg_to(
         out,
         [
-            "-i", str(src),
-            "-ss", f"{start:.3f}",
-            "-t", f"{duration:.3f}",
+            *_seek_args(src, start),
+            *length,
             "-map", "0",
             "-c", "copy",
             "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
+            *(["-movflags", "+faststart"] if faststart else []),
         ],
     )
 
@@ -101,38 +118,41 @@ async def mute(src: Path, out: Path, ranges: list[tuple[float, float]]) -> Path:
     )
 
 
-async def blackout(src: Path, out: Path, start: float, end: float, work: Path) -> Path:
-    """Replace video in [start, end) with black, keeping audio.
+async def blackout(src: Path, out: Path, ranges: list[tuple[float, float]], work: Path) -> Path:
+    """Replace video in each [start, end) range with black, keeping audio, in one pass.
 
-    Only the claimed clip is re-encoded; head and tail are stream-copied and the
-    three pieces are joined with the concat demuxer (as the legacy code did).
+    Only the claimed clips are re-encoded; the stretches around them are
+    stream-copied, and all pieces are joined once with the concat demuxer (as the
+    legacy code did per range). ``ranges`` must be sorted and non-overlapping, as
+    ``planning.plan_dmca`` returns them.
     """
     work.mkdir(parents=True, exist_ok=True)
-    head, clip, tail = work / "bo-head.mp4", work / "bo-clip.mp4", work / "bo-tail.mp4"
-    pieces: list[Path] = []
-    if start > 0:
-        await _ffmpeg_to(head, ["-i", str(src), "-t", f"{start:.3f}", "-map", "0", "-c", "copy"])
-        pieces.append(head)
-    await _ffmpeg_to(
-        clip,
-        [
-            "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{end - start:.3f}", "-map", "0",
-            "-vf", "geq=0:128:128", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
-            "-c:a", "copy",
-        ],
-    )
-    pieces.append(clip)
     total = await probe_duration(src)
-    if end < total - 0.05:
-        await _ffmpeg_to(tail, ["-i", str(src), "-ss", f"{end:.3f}", "-map", "0", "-c", "copy",
-                                "-avoid_negative_ts", "make_zero"])
-        pieces.append(tail)
-    listing = work / "bo-list.txt"
-    listing.write_text("".join(f"file '{p.as_posix()}'\n" for p in pieces), encoding="utf-8")
+    pieces: list[Path] = []
+    pos = 0.0
     try:
+        for i, (start, end) in enumerate(ranges):
+            if start > pos:
+                pieces.append(await cut(src, work / f"bo-{i}-copy.mp4", pos, start - pos, faststart=False))
+            pieces.append(
+                await _ffmpeg_to(
+                    work / f"bo-{i}-black.mp4",
+                    [
+                        "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{end - start:.3f}", "-map", "0",
+                        "-vf", "geq=0:128:128", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+                        "-c:a", "copy",
+                    ],
+                )
+            )
+            pos = end
+        if pos < total - 0.05:
+            pieces.append(await cut(src, work / "bo-tail.mp4", pos, faststart=False))
+        listing = work / "bo-list.txt"
+        listing.write_text("".join(f"file '{p.as_posix()}'\n" for p in pieces), encoding="utf-8")
+        pieces.append(listing)
         return await _ffmpeg_to(
             out, ["-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", "-movflags", "+faststart"]
         )
     finally:
-        for p in (*pieces, listing):
+        for p in pieces:
             p.unlink(missing_ok=True)

@@ -27,13 +27,17 @@ async def test_probe_and_cut(clip, tmp_path):
     part = await ffmpeg.cut(clip, tmp_path / "p2.mp4", 5, 4)
     assert abs(await ffmpeg.probe_duration(part) - 4) < 1.1
     assert not (tmp_path / "p2.mp4.part").exists()
+    tail = await ffmpeg.cut(clip, tmp_path / "tail.mp4", 7)  # no duration: to the end
+    assert abs(await ffmpeg.probe_duration(tail) - 5) < 1.1
 
 
 async def test_mute_and_blackout_keep_length(clip, tmp_path):
     muted = await ffmpeg.mute(clip, tmp_path / "m.mp4", [(1, 3), (6, 7)])
     assert abs(await ffmpeg.probe_duration(muted) - 12) < 0.3
-    black = await ffmpeg.blackout(clip, tmp_path / "b.mp4", 4, 6, tmp_path / "work")
+    black = await ffmpeg.blackout(clip, tmp_path / "b.mp4", [(4, 6)], tmp_path / "work")
     assert abs(await ffmpeg.probe_duration(black) - 12) < 1.1
+    many = await ffmpeg.blackout(clip, tmp_path / "b2.mp4", [(0, 1), (4, 6), (9, 12)], tmp_path / "work")
+    assert abs(await ffmpeg.probe_duration(many) - 12) < 1.1
     assert not list((tmp_path / "work").glob("bo-*"))
 
 
