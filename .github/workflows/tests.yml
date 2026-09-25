@@ -6,6 +6,17 @@ on:
   pull_request:
 
 jobs:
+  branch-name:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Conventional Branch
+        # Through the environment, never interpolated into the script: a branch name is user input.
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: .githooks/check-branch-name.sh "$BRANCH"
+
   pytest:
     runs-on: ubuntu-latest
     steps:
