@@ -35,14 +35,14 @@ def level_name(levelno: int) -> str:
     return "info"
 
 
-def _iso(value: dt.datetime) -> str:
-    return value.astimezone(dt.timezone.utc).isoformat()
+def iso_utc(value: dt.datetime | None) -> str | None:
+    return value.astimezone(dt.timezone.utc).isoformat() if value else None
 
 
 def event_json(event: JobEvent) -> dict[str, Any]:
     return {
         "seq": event.id,
-        "at": _iso(event.at),
+        "at": iso_utc(event.at),
         "level": event.level,
         "step": event.step,
         "message": event.message,

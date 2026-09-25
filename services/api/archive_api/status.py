@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from archive_common.serialize import STREAMS, VODS, attach_games, box_art_template
+from archive_common.serialize import STREAMS, VODS, attach_games, box_art_image, box_art_template
 from archive_common.twitch.helix import Helix
 
 
@@ -51,7 +51,7 @@ async def _helix_stream(helix: Helix, twitch_id: str, stream_id: str) -> dict | 
         image = None
         if game_id:
             box_art = ((await helix.get_game(game_id)) or {}).get("box_art_url")
-            image = box_art.replace("{width}x{height}", "40x53") if box_art else None
+            image = box_art_image(box_art)
         return {"title": live.get("title"), "game": _game(live.get("game_name") or None, game_id, image)}
     except httpx.HTTPError as exc:
         log.warning("failed to fetch the live stream from Helix: %s", exc)

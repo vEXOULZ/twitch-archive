@@ -100,6 +100,13 @@ def box_art_template(url: str | None) -> str | None:
     return _BOX_ART_SIZE_RE.sub(r"-{width}x{height}\1", url)
 
 
+def box_art_image(template: str | None) -> str | None:
+    """Helix ``box_art_url`` template -> the 40x53 image stored in chapters (inverse of ``box_art_template``)."""
+    if not template:
+        return None
+    return template.replace("{width}", "40").replace("{height}", "53")
+
+
 def duration_seconds(value: str | None) -> int | None:
     try:
         return hhmmss_to_seconds(value) if value else None

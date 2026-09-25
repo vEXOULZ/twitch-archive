@@ -31,12 +31,13 @@ from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds, parse_heli
 from . import jobs, vod_edits, youtube
 from .admin_auth import CSRF_HEADER, SESSION_COOKIE, AdminAuth, LoginLimiter, Session, client_address, parse_networks
 from .context import Deps
-from .events import JobEvents, event_json
+from .events import event_json, iso_utc
 from .vods import upsert_vod
 
 log = logging.getLogger(__name__)
 
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+SESSION_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite": "strict"}
 AUDITED_PREFIXES = ("/admin/", "/v2/")
 YOUTUBE_CHECK_MAX_AGE = 600  # /admin/health refreshes the YouTube token at most this often
 RECENT_JOBS = 20  # jobs shown with a VOD
@@ -85,12 +86,8 @@ def _helix_hhmmss(video: dict) -> str:
     return format_hhmmss(parse_helix_duration(video.get("duration", "")))
 
 
-def _iso(value: dt.datetime | None) -> str | None:
-    return value.astimezone(dt.timezone.utc).isoformat() if value else None
-
-
 def _audit_json(row: AdminAudit) -> dict:
-    return {"id": row.id, "at": _iso(row.at), "actor": row.actor, "action": row.action,
+    return {"id": row.id, "at": iso_utc(row.at), "actor": row.actor, "action": row.action,
             "target": row.target, "detail": row.detail}
 
 
@@ -104,12 +101,12 @@ def _job_json(job: Job) -> dict:
         "attempts": job.attempts,
         "lastError": job.last_error,
         "payload": job.payload,
-        "notBefore": job.not_before.isoformat() if job.not_before else None,
+        "notBefore": iso_utc(job.not_before),
         "pauseBefore": job.pause_before,
         "pauseNext": job.pause_next,
         "steps": jobs.KINDS.get(job.kind, []),
-        "createdAt": job.created_at.isoformat() if job.created_at else None,
-        "updatedAt": job.updated_at.isoformat() if job.updated_at else None,
+        "createdAt": iso_utc(job.created_at),
+        "updatedAt": iso_utc(job.updated_at),
     }
 
 
@@ -127,8 +124,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     passwords = AdminAuth(settings.admin_password.get_secret_value() or None)
     login_limiter = LoginLimiter()
     trusted_proxies = parse_networks(settings.admin_trusted_proxies)
-    if deps.events is None:
-        deps.events = JobEvents()
     events = deps.events
     started_at = dt.datetime.now(dt.timezone.utc)
 
@@ -199,12 +194,9 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         return {
             "authenticated": session is not None,
             "csrf": session.csrf if session else None,
-            "expiresAt": _iso(dt.datetime.fromtimestamp(session.expires_at, dt.timezone.utc)) if session else None,
+            "expiresAt": iso_utc(dt.datetime.fromtimestamp(session.expires_at, dt.timezone.utc)) if session else None,
             "passwordLogin": passwords.enabled,
         }
-
-    def cookie_args() -> dict:
-        return {"path": "/", "secure": True, "httponly": True, "samesite": "strict"}
 
     @app.get("/admin/session")
     async def get_session(request: Request) -> dict:
@@ -230,7 +222,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         session = passwords.login()
         request.state.actor = "password"
         response = JSONResponse(session_json(session))
-        response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **cookie_args())
+        response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **SESSION_COOKIE_ARGS)
         return response
 
     @app.delete("/admin/session", status_code=204)
@@ -243,7 +235,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             passwords.logout(token)
             request.state.actor = "password"
         response = Response(status_code=204)
-        response.delete_cookie(SESSION_COOKIE, **cookie_args())
+        response.delete_cookie(SESSION_COOKIE, **SESSION_COOKIE_ARGS)
         return response
 
     def job_action(msg: str, job: Job) -> dict:
@@ -322,36 +314,37 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def health() -> dict:
         """One call for the dashboard's status bar. The YouTube token is refreshed at
         most every 10 minutes here; /admin/youtube/status always refreshes it."""
-        db_ok = True
-        counts: dict[str, int] = {}
-        failures: list[Job] = []
-        live: Stream | None = None
-        try:
-            async with get_sessionmaker()() as s:
-                counts = dict((await s.execute(select(Job.state, func.count()).group_by(Job.state))).all())
-                failures = list((await s.execute(
-                    select(Job).where(Job.state == "failed").order_by(Job.updated_at.desc(), Job.id.desc()).limit(5)
-                )).scalars())
-                live = (await s.execute(
-                    select(Stream).where(Stream.is_live.is_(True)).order_by(Stream.started_at.desc()).limit(1)
-                )).scalar_one_or_none()
-        except Exception:
-            log.exception("health: database query failed")
-            db_ok = False
-        api, yt = await asyncio.gather(api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE))
+        async def db_state() -> tuple[dict[str, int], list[Job], Stream | None] | None:
+            try:
+                async with get_sessionmaker()() as s:
+                    counts = dict((await s.execute(select(Job.state, func.count()).group_by(Job.state))).all())
+                    failures = list((await s.execute(
+                        select(Job).where(Job.state == "failed").order_by(Job.updated_at.desc(), Job.id.desc()).limit(5)
+                    )).scalars())
+                    live = (await s.execute(
+                        select(Stream).where(Stream.is_live.is_(True)).order_by(Stream.started_at.desc()).limit(1)
+                    )).scalar_one_or_none()
+                    return counts, failures, live
+            except Exception:
+                log.exception("health: database query failed")
+                return None
+
+        db, api, yt = await asyncio.gather(db_state(), api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE))
+        db_ok = db is not None
+        counts, failures, live = db or ({}, [], None)
         return {
-            "worker": {"ok": db_ok, "runningJobs": len(runner.running), "startedAt": _iso(started_at)},
+            "worker": {"ok": db_ok, "runningJobs": len(runner.running), "startedAt": iso_utc(started_at)},
             "api": {"ok": api},
             "youtube": {
                 "authorized": yt["authorized"],
                 "valid": yt["valid"],
                 "error": yt.get("error"),
-                "checkedAt": _iso(yt["checkedAt"]),
+                "checkedAt": iso_utc(yt["checkedAt"]),
             },
             "live": {
                 "live": live is not None,
                 "streamId": str(live.id) if live else None,
-                "startedAt": _iso(live.started_at) if live else None,
+                "startedAt": iso_utc(live.started_at) if live else None,
             },
             "jobs": {
                 "counts": {st: counts.get(st, 0) for st in jobs.STATES},
@@ -477,7 +470,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         """The job's log lines, step changes and progress, oldest first. Poll with
         ``after=<next>`` from the previous answer to get only what is new."""
         async with get_sessionmaker()() as s:
-            if await s.get(Job, job_id) is None:
+            if (await s.execute(select(Job.id).where(Job.id == job_id))).first() is None:
                 raise AdminError(404, "No such job")
         rows = await events.list(job_id, after=after, limit=min(max(limit, 1), 1000))
         return {"data": [event_json(e) for e in rows], "next": rows[-1].id if rows else after}

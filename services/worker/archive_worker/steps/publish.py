@@ -69,7 +69,7 @@ async def upload(ctx: JobContext) -> None:
             "duration": planning.num_seconds(await ffmpeg.probe_duration(path)),
             "part": part["number"],
             "thumbnail_url": (thumbs.get("medium") or {}).get("url")
-            or f"https://i.ytimg.com/vi/{res['id']}/mqdefault.jpg",
+            or planning.youtube_thumbnail(res["id"]),
         }
         await _save_entry(vod.id, entry)
         uploaded[key] = entry

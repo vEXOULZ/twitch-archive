@@ -56,7 +56,7 @@ class ResponseCache:
 
     def invalidate(self, stale: Callable[[str], bool]) -> None:
         """Drop every entry whose key ``stale`` accepts."""
-        for key in [k for k in list(self._cache.keys()) if stale(k)]:
+        for key in [k for k in self._cache if stale(k)]:
             self._cache.pop(key, None)
 
     def clear(self) -> None:

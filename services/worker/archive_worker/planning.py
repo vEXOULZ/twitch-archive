@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from archive_common.serialize import box_art_image
 from archive_common.timeutil import format_hhmmss
 
 # ── Chapters ──────────────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ def single_chapter(game: dict | None, box_art: str | None, vod_duration: float, 
     return {
         "gameId": game.get("id") if game else None,
         "name": name,
-        "image": box_art.replace("{width}x{height}", "40x53") if box_art else None,
+        "image": box_art_image(box_art),
         "duration": "00:00:00",
         "start": 0,
         "end": num_seconds(vod_duration),
@@ -182,6 +183,11 @@ def privacy(kind: str, public: bool, multi_track: bool) -> str:
     if public and ((multi_track and kind == "live") or (not multi_track and kind == "vod")):
         return "public"
     return "unlisted"
+
+
+def youtube_thumbnail(video_id: str) -> str:
+    """YouTube's default thumbnail, for when the API gave none."""
+    return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
 
 
 def upsert_youtube_entry(entries: list[dict] | None, entry: dict) -> list[dict]:

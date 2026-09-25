@@ -160,8 +160,7 @@ class YouTube:
         than ``max_age`` seconds. Cheap enough to call on every dashboard refresh."""
         async with self._check_lock:
             last = self.last_check
-            age = (dt.datetime.now(dt.timezone.utc) - last["checkedAt"]).total_seconds() if last else None
-            if age is None or age > max_age:
+            if last is None or (dt.datetime.now(dt.timezone.utc) - last["checkedAt"]).total_seconds() > max_age:
                 await self.check()
             return self.last_check
 
