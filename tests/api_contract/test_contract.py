@@ -23,6 +23,25 @@ KNOWN_DIFFERENCES = {
 }
 
 
+# Fields added after the golden capture, per route. Legacy consumers ignore them;
+# the replay checks they are present, then compares the rest field for field.
+ADDED_FIELDS = {
+    "/emotes": {"global_emotes", "global_emotes_source", "global_emotes_at"},
+}
+
+
+def _strip_added(path: str, body):
+    added = next((f for prefix, f in ADDED_FIELDS.items() if urlsplit(path).path.startswith(prefix)), None)
+    if not added or not isinstance(body, dict):
+        return body
+    items = body["data"] if "data" in body else [body]
+    for item in items:
+        assert added <= set(item), f"{path}: missing {added - set(item)}"
+        for key in added:
+            del item[key]
+    return body
+
+
 def _is_unordered_list(path: str) -> bool:
     return "$sort" not in urlsplit(path).query
 
@@ -61,6 +80,8 @@ async def test_golden(client: httpx.AsyncClient, entry: dict) -> None:
     assert resp.status_code == entry["status"], resp.text[:500]
     body = resp.json()
     expected = entry["body"]
+    if resp.status_code < 400:
+        body = _strip_added(path, body)
 
     if resp.status_code >= 400:
         # Legacy error bodies: compare the fields the frontend can observe.

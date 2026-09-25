@@ -244,6 +244,7 @@ Job kinds and their steps:
 | `dmca` | ensure_source → dmca_edit → split → upload → describe → cleanup | `/admin/dmca` |
 | `part_dmca` | ensure_source → split → dmca_edit → upload → describe → cleanup | `/admin/part/dmca` |
 | `chat`, `logs_manual`, `chapters`, `emotes`, `describe` | one step each | the matching admin routes |
+| `global_emotes_backfill` | one step | `/admin/emotes/backfill` |
 
 `ensure_source` uses `path` if one was given, otherwise the MP4 already on disk, otherwise it downloads the whole VOD from Twitch again (only while Twitch still has it).
 
@@ -300,9 +301,19 @@ Only blocking policies (`GLOBAL_BLOCK`, `MOSTLY_GLOBAL_BLOCK`, `BLOCK`) are acte
 curl -s "${H[@]}" -X POST "$A/admin/logs" -d '{"vodId":"..."}'                 # crawl chat again (resumes, skips duplicates)
 curl -s "${H[@]}" -X POST "$A/admin/logs/manual" -d '{"vodId":"...","path":"/data/manual/chat.json"}'  # {"comments":{"edges":[...]}}
 curl -s "${H[@]}" -X POST "$A/admin/chapters" -d '{"vodId":"..."}'
-curl -s "${H[@]}" -X POST "$A/admin/emotes" -d '{"vodId":"..."}'
+curl -s "${H[@]}" -X POST "$A/admin/emotes" -d '{"vodId":"..."}'                # fill missing emote sets only
+curl -s "${H[@]}" -X POST "$A/admin/emotes" -d '{"vodId":"...","force":true}'  # replace them with the current ones
 curl -s "${H[@]}" -X POST "$A/admin/duration" -d '{"vodId":"..."}'             # set duration from Helix
 curl -s "${H[@]}" -X POST "$A/admin/youtube/parts" -d '{"vodId":"...","type":"vod"}'  # rewrite descriptions
+```
+
+**Emote sets are history.** The `emotes` step saves the channel's FFZ, BTTV and 7TV sets plus the 7TV, BTTV and FFZ global sets (`global_emotes`) as they are when it runs. When the VOD already has a row, a re-run keeps what is saved and only fills sets that are empty; `force` overwrites everything with today's sets. Global sets filled in after the fact are marked `global_emotes_source: "backfilled"` instead of `"captured"`.
+
+**Backfill global emotes** on rows saved before they were captured (run once; running it again changes nothing). It gives those rows today's global sets and never touches the channel sets. It fails without writing anything if a provider does not answer:
+
+```bash
+curl -s "${H[@]}" -X POST "$A/admin/emotes/backfill"
+curl -s "${H[@]}" -X POST "$A/admin/emotes/backfill" -d '{"vodIds":["2375792832"]}'   # only these VODs
 ```
 
 `/admin/youtube/chapters` does the same as `/admin/youtube/parts`. Both rewrite every part's description from scratch: links to the other parts, the chat replay link, and the chapters inside that part.
@@ -361,7 +372,7 @@ This is what the frontend uses. The output is compatible with the old Feathers A
 |---|---|
 | `GET /vods` | Feathers envelope `{total, limit, skip, data}`. Each vod includes `games[]`. |
 | `GET /vods/:id` | Single vod, or a 404 in the Feathers error format. |
-| `GET /emotes?vod_id=` | `data[0]` has `ffz_emotes`, `bttv_emotes`, `7tv_emotes`. |
+| `GET /emotes?vod_id=` | `data[0]` has `ffz_emotes`, `bttv_emotes` (BTTV globals included), `7tv_emotes`, and `global_emotes` (`{"7tv": [...], "bttv": [...], "ffz": [...]}`, each `{id, code}`, 7TV also `flags`) with `global_emotes_source` (`captured` or `backfilled`) and `global_emotes_at`. The three `global_*` fields are `null` until the VOD is backfilled. |
 | `GET /games`, `/games/:id`, `/streams`, `/streams/:id`, `/emotes/:id` | Read-only. |
 | `GET /v1/vods/:id/comments?content_offset_seconds=N` | Chat replay. 200-row buckets plus a `cursor`. |
 | `GET /v1/vods/:id/comments?cursor=...` | Next page. |

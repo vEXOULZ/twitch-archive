@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from ..context import JobContext
 from . import capture
 from .media import cleanup, dmca_edit, ensure_source, finalize, resolve_vod, split
-from .metadata import chapters, chat, emotes, logs_manual
+from .metadata import chapters, chat, emotes, global_emotes_backfill, logs_manual
 from .publish import describe, upload
 
 Step = Callable[[JobContext], Awaitable[None]]
@@ -21,6 +21,7 @@ STEPS: dict[str, Step] = {
     "chapters": chapters,
     "chat": chat,
     "emotes": emotes,
+    "global_emotes_backfill": global_emotes_backfill,
     "logs_manual": logs_manual,
     "split": split,
     "dmca_edit": dmca_edit,

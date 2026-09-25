@@ -403,10 +403,23 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
 
     @app.post("/admin/emotes", dependencies=auth)
     async def emotes(body: dict = Body(...)) -> dict:
+        """Fill the VOD's missing emote sets; ``{"force": true}`` replaces the saved ones."""
         _require(body, "vodId")
         await require_vod(body["vodId"])
-        job = await enqueue("emotes", str(body["vodId"]))
-        return _ok("Saving emotes..", job)
+        force = body.get("force") is True
+        job = await enqueue("emotes", str(body["vodId"]), {"force": True} if force else None)
+        return _ok("Saving emotes (overwriting).." if force else "Saving emotes..", job)
+
+    @app.post("/admin/emotes/backfill", dependencies=auth)
+    async def emotes_backfill(body: dict | None = Body(None)) -> dict:
+        """Current global sets onto every emotes row that has none (optionally only ``vodIds``)."""
+        vod_ids = (body or {}).get("vodIds")
+        if vod_ids is not None and not (isinstance(vod_ids, list) and vod_ids):
+            raise AdminError(400, "vodIds must be a non-empty list")
+        if await jobs.find_active("global_emotes_backfill"):
+            raise AdminError(409, "A global emotes backfill is already running")
+        job = await enqueue("global_emotes_backfill", None, {"vod_ids": [str(v) for v in vod_ids]} if vod_ids else None)
+        return _ok("Backfilling global emotes..", job)
 
     @app.post("/admin/youtube/parts", dependencies=auth)
     @app.post("/admin/youtube/chapters", dependencies=auth)

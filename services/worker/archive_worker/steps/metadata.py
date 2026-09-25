@@ -7,11 +7,11 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from archive_common import http
-from archive_common.db import execute, get_sessionmaker
+from archive_common.db import get_sessionmaker
 from archive_common.models import Emote, Log, Vod
 from archive_common.timeutil import hhmmss_to_seconds, parse_ts
 
@@ -145,43 +145,132 @@ async def _json(url: str, ctx: JobContext):
         return None
 
 
-async def fetch_emotes(ctx: JobContext, twitch_id: str) -> dict[str, list[dict]]:
-    ffz_data, bttv_global, bttv_user, stv = await asyncio.gather(
-        _json(f"{FFZ}/room/id/{twitch_id}", ctx),
+def _7tv_emotes(emote_set: dict) -> list[dict]:
+    return [{"id": e["id"], "code": e["name"], "flags": e.get("flags")} for e in emote_set.get("emotes") or []]
+
+
+def _bttv_emotes(emotes: list) -> list[dict]:
+    return [{"id": e["id"], "code": e["code"]} for e in emotes]
+
+
+def _ffz_global_emotes(data: dict) -> list[dict]:
+    sets = data["sets"]
+    return [{"id": e["id"], "code": e["name"]} for sid in data["default_sets"] for e in sets[str(sid)]["emoticons"]]
+
+
+GLOBAL_PROVIDERS = ("7tv", "bttv", "ffz")
+
+
+async def fetch_global_emotes(ctx: JobContext) -> dict[str, list[dict]]:
+    """The providers' current global sets. A provider that fails gets an empty list."""
+    responses = await asyncio.gather(
+        _json(f"{SEVENTV}/emote-sets/global", ctx),
         _json(f"{BTTV}/cached/emotes/global", ctx),
+        _json(f"{FFZ}/set/global", ctx),
+    )
+    out: dict[str, list[dict]] = {}
+    for provider, parse, data in zip(GLOBAL_PROVIDERS, (_7tv_emotes, _bttv_emotes, _ffz_global_emotes), responses):
+        out[provider] = []
+        if data is None:
+            continue
+        try:
+            out[provider] = parse(data)
+        except Exception as exc:
+            ctx.log.warning("global %s emotes: unexpected response: %r", provider, exc)
+    return out
+
+
+async def fetch_emotes(ctx: JobContext, twitch_id: str) -> dict:
+    ffz_data, bttv_user, stv, global_emotes = await asyncio.gather(
+        _json(f"{FFZ}/room/id/{twitch_id}", ctx),
         _json(f"{BTTV}/cached/users/twitch/{twitch_id}", ctx),
         _json(f"{SEVENTV}/users/twitch/{twitch_id}", ctx),
+        fetch_global_emotes(ctx),
     )
     ffz: list[dict] = []
     if ffz_data:
         room_set = str(ffz_data["room"]["set"])
         ffz = [{"id": e["id"], "code": e["name"]} for e in ffz_data["sets"][room_set]["emoticons"]]
-    bttv = [{"id": e["id"], "code": e["code"]} for e in bttv_global or []]
+    # bttv_emotes has always mixed the globals in; older consumers rely on that.
+    bttv = list(global_emotes["bttv"])
     if bttv_user:
-        user_emotes = (bttv_user.get("channelEmotes") or []) + (bttv_user.get("sharedEmotes") or [])
-        bttv += [{"id": e["id"], "code": e["code"]} for e in user_emotes]
+        bttv += _bttv_emotes((bttv_user.get("channelEmotes") or []) + (bttv_user.get("sharedEmotes") or []))
     seventv = []
     if stv and stv.get("emote_set"):
-        seventv = [{"id": e["id"], "code": e["name"], "flags": e.get("flags")} for e in stv["emote_set"]["emotes"]]
-    return {"ffz_emotes": ffz, "bttv_emotes": bttv, "seventv_emotes": seventv}
+        seventv = _7tv_emotes(stv["emote_set"])
+    return {"ffz_emotes": ffz, "bttv_emotes": bttv, "seventv_emotes": seventv, "global_emotes": global_emotes}
+
+
+CHANNEL_SETS = ("ffz_emotes", "bttv_emotes", "seventv_emotes")
+
+
+def merge_emotes(existing: Emote | None, fetched: dict, *, force: bool, now: dt.datetime) -> dict:
+    """Attribute values to write for a VOD's emotes row.
+
+    A new row (or ``force``) takes everything fetched, globals marked 'captured'.
+    An existing row keeps what it has, so a re-run never swaps a historical set
+    for the current one: only empty channel sets and empty global providers are
+    filled, and globals filled in later are marked 'backfilled'.
+    """
+    if existing is None or force:
+        return {
+            **{k: fetched[k] for k in CHANNEL_SETS},
+            "global_emotes": fetched["global_emotes"],
+            "global_emotes_source": "captured",
+            "global_emotes_at": now,
+        }
+    values = {k: fetched[k] for k in CHANNEL_SETS if not getattr(existing, k) and fetched[k]}
+    old = existing.global_emotes or {}
+    missing = {p: fetched["global_emotes"][p] for p in GLOBAL_PROVIDERS if not old.get(p) and fetched["global_emotes"][p]}
+    if missing:
+        values.update(global_emotes={**old, **missing}, global_emotes_source="backfilled", global_emotes_at=now)
+    return values
 
 
 async def emotes(ctx: JobContext) -> None:
+    """Save the channel and global emote sets. ``payload.force`` overwrites an existing row."""
     vod_id = ctx.require_vod_id()
-    values = await fetch_emotes(ctx, ctx.settings.twitch_id)
-    stmt = insert(Emote).values(vod_id=vod_id, **values)
-    await execute(
-        stmt.on_conflict_do_update(
-            index_elements=[Emote.vod_id],
-            set_={
-                "ffz_emotes": stmt.excluded.ffz_emotes,
-                "bttv_emotes": stmt.excluded.bttv_emotes,
-                "7tv_emotes": stmt.excluded["7tv_emotes"],
-                "updatedAt": func.now(),
-            },
-        )
-    )
+    force = bool(ctx.payload.get("force"))
+    fetched = await fetch_emotes(ctx, ctx.settings.twitch_id)
+    async with get_sessionmaker()() as s:
+        existing = (
+            await s.execute(select(Emote).where(Emote.vod_id == vod_id).with_for_update())
+        ).scalar_one_or_none()
+        values = merge_emotes(existing, fetched, force=force, now=dt.datetime.now(dt.timezone.utc))
+        if existing is None:
+            s.add(Emote(vod_id=vod_id, **values))
+        else:
+            for key, value in values.items():
+                setattr(existing, key, value)
+        await s.commit()
+    g = fetched["global_emotes"]
     ctx.log.info(
-        "emotes: ffz=%d bttv=%d 7tv=%d",
-        len(values["ffz_emotes"]), len(values["bttv_emotes"]), len(values["seventv_emotes"]),
+        "emotes: ffz=%d bttv=%d 7tv=%d, globals 7tv=%d bttv=%d ffz=%d",
+        len(fetched["ffz_emotes"]), len(fetched["bttv_emotes"]), len(fetched["seventv_emotes"]),
+        len(g["7tv"]), len(g["bttv"]), len(g["ffz"]),
     )
+    if existing is not None and not force:
+        ctx.log.info("emotes row existed; filled %s (pass force to overwrite)", ", ".join(values) or "nothing")
+
+
+async def global_emotes_backfill(ctx: JobContext) -> None:
+    """Give every emotes row without global sets the current ones, marked 'backfilled'.
+
+    Idempotent: rows that already have ``global_emotes`` are skipped, and the
+    channel columns are never touched. ``payload.vod_ids`` limits it to those VODs.
+    """
+    global_emotes = await fetch_global_emotes(ctx)
+    failed = [p for p, v in global_emotes.items() if not v]
+    if failed:
+        raise StepError(f"could not fetch the {', '.join(failed)} global emotes; nothing backfilled")
+    stmt = (
+        update(Emote)
+        .where(Emote.global_emotes.is_(None))
+        .values(global_emotes=global_emotes, global_emotes_source="backfilled", global_emotes_at=func.now())
+    )
+    if ctx.payload.get("vod_ids"):
+        stmt = stmt.where(Emote.vod_id.in_([str(v) for v in ctx.payload["vod_ids"]]))
+    async with get_sessionmaker()() as s:
+        count = (await s.execute(stmt)).rowcount
+        await s.commit()
+    ctx.log.info("backfilled global emotes on %d row(s)", count)
