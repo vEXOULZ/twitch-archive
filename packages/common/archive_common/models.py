@@ -91,6 +91,10 @@ class Emote(Base):
     seventv_emotes: Mapped[list | None] = mapped_column(
         "7tv_emotes", JSONB, server_default=text("'[]'::jsonb"), default=list
     )
+    # Alembic 0004: {"7tv": [...], "bttv": [...], "ffz": [...]}; NULL = never saved.
+    global_emotes: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    global_emotes_source: Mapped[str | None] = mapped_column(Text)  # 'captured' | 'backfilled'
+    global_emotes_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[dt.datetime] = _created()
     updated_at: Mapped[dt.datetime] = _updated()
 

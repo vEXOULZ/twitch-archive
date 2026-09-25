@@ -26,6 +26,8 @@ KNOWN_DIFFERENCES = {
 # Fields added for the new sites. Legacy responses never had them; everything else must match.
 ADDED_VOD_FIELDS = {"duration_seconds"}
 ADDED_CHAPTER_FIELDS = {"imageTemplate", "length"}
+# Global emote sets saved with each VOD (emotes rows are the dicts with "7tv_emotes").
+ADDED_EMOTE_FIELDS = {"global_emotes", "global_emotes_source", "global_emotes_at"}
 
 
 def _without_additions(node):
@@ -34,7 +36,8 @@ def _without_additions(node):
         return [_without_additions(v) for v in node]
     if not isinstance(node, dict):
         return node
-    out = {k: _without_additions(v) for k, v in node.items() if k not in ADDED_VOD_FIELDS}
+    added = ADDED_EMOTE_FIELDS if "7tv_emotes" in node else ADDED_VOD_FIELDS
+    out = {k: _without_additions(v) for k, v in node.items() if k not in added}
     if isinstance(node.get("chapters"), list):
         out["chapters"] = [
             {k: v for k, v in c.items() if k not in ADDED_CHAPTER_FIELDS} if isinstance(c, dict) else c
@@ -58,7 +61,11 @@ async def test_golden(client: httpx.AsyncClient, entry: dict) -> None:
         pytest.skip("intentional deviation from legacy behaviour")
     resp = await client.get(path)
     assert resp.status_code == entry["status"], resp.text[:500]
-    body = _without_additions(resp.json())
+    body = resp.json()
+    if resp.status_code < 400 and urlsplit(path).path.startswith("/emotes"):
+        for item in body.get("data", [body]):
+            assert ADDED_EMOTE_FIELDS <= set(item), f"{path}: missing {ADDED_EMOTE_FIELDS - set(item)}"
+    body = _without_additions(body)
     expected = entry["body"]
 
     if resp.status_code >= 400:

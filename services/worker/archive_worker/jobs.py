@@ -49,6 +49,8 @@ KINDS: dict[str, list[str]] = {
     "logs_manual": ["logs_manual"],
     "chapters": ["chapters"],
     "emotes": ["emotes"],
+    # One-off: give every emotes row saved before global sets were captured the current ones.
+    "global_emotes_backfill": ["global_emotes_backfill"],
     "describe": ["describe"],
 }
 

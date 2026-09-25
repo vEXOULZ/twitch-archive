@@ -177,6 +177,10 @@ EMOTES = Resource(
         Field("ffz_emotes", _et.c.ffz_emotes),
         Field("bttv_emotes", _et.c.bttv_emotes),
         Field("7tv_emotes", _et.c["7tv_emotes"]),
+        # Added after the legacy API (not in the golden responses).
+        Field("global_emotes", _et.c.global_emotes),
+        Field("global_emotes_source", _et.c.global_emotes_source),
+        Field("global_emotes_at", _et.c.global_emotes_at, js_iso),
         Field("createdAt", _et.c.createdAt, js_iso),
         Field("updatedAt", _et.c.updatedAt, js_iso),
     ),
