@@ -18,8 +18,9 @@ from urllib.parse import parse_qsl
 from sqlalchemy import Boolean, ColumnElement, Text, and_, cast, func, literal, or_, true
 from sqlalchemy.dialects.postgresql import JSONB
 
+from archive_common.serialize import Resource
+
 from .errors import FeathersError
-from .serialize import Resource
 
 _KEY_RE = re.compile(r"^([^\[\]]+)((?:\[[^\[\]]*\])*)$")
 

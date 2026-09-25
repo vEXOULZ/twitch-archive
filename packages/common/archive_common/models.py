@@ -56,6 +56,9 @@ class Vod(Base):
     stream_id: Mapped[str | None] = mapped_column(Text)
     drive: Mapped[list | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
     platform: Mapped[str] = mapped_column(Text, nullable=False, default="twitch")
+    # Alembic 0005: chapters edited by hand; the automatic chapters step leaves them alone.
+    chapters_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"),
+                                                  default=False)
     created_at: Mapped[dt.datetime] = _created()
     updated_at: Mapped[dt.datetime] = _updated()
 
@@ -161,3 +164,30 @@ class AppState(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), onupdate=func.now()
     )
+
+
+class JobEvent(Base):
+    """A job's log lines and step changes (Alembic 0005), capped per job by the worker."""
+
+    __tablename__ = "job_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)  # "seq" in the API
+    job_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    level: Mapped[str] = mapped_column(Text, nullable=False)  # info | warning | error
+    step: Mapped[str | None] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    progress: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))  # {done, total, unit}
+
+
+class AdminAudit(Base):
+    """One row per state-changing admin request (Alembic 0005)."""
+
+    __tablename__ = "admin_audit"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    actor: Mapped[str] = mapped_column(Text, nullable=False)  # password | api-key
+    action: Mapped[str] = mapped_column(Text, nullable=False)  # "<METHOD> <route>"
+    target: Mapped[str | None] = mapped_column(Text)  # "vod:<id>" | "job:<id>"
+    detail: Mapped[Any] = mapped_column(JSONB(none_as_null=True))

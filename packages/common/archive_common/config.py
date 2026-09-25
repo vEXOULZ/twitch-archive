@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     admin_host: str = "0.0.0.0"
     admin_port: int = 3031
     admin_api_key: SecretStr = SecretStr("")
+    # Browser (dashboard) login: unset turns password login off; the API key keeps working.
+    admin_password: SecretStr = SecretStr("")
+    # Addresses (or CIDR ranges) of reverse proxies whose X-Forwarded-For / X-Real-IP is
+    # believed when rate-limiting logins. Empty: always use the connecting address.
+    admin_trusted_proxies: list[str] = []
+    # Where /admin/health looks for archive-api; empty = http://127.0.0.1:<api_port>.
+    api_internal_url: str = ""
 
     google_client_id: str = ""
     google_client_secret: SecretStr = SecretStr("")

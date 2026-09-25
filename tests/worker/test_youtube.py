@@ -69,3 +69,21 @@ async def test_check_always_refreshes_and_keeps_rotated_token(yt, monkeypatch):
 async def test_check_unconfigured(settings):
     result = await youtube.YouTube(settings).check()
     assert result["valid"] is False and "GOOGLE_CLIENT_ID" in result["error"]
+
+
+async def test_cached_check_refreshes_at_most_every_max_age(yt, monkeypatch):
+    calls = []
+
+    async def fake_check():
+        calls.append(1)
+        return {"authorized": True, "valid": True, "accessTokenExpiry": None}
+
+    monkeypatch.setattr(yt, "_check", fake_check)
+    first = await yt.cached_check(600)
+    assert first["valid"] and first["checkedAt"].tzinfo is not None
+    assert (await yt.cached_check(600)) is first and len(calls) == 1
+    await yt.check()  # a forced check (GET /admin/youtube/status) refreshes the cache too
+    assert len(calls) == 2 and yt.last_check is not first
+    yt.last_check["checkedAt"] -= dt.timedelta(seconds=601)
+    await yt.cached_check(600)
+    assert len(calls) == 3

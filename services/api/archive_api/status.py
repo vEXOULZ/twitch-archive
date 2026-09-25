@@ -14,10 +14,9 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from archive_common.serialize import STREAMS, VODS, attach_games, box_art_template
 from archive_common.twitch.helix import Helix
 
-from .serialize import STREAMS, VODS, box_art_template
-from .services import attach_games
 
 log = logging.getLogger(__name__)
 

@@ -98,6 +98,7 @@ async def split(ctx: JobContext) -> None:
         out.append({"number": part.number, "start": part.start, "end": part.end, "path": str(path)})
         ctx.payload["parts"] = out
         await ctx.save()  # cut parts survive a crash part-way through
+        ctx.progress(len(out), len(parts), "parts", f"cut part {part.number} ({len(out)}/{len(parts)})")
     ctx.payload["parts"] = out
     ctx.payload["total_parts"] = len(all_parts)
 

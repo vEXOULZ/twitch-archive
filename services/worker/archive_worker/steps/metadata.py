@@ -34,7 +34,11 @@ async def chapters(ctx: JobContext) -> None:
     vod_id = ctx.require_vod_id()
     gql = ctx.deps.gql
     restricted = ctx.settings.restricted_games
-    duration = await vod_duration(ctx)
+    vod = await ctx.get_vod()
+    if vod.chapters_locked and ctx.payload.get("force") is not True:
+        ctx.log.info("chapters of %s were edited by hand (locked); keeping them", vod_id)
+        return
+    duration = await vod_duration(ctx, vod)
     edges = await gql.video_moments(vod_id)
     if edges is None:
         ctx.log.warning("no chapter data for %s (VOD deleted?); keeping existing chapters", vod_id)

@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from .serialize import box_art_template, js_iso
+from archive_common.serialize import box_art_template, js_iso
 
 NO_CATEGORY = "No category"
 

@@ -28,6 +28,7 @@ from archive_common.twitch.helix import Helix
 from .comments import Comments
 from .errors import FeathersError, LegacyError, legacy_error
 from .games_played import games_played
+from .invalidation import VodInvalidator
 from .middleware import GZIP_MIN_SIZE, JsonBody, RateLimiter, ResponseCache, client_ip
 from .services import build_services
 from .status import stream_status
@@ -52,10 +53,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     emotes_cache, emotes_partial_cache = ResponseCache(6 * 3600, maxsize=1), ResponseCache(300, maxsize=1)
     limiter = RateLimiter(settings.rate_limit_points, settings.rate_limit_window_seconds)
     helix = Helix(settings)
+    # Admin edits reach the public API at once instead of after the cache TTL.
+    invalidator = VodInvalidator(settings.database_url, service_cache, status_cache)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        listener = asyncio.create_task(invalidator.run_forever(), name="cache-invalidation")
         yield
+        listener.cancel()
+        await asyncio.gather(listener, return_exceptions=True)
         await close_client()
         await engine.dispose()
 

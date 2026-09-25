@@ -166,6 +166,8 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
             await ctx.update_vod(duration=format_hhmmss(pl.total_seconds))
         missing, failed = await _sync_segments(ctx, pl, base)
         ctx.log.info("capture %s: %d segments, %d new, %d failed", vod_id, len(pl.segments), missing, failed)
+        have = len(pl.segments) - failed  # the playlist grows while the stream is live
+        ctx.progress(have, len(pl.segments), "parts", f"captured {have}/{len(pl.segments)} segments")
 
         if one_shot:
             if failed:

@@ -25,10 +25,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.models import Log, Vod
+from archive_common.serialize import LOGS, js_iso
 
 from .errors import LegacyError
 from .middleware import JsonBody, ResponseCache
-from .serialize import LOGS, js_iso
 
 log = logging.getLogger(__name__)
 

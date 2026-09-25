@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 
-from sqlalchemy import Executable
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy import Executable, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from .config import get_settings
+
+# NOTIFY channel: payload is a vod id whose cached API responses are stale.
+VOD_CHANGED = "vods_changed"
 
 
 def _dumps(value: object) -> str:
@@ -34,3 +37,9 @@ async def execute(stmt: Executable) -> None:
     async with get_sessionmaker()() as s:
         await s.execute(stmt)
         await s.commit()
+
+
+async def notify_vod_changed(session: AsyncSession, vod_id: str) -> None:
+    """Tell archive-api (LISTENing on ``VOD_CHANGED``) to drop its cached copies of the VOD.
+    Delivered when ``session`` commits, so readers never see the old row after the event."""
+    await session.execute(text("select pg_notify(:channel, :vod_id)"), {"channel": VOD_CHANGED, "vod_id": vod_id})

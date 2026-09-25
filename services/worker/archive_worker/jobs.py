@@ -164,6 +164,23 @@ async def pause(job_id: int) -> Job | None:
         return job
 
 
+async def set_control(job_id: int, **values: Any) -> Job | None:
+    """Change a job's ``pause_before`` and/or ``pause_next``. ValueError on a step the
+    job's kind does not have. Like every gate, it applies when the job next moves on
+    to a step, not to the step it is at."""
+    async with get_sessionmaker()() as s:
+        job = await s.get(Job, job_id)
+        if job is None:
+            return None
+        if values.get("pause_before") is not None:
+            check_steps(job.kind, values["pause_before"])
+        for key, value in values.items():
+            setattr(job, key, value)
+        await s.commit()
+        await s.refresh(job)  # updated_at is set by the database
+        return job
+
+
 def _exclusive_key(job: Job) -> str:
     # One job per (vod, video type) at a time; the live recording and the VOD
     # capture of the same stream run side by side.
@@ -289,21 +306,26 @@ class Runner:
         # The step to resume from. Advanced as soon as a step returns, so the error
         # paths below record progress even if the checkpoint write itself failed.
         current: str | None = steps[start]
+        ctx.step = current
         ctx.log.info("running %s (vod=%s) from step %s", job.kind, job.vod_id, current)
         try:
             for i in range(start, len(steps)):
+                ctx.step = steps[i]
                 ctx.log.info("step %s", steps[i])
                 await STEPS[steps[i]](ctx)
                 current = steps[i + 1] if i + 1 < len(steps) else None
                 if current is not None and await self._advance(job, current, ctx):
+                    ctx.step = current
                     ctx.log.info("paused before step %s", current)
                     return
             await self._set(job.id, state="done", step=None, payload=ctx.payload, vod_id=ctx.vod_id,
                             last_error=None, not_before=None, pause_next=False)
+            ctx.step = None
             ctx.log.info("job %s finished", job.kind)
         except asyncio.CancelledError:
             # Worker shutdown re-queues the job; an admin cancel ends it.
             state = "cancelled" if job.id in self.cancelling else "queued"
+            ctx.log.info("cancelled" if state == "cancelled" else "interrupted by shutdown; will resume")
             await asyncio.shield(
                 self._set(job.id, state=state, step=current, payload=ctx.payload, vod_id=ctx.vod_id)
             )

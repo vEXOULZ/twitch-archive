@@ -54,6 +54,14 @@ class ResponseCache:
         if self.enabled:
             self._cache[key] = value
 
+    def invalidate(self, stale: Callable[[str], bool]) -> None:
+        """Drop every entry whose key ``stale`` accepts."""
+        for key in [k for k in list(self._cache.keys()) if stale(k)]:
+            self._cache.pop(key, None)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
     async def get_or_render(self, key: str, factory: Callable[[], Awaitable[Any]]) -> JsonBody:
         """Cached body for ``key``, else ``await factory()`` rendered (not cached if it raises)."""
         body = self.get(key)
