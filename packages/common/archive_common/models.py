@@ -26,7 +26,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -131,11 +131,16 @@ class Job(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     vod_id: Mapped[str | None] = mapped_column(Text, index=True)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
-    state: Mapped[str] = mapped_column(Text, nullable=False, default="queued")  # queued|running|done|failed
+    # queued | running | paused | done | failed | cancelled
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
     step: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    not_before: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))  # retry backoff
+    # Steps to pause before; NULL = Settings.manual_steps for the kind, [] = none.
+    pause_before: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    pause_next: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # pause at next step
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), onupdate=func.now()

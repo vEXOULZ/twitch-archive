@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     youtube_description: str = "VOD"
     youtube_keepalive_hours: float = 24.0  # periodic token refresh; see README "YouTube OAuth"
     restricted_games: list[str] = []
+    # Steps a job pauses before until resumed (POST /admin/jobs/{id}/resume), per
+    # job kind, e.g. {"archive": ["upload"]}. A job's own pauseBefore overrides it.
+    # Kinds and steps: GET /admin/kinds, or jobs.KINDS in the worker.
+    manual_steps: dict[str, list[str]] = {}
     split_duration: int = 10800
     keep_hls: bool = False
     keep_mp4: bool = False

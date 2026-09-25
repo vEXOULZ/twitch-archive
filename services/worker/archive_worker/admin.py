@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import Body, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 
 from archive_common.db import execute, get_sessionmaker
 from archive_common.models import Emote, Game, Job, Log, Vod
@@ -42,6 +42,27 @@ def _require(body: dict, *keys: str) -> None:
             raise AdminError(400, f"Missing parameter: {key}")
 
 
+# Shorthands accepted by GET /admin/jobs?state=
+STATE_GROUPS = {
+    "waiting": ("queued",),  # will run on its own (possibly after a retry backoff)
+    "stopped": ("paused", "failed", "cancelled"),  # needs someone to resume/retry
+    "active": jobs.ACTIVE,
+    "finished": ("done", "failed", "cancelled"),
+}
+
+
+def _states(value: str) -> list[str]:
+    out: list[str] = []
+    for name in (v.strip() for v in value.split(",") if v.strip()):
+        group = STATE_GROUPS.get(name, (name,))
+        for state in group:
+            if state not in jobs.STATES:
+                raise AdminError(400, f"Unknown state {state!r}; states: {', '.join(jobs.STATES)}, "
+                                      f"groups: {', '.join(STATE_GROUPS)}")
+            out.append(state)
+    return out
+
+
 def _helix_hhmmss(video: dict) -> str:
     return format_hhmmss(parse_helix_duration(video.get("duration", "")))
 
@@ -56,6 +77,10 @@ def _job_json(job: Job) -> dict:
         "attempts": job.attempts,
         "lastError": job.last_error,
         "payload": job.payload,
+        "notBefore": job.not_before.isoformat() if job.not_before else None,
+        "pauseBefore": job.pause_before,
+        "pauseNext": job.pause_next,
+        "steps": jobs.KINDS.get(job.kind, []),
         "createdAt": job.created_at.isoformat() if job.created_at else None,
         "updatedAt": job.updated_at.isoformat() if job.updated_at else None,
     }
@@ -83,7 +108,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     auth = [Depends(verify)]
 
     async def enqueue(kind: str, vod_id: str | None, payload: dict | None = None) -> Job:
-        job = await jobs.enqueue(kind, vod_id, payload)
+        job = await jobs.enqueue(kind, vod_id, payload, settings=settings)
         runner.poke()
         return job
 
@@ -141,16 +166,77 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             await s.execute(text("select 1"))
         return {"status": "ok", "runningJobs": len(runner.running)}
 
+    @app.get("/admin/kinds", dependencies=auth)
+    async def list_kinds() -> dict:
+        """Job kinds, their steps, and the steps each pauses before by default."""
+        return {
+            kind: {"steps": steps, "manualSteps": settings.manual_steps.get(kind, [])}
+            for kind, steps in jobs.KINDS.items()
+        }
+
     @app.get("/admin/jobs", dependencies=auth)
-    async def list_jobs(state: str | None = None, vodId: str | None = None, limit: int = 50) -> dict:
+    async def list_jobs(state: str | None = None, vodId: str | None = None, kind: str | None = None,
+                        limit: int = 50) -> dict:
+        """``state`` takes a comma-separated list of states and/or groups (see STATE_GROUPS)."""
+        states = _states(state) if state else None
         async with get_sessionmaker()() as s:
             stmt = select(Job).order_by(Job.id.desc()).limit(min(max(limit, 1), 500))
-            if state:
-                stmt = stmt.where(Job.state == state)
+            if states:
+                stmt = stmt.where(Job.state.in_(states))
             if vodId:
                 stmt = stmt.where(Job.vod_id == vodId)
+            if kind:
+                stmt = stmt.where(Job.kind == kind)
             rows = (await s.execute(stmt)).scalars().all()
-        return {"data": [_job_json(j) for j in rows]}
+            counts = dict((await s.execute(select(Job.state, func.count()).group_by(Job.state))).all())
+        return {"counts": {st: counts.get(st, 0) for st in jobs.STATES}, "data": [_job_json(j) for j in rows]}
+
+    @app.post("/admin/jobs", dependencies=auth)
+    async def launch_job(body: dict = Body(...)) -> dict:
+        """Start any job kind. Body: kind, vodId?, payload?, fromStep?, pauseBefore?, paused?"""
+        _require(body, "kind")
+        vod_id = str(body["vodId"]) if body.get("vodId") not in (None, "") else None
+        if vod_id is not None:
+            await require_vod(vod_id)
+        pause_before = body.get("pauseBefore")
+        if pause_before is not None and not (
+            isinstance(pause_before, list) and all(isinstance(s, str) for s in pause_before)
+        ):
+            raise AdminError(400, "pauseBefore must be a list of step names")
+        payload = body.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise AdminError(400, "payload must be an object")
+        try:
+            job = await jobs.enqueue(
+                str(body["kind"]), vod_id, payload, step=body.get("fromStep") or None,
+                pause_before=pause_before, paused=bool(body.get("paused")), settings=settings,
+            )
+        except ValueError as exc:
+            raise AdminError(400, str(exc)) from exc
+        runner.poke()
+        return _ok(f"Job {job.id} {job.kind} {job.state} at step {job.step}", job)
+
+    @app.post("/admin/jobs/{job_id}/resume", dependencies=auth)
+    async def resume_job(job_id: int, body: dict | None = Body(None)) -> dict:
+        """Run a paused job from its current step. ``{"once": true}`` pauses again after it."""
+        job, resumed = await jobs.resume(job_id, once=bool((body or {}).get("once")))
+        if job is None:
+            raise AdminError(404, "No such job")
+        if not resumed:
+            raise AdminError(409, f"Job is {job.state}; only paused jobs can be resumed")
+        runner.poke()
+        return _ok(f"Job {job_id} resumed at step {job.step}", job)
+
+    @app.post("/admin/jobs/{job_id}/pause", dependencies=auth)
+    async def pause_job(job_id: int) -> dict:
+        job = await jobs.pause(job_id)
+        if job is None:
+            raise AdminError(404, "No such job")
+        if job.state == "paused":
+            return _ok(f"Job {job_id} paused at step {job.step}", job)
+        if job.state == "running":
+            return _ok(f"Job {job_id} will pause when step {job.step} finishes", job)
+        raise AdminError(409, f"Job is {job.state}; only queued or running jobs can be paused")
 
     @app.get("/admin/jobs/{job_id}", dependencies=auth)
     async def get_job(job_id: int) -> dict:
@@ -170,11 +256,11 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
 
     @app.post("/admin/jobs/{job_id}/cancel", dependencies=auth)
     async def cancel_job(job_id: int) -> dict:
-        job = await jobs.cancel(job_id)
+        job = await runner.cancel(job_id)
         if job is None:
             raise AdminError(404, "No such job")
         if job.state != "cancelled":
-            raise AdminError(409, f"Job is {job.state}; only queued jobs can be cancelled")
+            raise AdminError(409, f"Job is {job.state}; only queued, paused or running jobs can be cancelled")
         return _ok(f"Job {job_id} cancelled", job)
 
     # ── VOD rows ──────────────────────────────────────────────────────────

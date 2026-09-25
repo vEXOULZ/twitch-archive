@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from archive_common.models import Log, Vod
 
 from .errors import LegacyError
-from .middleware import ResponseCache
+from .middleware import JsonBody, ResponseCache
 from .serialize import LOGS, js_iso
 
 log = logging.getLogger(__name__)
@@ -74,7 +74,9 @@ class Comments:
         self.cache = cache  # offset pages, 5 min
         self.long_cache = long_cache  # cursor pages and starting ids, 24 h
 
-    async def handle(self, conn: AsyncConnection, vod_id: str, offset_raw: str | None, cursor: str | None) -> dict:
+    async def handle(
+        self, conn: AsyncConnection, vod_id: str, offset_raw: str | None, cursor: str | None
+    ) -> JsonBody:
         offset: float | None = None
         if offset_raw not in (None, ""):
             try:
@@ -101,7 +103,7 @@ class Comments:
                     raise LegacyError(500, f"Failed to retrieve comments from offset {fixed}")
                 return result
 
-            return await self.cache.get_or_set(f"offset:{vod_id}:{fixed}", by_offset)
+            return await self.cache.get_or_render(f"offset:{vod_id}:{fixed}", by_offset)
 
         async def by_cursor() -> dict:
             cursor_json = _decode_cursor(cursor or "")
@@ -112,7 +114,7 @@ class Comments:
                 raise LegacyError(500, f"Failed to retrieve comments from cursor {cursor}")
             return result
 
-        return await self.long_cache.get_or_set(f"cursor:{vod_id}:{cursor}", by_cursor)
+        return await self.long_cache.get_or_render(f"cursor:{vod_id}:{cursor}", by_cursor)
 
     async def _rows(self, conn: AsyncConnection, *where) -> list[dict]:
         stmt = (
