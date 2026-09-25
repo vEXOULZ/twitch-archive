@@ -14,7 +14,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -98,7 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return FeathersError(405, f"Method {request.method} is not allowed").response()
         if exc.status_code == 404:
             return legacy_error(404, "Missing route")
-        return JSONResponse({"error": True, "msg": str(exc.detail)}, status_code=exc.status_code)
+        return legacy_error(exc.status_code, str(exc.detail))
 
     @app.exception_handler(DBAPIError)
     async def db_error(_: Request, exc: DBAPIError):
@@ -180,8 +180,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/vods/{vod_id}/comments")
     async def vod_comments(vod_id: str, request: Request):
         params = request.query_params
-        async with engine.connect() as conn:
-            body = await comments.handle(conn, vod_id, params.get("content_offset_seconds"), params.get("cursor"))
+        body = await comments.handle(engine, vod_id, params.get("content_offset_seconds"), params.get("cursor"))
         return body.response(request)
 
     # ── Badges ────────────────────────────────────────────────────────────

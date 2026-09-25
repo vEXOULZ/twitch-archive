@@ -10,6 +10,7 @@ from pathlib import Path
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
+from archive_common import emote_providers as providers
 from archive_common import http
 from archive_common.db import get_sessionmaker
 from archive_common.models import Emote, Log, Vod
@@ -127,7 +128,7 @@ async def logs_manual(ctx: JobContext) -> None:
     path = Path(ctx.payload["path"])
     if not path.exists():
         raise StepError(f"{path} does not exist")
-    data = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+    data = await asyncio.to_thread(lambda: json.loads(path.read_text(encoding="utf-8")))  # can be hundreds of MB
     edges = ((data.get("comments") or {}).get("edges")) or []
     rows = [comment_row(vod_id, e["node"]) for e in edges if e.get("node")]
     await insert_comments(rows)
@@ -135,11 +136,6 @@ async def logs_manual(ctx: JobContext) -> None:
 
 
 # ── Emotes ────────────────────────────────────────────────────────────────
-
-FFZ = "https://api.frankerfacez.com/v1"
-BTTV = "https://api.betterttv.net/3"
-SEVENTV = "https://7tv.io/v3"
-
 
 async def _json(url: str, ctx: JobContext):
     try:
@@ -149,60 +145,25 @@ async def _json(url: str, ctx: JobContext):
         return None
 
 
-def _7tv_emotes(emote_set: dict) -> list[dict]:
-    return [{"id": e["id"], "code": e["name"], "flags": e.get("flags")} for e in emote_set.get("emotes") or []]
-
-
-def _bttv_emotes(emotes: list) -> list[dict]:
-    return [{"id": e["id"], "code": e["code"]} for e in emotes]
-
-
-def _ffz_global_emotes(data: dict) -> list[dict]:
-    sets = data["sets"]
-    return [{"id": e["id"], "code": e["name"]} for sid in data["default_sets"] for e in sets[str(sid)]["emoticons"]]
-
-
-GLOBAL_PROVIDERS = ("7tv", "bttv", "ffz")
+async def _fetch(endpoints: dict[str, providers.Endpoint], ctx: JobContext) -> dict[str, list[dict]]:
+    """Each provider's emotes from ``endpoints``; a provider that fails gets an empty list."""
+    responses = await asyncio.gather(*(_json(url, ctx) for url, _ in endpoints.values()))
+    return {p: parse(data) for (p, (_, parse)), data in zip(endpoints.items(), responses)}
 
 
 async def fetch_global_emotes(ctx: JobContext) -> dict[str, list[dict]]:
-    """The providers' current global sets. A provider that fails gets an empty list."""
-    responses = await asyncio.gather(
-        _json(f"{SEVENTV}/emote-sets/global", ctx),
-        _json(f"{BTTV}/cached/emotes/global", ctx),
-        _json(f"{FFZ}/set/global", ctx),
-    )
-    out: dict[str, list[dict]] = {}
-    for provider, parse, data in zip(GLOBAL_PROVIDERS, (_7tv_emotes, _bttv_emotes, _ffz_global_emotes), responses):
-        out[provider] = []
-        if data is None:
-            continue
-        try:
-            out[provider] = parse(data)
-        except Exception as exc:
-            ctx.log.warning("global %s emotes: unexpected response: %r", provider, exc)
-    return out
+    """The providers' current global sets."""
+    return await _fetch(providers.GLOBAL, ctx)
 
 
 async def fetch_emotes(ctx: JobContext, twitch_id: str) -> dict:
-    ffz_data, bttv_user, stv, global_emotes = await asyncio.gather(
-        _json(f"{FFZ}/room/id/{twitch_id}", ctx),
-        _json(f"{BTTV}/cached/users/twitch/{twitch_id}", ctx),
-        _json(f"{SEVENTV}/users/twitch/{twitch_id}", ctx),
-        fetch_global_emotes(ctx),
+    channel, global_emotes = await asyncio.gather(
+        _fetch(providers.channel(twitch_id), ctx), fetch_global_emotes(ctx)
     )
-    ffz: list[dict] = []
-    if ffz_data:
-        room_set = str(ffz_data["room"]["set"])
-        ffz = [{"id": e["id"], "code": e["name"]} for e in ffz_data["sets"][room_set]["emoticons"]]
     # bttv_emotes has always mixed the globals in; older consumers rely on that.
-    bttv = list(global_emotes["bttv"])
-    if bttv_user:
-        bttv += _bttv_emotes((bttv_user.get("channelEmotes") or []) + (bttv_user.get("sharedEmotes") or []))
-    seventv = []
-    if stv and stv.get("emote_set"):
-        seventv = _7tv_emotes(stv["emote_set"])
-    return {"ffz_emotes": ffz, "bttv_emotes": bttv, "seventv_emotes": seventv, "global_emotes": global_emotes}
+    bttv = global_emotes["bttv"] + channel["bttv"]
+    return {"ffz_emotes": channel["ffz"], "bttv_emotes": bttv, "seventv_emotes": channel["7tv"],
+            "global_emotes": global_emotes}
 
 
 CHANNEL_SETS = ("ffz_emotes", "bttv_emotes", "seventv_emotes")
@@ -225,7 +186,7 @@ def merge_emotes(existing: Emote | None, fetched: dict, *, force: bool, now: dt.
         }
     values = {k: fetched[k] for k in CHANNEL_SETS if not getattr(existing, k) and fetched[k]}
     old = existing.global_emotes or {}
-    missing = {p: fetched["global_emotes"][p] for p in GLOBAL_PROVIDERS if not old.get(p) and fetched["global_emotes"][p]}
+    missing = {p: fetched["global_emotes"][p] for p in providers.PROVIDERS if not old.get(p) and fetched["global_emotes"][p]}
     if missing:
         values.update(global_emotes={**old, **missing}, global_emotes_source="backfilled", global_emotes_at=now)
     return values

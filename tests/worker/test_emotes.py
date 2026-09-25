@@ -8,6 +8,7 @@ import respx
 from pydantic import SecretStr
 from sqlalchemy import delete
 
+from archive_common import emote_providers as providers
 from archive_common.db import get_sessionmaker
 from archive_common.models import Emote, Job, Vod
 from archive_worker import jobs
@@ -44,12 +45,12 @@ OLD = {  # what a VOD saved a year ago holds
 
 def mock_providers(**override):
     urls = {
-        "ffz_room": (f"{metadata.FFZ}/room/id/{TWITCH_ID}", {"room": {"set": 111}, "sets": {"111": {"emoticons": [{"id": 1, "name": "ffzNow"}]}}}),
-        "bttv_user": (f"{metadata.BTTV}/cached/users/twitch/{TWITCH_ID}", {"channelEmotes": [{"id": "b1", "code": "bttvNow"}], "sharedEmotes": []}),
-        "7tv_user": (f"{metadata.SEVENTV}/users/twitch/{TWITCH_ID}", {"emote_set": {"emotes": [{"id": "s1", "name": "stvNow", "flags": 0}]}}),
-        "7tv_global": (f"{metadata.SEVENTV}/emote-sets/global", GLOBAL_7TV),
-        "bttv_global": (f"{metadata.BTTV}/cached/emotes/global", GLOBAL_BTTV),
-        "ffz_global": (f"{metadata.FFZ}/set/global", GLOBAL_FFZ),
+        "ffz_room": (f"{providers.FFZ}/room/id/{TWITCH_ID}", {"room": {"set": 111}, "sets": {"111": {"emoticons": [{"id": 1, "name": "ffzNow"}]}}}),
+        "bttv_user": (f"{providers.BTTV}/cached/users/twitch/{TWITCH_ID}", {"channelEmotes": [{"id": "b1", "code": "bttvNow"}], "sharedEmotes": []}),
+        "7tv_user": (f"{providers.SEVENTV}/users/twitch/{TWITCH_ID}", {"emote_set": {"emotes": [{"id": "s1", "name": "stvNow", "flags": 0}]}}),
+        "7tv_global": (f"{providers.SEVENTV}/emote-sets/global", GLOBAL_7TV),
+        "bttv_global": (f"{providers.BTTV}/cached/emotes/global", GLOBAL_BTTV),
+        "ffz_global": (f"{providers.FFZ}/set/global", GLOBAL_FFZ),
     }
     for name, (url, body) in urls.items():
         response = override.get(name, httpx.Response(200, json=body))
@@ -99,8 +100,8 @@ async def test_fetch_emotes_parses_globals_and_survives_failures(make_ctx):
     fetched = await metadata.fetch_emotes(make_ctx("emotes", VOD), TWITCH_ID)
     assert fetched == {**CHANNEL, "global_emotes": EXPECTED_GLOBALS}
 
-    respx.get(f"{metadata.SEVENTV}/emote-sets/global").mock(return_value=httpx.Response(404))
-    respx.get(f"{metadata.FFZ}/set/global").mock(return_value=httpx.Response(200, json={"sets": {}}))
+    respx.get(f"{providers.SEVENTV}/emote-sets/global").mock(return_value=httpx.Response(404))
+    respx.get(f"{providers.FFZ}/set/global").mock(return_value=httpx.Response(200, json={"sets": {}}))
     assert await metadata.fetch_global_emotes(make_ctx("emotes", VOD)) == {
         "7tv": [], "bttv": EXPECTED_GLOBALS["bttv"], "ffz": [],
     }

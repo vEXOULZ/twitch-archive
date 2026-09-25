@@ -55,6 +55,18 @@ def _ok(msg: str, job: Job | None = None, **extra: Any) -> dict:
     return out
 
 
+def _step_names(value: Any, msg: str) -> list[str] | None:
+    """``pauseBefore``: a list of step names, or None."""
+    if value is not None and not (isinstance(value, list) and all(isinstance(s, str) for s in value)):
+        raise AdminError(400, msg)
+    return value
+
+
+async def _job_counts(s) -> dict[str, int]:
+    counts = dict((await s.execute(select(Job.state, func.count()).group_by(Job.state))).all())
+    return {st: counts.get(st, 0) for st in jobs.STATES}
+
+
 def _require(body: dict, *keys: str) -> None:
     for key in keys:
         if body.get(key) in (None, ""):
@@ -243,8 +255,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         events.add(job.id, "info", job.step, msg)
         return _ok(msg, job)
 
-    async def enqueue(kind: str, vod_id: str | None, payload: dict | None = None) -> Job:
-        job = await jobs.enqueue(kind, vod_id, payload, settings=settings)
+    async def enqueue(kind: str, vod_id: str | None, payload: dict | None = None, **kwargs: Any) -> Job:
+        job = await jobs.enqueue(kind, vod_id, payload, settings=settings, **kwargs)
         runner.poke()
         return job
 
@@ -258,9 +270,12 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             raise AdminError(404, "No Vod Data")
         return vod
 
-    async def helix_video(vod_id: str) -> dict:
+    def require_helix() -> None:
         if not helix.configured:
             raise AdminError(500, "Twitch client is not configured")
+
+    async def helix_video(vod_id: str) -> dict:
+        require_helix()
         video = await helix.get_video(str(vod_id))
         if not video:
             raise AdminError(404, "No Vod Data")
@@ -270,11 +285,12 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
 
     def vtype(body: dict) -> str:
         t = body.get("type") or "vod"
-        if t not in ("vod", "live"):
+        if t not in vod_edits.VIDEO_TYPES:
             raise AdminError(400, "type must be 'vod' or 'live'")
         return t
 
-    async def type_payload(vod: Vod, t: str) -> dict:
+    def type_payload(vod: Vod, body: dict) -> dict:
+        t = vtype(body)
         payload: dict[str, Any] = {"type": t}
         if t == "live":
             if not vod.stream_id:
@@ -282,9 +298,9 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             payload["stream_id"] = vod.stream_id
         return payload
 
-    async def source_payload(vod: Vod, body: dict) -> dict:
+    def source_payload(vod: Vod, body: dict) -> dict:
         """type_payload plus an optional local ``path`` to use instead of downloading."""
-        payload = await type_payload(vod, vtype(body))
+        payload = type_payload(vod, body)
         if body.get("path"):
             payload["path"] = body["path"]
         return payload
@@ -317,7 +333,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         async def db_state() -> tuple[dict[str, int], list[Job], Stream | None] | None:
             try:
                 async with get_sessionmaker()() as s:
-                    counts = dict((await s.execute(select(Job.state, func.count()).group_by(Job.state))).all())
+                    counts = await _job_counts(s)
                     failures = list((await s.execute(
                         select(Job).where(Job.state == "failed").order_by(Job.updated_at.desc(), Job.id.desc()).limit(5)
                     )).scalars())
@@ -331,7 +347,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
 
         db, api, yt = await asyncio.gather(db_state(), api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE))
         db_ok = db is not None
-        counts, failures, live = db or ({}, [], None)
+        counts, failures, live = db or ({st: 0 for st in jobs.STATES}, [], None)
         return {
             "worker": {"ok": db_ok, "runningJobs": len(runner.running), "startedAt": iso_utc(started_at)},
             "api": {"ok": api},
@@ -347,7 +363,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
                 "startedAt": iso_utc(live.started_at) if live else None,
             },
             "jobs": {
-                "counts": {st: counts.get(st, 0) for st in jobs.STATES},
+                "counts": counts,
                 "recentFailures": [_job_json(j) for j in failures],
             },
         }
@@ -377,8 +393,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             if kind:
                 stmt = stmt.where(Job.kind == kind)
             rows = (await s.execute(stmt)).scalars().all()
-            counts = dict((await s.execute(select(Job.state, func.count()).group_by(Job.state))).all())
-        return {"counts": {st: counts.get(st, 0) for st in jobs.STATES}, "data": [_job_json(j) for j in rows]}
+            counts = await _job_counts(s)
+        return {"counts": counts, "data": [_job_json(j) for j in rows]}
 
     @app.post("/admin/jobs", dependencies=auth)
     async def launch_job(body: dict = Body(...)) -> dict:
@@ -387,22 +403,17 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         vod_id = str(body["vodId"]) if body.get("vodId") not in (None, "") else None
         if vod_id is not None:
             await require_vod(vod_id)
-        pause_before = body.get("pauseBefore")
-        if pause_before is not None and not (
-            isinstance(pause_before, list) and all(isinstance(s, str) for s in pause_before)
-        ):
-            raise AdminError(400, "pauseBefore must be a list of step names")
+        pause_before = _step_names(body.get("pauseBefore"), "pauseBefore must be a list of step names")
         payload = body.get("payload") or {}
         if not isinstance(payload, dict):
             raise AdminError(400, "payload must be an object")
         try:
-            job = await jobs.enqueue(
+            job = await enqueue(
                 str(body["kind"]), vod_id, payload, step=body.get("fromStep") or None,
-                pause_before=pause_before, paused=bool(body.get("paused")), settings=settings,
+                pause_before=pause_before, paused=bool(body.get("paused")),
             )
         except ValueError as exc:
             raise AdminError(400, str(exc)) from exc
-        runner.poke()
         return _ok(f"Job {job.id} {job.kind} {job.state} at step {job.step}", job)
 
     @app.post("/admin/jobs/{job_id}/resume", dependencies=auth)
@@ -445,12 +456,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
                              (f"; unknown: {', '.join(unknown)}" if unknown else ""))
         values: dict[str, Any] = {}
         if "pauseBefore" in body:
-            pause_before = body["pauseBefore"]
-            if pause_before is not None and not (
-                isinstance(pause_before, list) and all(isinstance(s, str) for s in pause_before)
-            ):
-                raise AdminError(400, "pauseBefore must be a list of step names or null")
-            values["pause_before"] = pause_before
+            values["pause_before"] = _step_names(
+                body["pauseBefore"], "pauseBefore must be a list of step names or null")
         if "pauseNext" in body:
             if not isinstance(body["pauseNext"], bool):
                 raise AdminError(400, "pauseNext must be true or false")
@@ -634,8 +641,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         """Twitch categories matching ``query`` (for picking a chapter's game)."""
         if not query.strip():
             raise AdminError(400, "Missing parameter: query")
-        if not helix.configured:
-            raise AdminError(500, "Twitch client is not configured")
+        require_helix()
         return [
             {"gameId": c.get("id"), "name": c.get("name"), "imageTemplate": box_art_template(c.get("box_art_url"))}
             for c in await helix.search_categories(query.strip())
@@ -660,7 +666,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         """Download the whole VOD (or use ``path``), split, upload. Optional part range."""
         _require(body, "vodId")
         vod = await require_vod(body["vodId"])
-        payload = await source_payload(vod, body)
+        payload = source_payload(vod, body)
         for src, dst in (("startPart", "start_part"), ("endPart", "end_part")):
             if body.get(src) not in (None, ""):
                 payload[dst] = int(body[src])
@@ -672,9 +678,10 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def hls_download(body: dict = Body(...)) -> dict:
         """Full archive pipeline for a VOD (creates the row from Helix if needed)."""
         _require(body, "vodId")
-        if not await vod_exists(body["vodId"]):
+        vod = await vod_exists(body["vodId"])
+        if vod is None:
             await upsert_vod(await helix_video(body["vodId"]))
-        vod = await require_vod(body["vodId"])
+            vod = await require_vod(body["vodId"])
         if await jobs.find_active("archive", vod_id=vod.id):
             raise AdminError(409, f"An archive job for {vod.id} is already running")
         job = await enqueue("archive", vod.id, {"type": "vod", "stream_id": vod.stream_id})
@@ -684,7 +691,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def reupload(body: dict = Body(...)) -> dict:
         _require(body, "vodId", "part")
         vod = await require_vod(body["vodId"])
-        payload = await source_payload(vod, body)
+        payload = source_payload(vod, body)
         part = single_part(payload, body)
         job = await enqueue("reupload", vod.id, payload)
         return _ok(f"Re-uploading {vod.id} part {part}..", job)
@@ -693,7 +700,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def dmca(body: dict = Body(...)) -> dict:
         _require(body, "vodId", "receivedClaims")
         vod = await require_vod(body["vodId"])
-        payload = await source_payload(vod, body)
+        payload = source_payload(vod, body)
         payload["claims"] = body["receivedClaims"]
         job = await enqueue("dmca", vod.id, payload)
         return _ok(f"Muting the DMCA content for {vod.id}...", job)
@@ -702,7 +709,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def part_dmca(body: dict = Body(...)) -> dict:
         _require(body, "vodId", "part", "receivedClaims")
         vod = await require_vod(body["vodId"])
-        payload = await source_payload(vod, body)
+        payload = source_payload(vod, body)
         payload["claims"] = body["receivedClaims"]
         part = single_part(payload, body)
         job = await enqueue("part_dmca", vod.id, payload)
@@ -761,7 +768,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def youtube_describe(body: dict = Body(...)) -> dict:
         _require(body, "vodId")
         vod = await require_vod(body["vodId"])
-        job = await enqueue("describe", vod.id, await type_payload(vod, vtype(body)))
+        job = await enqueue("describe", vod.id, type_payload(vod, body))
         return _ok(f"Updating YouTube descriptions for {vod.id}", job)
 
     # ── Live recordings (external recorder callback) ──────────────────────

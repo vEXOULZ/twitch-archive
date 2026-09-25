@@ -249,11 +249,19 @@ async def attach_games(conn: AsyncConnection, vods: list[dict]) -> None:
         vod["games"] = games[vod["id"]]
 
 
+async def vods_json(
+    conn: AsyncConnection, *where: Any, order_by: Any = None, limit: int | None = None
+) -> list[dict[str, Any]]:
+    """VODs matching ``where``, each exactly as ``GET /vods/{id}`` renders it."""
+    stmt = select(*VODS.columns()).where(*where).limit(limit)
+    if order_by is not None:
+        stmt = stmt.order_by(order_by)
+    vods = [VODS.to_json(r) for r in (await conn.execute(stmt)).mappings()]
+    await attach_games(conn, vods)
+    return vods
+
+
 async def vod_json(conn: AsyncConnection, vod_id: str) -> dict[str, Any] | None:
     """One VOD exactly as ``GET /vods/{id}`` renders it, or None."""
-    row = (await conn.execute(select(*VODS.columns()).where(VODS.table.c.id == vod_id))).mappings().first()
-    if row is None:
-        return None
-    vod = VODS.to_json(row)
-    await attach_games(conn, [vod])
-    return vod
+    vods = await vods_json(conn, VODS.table.c.id == vod_id)
+    return vods[0] if vods else None

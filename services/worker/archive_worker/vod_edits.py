@@ -10,7 +10,6 @@ import math
 from typing import Any
 
 from archive_common.serialize import box_art_image
-from archive_common.timeutil import format_hhmmss
 
 from . import planning
 
@@ -76,14 +75,8 @@ def chapters(items: Any, duration: float) -> list[dict[str, Any]]:
             raise ValueError(f"{where} ends at {start + length}s, after the end of the VOD ({duration:g}s)")
         prev_start, prev_end = start, start + length
         out.append({
-            "gameId": game_id,
-            "name": name,
-            "image": box_art_image(template),
+            **planning.chapter(game_id, name, box_art_image(template), start, length, ch["restricted"]),
             "imageTemplate": template,
-            "duration": format_hhmmss(start),  # the legacy field holds the start
-            "start": planning.num_seconds(start),
-            "end": planning.num_seconds(length),  # ... and "end" the length
-            "restricted": ch["restricted"],
         })
     return out
 

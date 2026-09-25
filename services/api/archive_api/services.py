@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.config import Settings
-from archive_common.serialize import EMOTES, GAMES, STREAMS, VODS, Resource, attach_games
+from archive_common.serialize import EMOTES, GAMES, STREAMS, VODS, Resource, attach_games, vods_json
 
 from . import feathers_query as fq
 from .errors import FeathersError
@@ -17,10 +17,7 @@ from .errors import FeathersError
 async def _vods_by_id(conn: AsyncConnection, vod_ids: list[str]) -> dict[str, dict]:
     if not vod_ids:
         return {}
-    rows = await conn.execute(select(*VODS.columns()).where(VODS.table.c.id.in_(vod_ids)))
-    vods = {r["id"]: VODS.to_json(r) for r in rows.mappings()}
-    await attach_games(conn, list(vods.values()))
-    return vods
+    return {v["id"]: v for v in await vods_json(conn, VODS.table.c.id.in_(vod_ids))}
 
 
 class Service:

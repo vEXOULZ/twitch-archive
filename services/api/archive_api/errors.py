@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi.responses import JSONResponse
 
 _CLASS = {
@@ -16,17 +14,14 @@ _CLASS = {
 
 
 class FeathersError(Exception):
-    def __init__(self, code: int, message: str, data: Any = None) -> None:
+    def __init__(self, code: int, message: str) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
-        self.data = data
 
     def response(self) -> JSONResponse:
         name, class_name = _CLASS.get(self.code, ("GeneralError", "general-error"))
-        body: dict[str, Any] = {"name": name, "message": self.message, "code": self.code, "className": class_name}
-        if self.data is not None:
-            body["data"] = self.data
+        body = {"name": name, "message": self.message, "code": self.code, "className": class_name}
         return JSONResponse(body, status_code=self.code)
 
 

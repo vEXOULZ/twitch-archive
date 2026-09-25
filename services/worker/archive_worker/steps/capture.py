@@ -53,7 +53,8 @@ async def _download_all(items: list[tuple[str, Path]], concurrency: int) -> list
 # ── VOD playlist ──────────────────────────────────────────────────────────
 
 
-async def _resolve_variant(ctx: JobContext) -> str:
+async def _resolve_variant(ctx: JobContext) -> tuple[str, str]:
+    """The first available variant: (url, its media playlist)."""
     vod_id = ctx.require_vod_id()
     tok = await ctx.deps.gql.vod_access_token(vod_id)
     master = await http.request("GET", hls.vod_master_url(vod_id, tok.value, tok.signature))
@@ -63,8 +64,7 @@ async def _resolve_variant(ctx: JobContext) -> str:
     last: BaseException | None = None
     for url in hls.twitch_variant_candidates(variants):
         try:
-            await http.request("GET", url, attempts=2)
-            return url
+            return url, (await http.request("GET", url, attempts=2)).text
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 403:
                 raise
@@ -83,11 +83,10 @@ async def _fetch_vod_playlist(ctx: JobContext) -> tuple[hls.MediaPlaylist, str]:
             if exc.response.status_code not in (403, 404):
                 raise
             ctx.log.info("stored variant returned %s, re-resolving", exc.response.status_code)
-    url = await _resolve_variant(ctx)
+    url, text = await _resolve_variant(ctx)
     ctx.payload["variant_url"] = url
     await ctx.save()
-    resp = await http.request("GET", url)
-    return hls.parse_media(resp.text), hls.base_url(url)
+    return hls.parse_media(text), hls.base_url(url)
 
 
 async def _sync_segments(ctx: JobContext, pl: hls.MediaPlaylist, base: str) -> tuple[int, int]:
@@ -145,22 +144,21 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
         )
         if isinstance(video, BaseException):
             raise video
-        try:
-            if isinstance(fetched, BaseException):
+        if isinstance(fetched, BaseException):  # token/usher/playlist failures
+            if not isinstance(fetched, Exception):
                 raise fetched
-            pl, base = fetched
-            errors = 0
-        except Exception as exc:  # token/usher/playlist failures
             errors += 1
             captured = (ctx.hls_dir / "index.m3u8").exists()
             if video is None and captured:
                 ctx.log.info("VOD %s is gone from Twitch; finishing with what was captured", vod_id)
                 break
             if video is None or one_shot or errors >= 30:
-                raise StepError(f"could not fetch VOD playlist for {vod_id}: {exc}") from exc
-            ctx.log.warning("playlist fetch failed (%s), retrying", exc)
+                raise StepError(f"could not fetch VOD playlist for {vod_id}: {fetched}") from fetched
+            ctx.log.warning("playlist fetch failed (%s), retrying", fetched)
             await asyncio.sleep(s.hls_poll_interval_seconds)
             continue
+        pl, base = fetched
+        errors = 0
 
         if pl.total_seconds:
             await ctx.update_vod(duration=format_hhmmss(pl.total_seconds))
@@ -245,7 +243,6 @@ async def live_record(ctx: JobContext) -> None:
                     variant_url = await _live_variant(ctx, login)
                 except Exception as exc:
                     ctx.log.warning("live token/master failed: %s", exc)
-                    variant_url = None
                 if variant_url is None:
                     idle += 1
                     if idle >= s.live_end_threshold // 10 + 1 and not await _still_live(ctx):

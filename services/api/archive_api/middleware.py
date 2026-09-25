@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import math
 import time
@@ -46,6 +47,7 @@ class ResponseCache:
     def __init__(self, ttl: int, maxsize: int = 4096) -> None:
         self.enabled = ttl > 0
         self._cache: TTLCache[str, Any] = TTLCache(maxsize=maxsize, ttl=max(ttl, 1))
+        self._rendering: dict[str, asyncio.Task[JsonBody]] = {}
 
     def get(self, key: str) -> Any:
         return self._cache.get(key) if self.enabled else None
@@ -63,12 +65,28 @@ class ResponseCache:
         self._cache.clear()
 
     async def get_or_render(self, key: str, factory: Callable[[], Awaitable[Any]]) -> JsonBody:
-        """Cached body for ``key``, else ``await factory()`` rendered (not cached if it raises)."""
+        """Cached body for ``key``, else ``await factory()`` rendered (not cached if it raises).
+        Concurrent misses on one key share a single render, which runs to completion
+        even if the request that started it goes away."""
         body = self.get(key)
-        if body is None:
-            body = JsonBody(await factory())
-            self.set(key, body)
+        if body is not None:
+            return body
+        task = self._rendering.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._render(key, factory))
+            self._rendering[key] = task
+            task.add_done_callback(lambda t: self._render_done(key, t))
+        return await asyncio.shield(task)
+
+    async def _render(self, key: str, factory: Callable[[], Awaitable[Any]]) -> JsonBody:
+        body = JsonBody(await factory())
+        self.set(key, body)
         return body
+
+    def _render_done(self, key: str, task: asyncio.Task[JsonBody]) -> None:
+        self._rendering.pop(key, None)
+        if not task.cancelled():
+            task.exception()  # retrieved: the requests awaiting it re-raise it
 
 
 def client_ip(request: Request) -> str:
