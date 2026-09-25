@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl
 
-from sqlalchemy import ColumnElement, Text, and_, cast, literal, or_, true
+from sqlalchemy import Boolean, ColumnElement, Text, and_, cast, func, literal, or_, true
 from sqlalchemy.dialects.postgresql import JSONB
 
 from .errors import FeathersError
@@ -200,26 +200,62 @@ def parse(
     return ParsedQuery(where=where, order_by=order_by, limit=limit, skip=skip, select=select)
 
 
-# ── The "ilike games" chapter filter (vods only) ───────────────────────────
+# ── Chapter filters (vods only) ────────────────────────────────────────────
 
 _PG_REGEX_SPECIAL = re.compile(r"([\\.^$|?*+()\[\]{}])")
 
 
-def chapter_name_filter(chapters_col) -> Special:
-    """``chapters[name]=x`` -> case-insensitive substring match on any chapter name.
+def chapter_filter(chapters_col) -> Special:
+    """``chapters[...]`` filters; each one matches when *any* chapter matches.
 
-    Same JSONPath the legacy API used, but the user input is regex-escaped and
-    bound as a parameter instead of being interpolated.
+    * ``chapters[name]=x``: case-insensitive substring of the name (legacy)
+    * ``chapters[name][$eq]=x``: exact, case-sensitive name
+    * ``chapters[gameId]=id``: exact gameId
+    * ``chapters[gameId]=null``: a chapter with no Twitch category (gameId null)
+
+    Several keys combine with AND. User input is never interpolated into the
+    JSONPath: the substring is regex-escaped (as the legacy API should have
+    done), the exact matches are passed as JSONPath variables.
     """
     import json
 
     from sqlalchemy.dialects.postgresql import JSONPATH
 
+    def jsonpath(path: str) -> ColumnElement:
+        return cast(literal(path, Text), JSONPATH)
+
+    def exists(path: str, value: str) -> ColumnElement[bool]:
+        return func.jsonb_path_exists(chapters_col, jsonpath(path), literal({"v": value}, JSONB), type_=Boolean)
+
+    def invalid(key: str = "") -> FeathersError:
+        return FeathersError(400, f"Invalid query parameter 'chapters{key}'")
+
+    def name(value: Any) -> ColumnElement[bool]:
+        if isinstance(value, str):
+            pattern = ".*" + _PG_REGEX_SPECIAL.sub(r"\\\1", value) + ".*"
+            path = f"$[*] ? (@.name like_regex {json.dumps(pattern, ensure_ascii=False)} flag \"i\")"
+            return chapters_col.op("@?")(jsonpath(path))
+        if isinstance(value, dict) and set(value) == {"$eq"} and isinstance(value["$eq"], str):
+            return exists("$[*] ? (@.name == $v)", value["$eq"])
+        raise invalid("[name]")
+
+    def game_id(value: Any) -> ColumnElement[bool]:
+        if not isinstance(value, str) or not value:
+            raise invalid("[gameId]")
+        if value == "null":
+            return chapters_col.op("@?")(jsonpath("$[*] ? (@.gameId == null)"))
+        return exists("$[*] ? (@.gameId == $v)", value)
+
+    builders = {"name": name, "gameId": game_id}
+
     def build(value: Any) -> ColumnElement[bool]:
-        if not isinstance(value, dict) or "name" not in value or not isinstance(value["name"], str):
-            raise FeathersError(400, "Invalid query parameter 'chapters'")
-        pattern = ".*" + _PG_REGEX_SPECIAL.sub(r"\\\1", value["name"]) + ".*"
-        path = f"$[*] ? (@.name like_regex {json.dumps(pattern, ensure_ascii=False)} flag \"i\")"
-        return chapters_col.op("@?")(cast(literal(path, Text), JSONPATH))
+        if not isinstance(value, dict) or not value:
+            raise invalid()
+        clauses = []
+        for key, operand in value.items():
+            if key not in builders:
+                raise invalid(f"[{key}]")
+            clauses.append(builders[key](operand))
+        return and_(*clauses)
 
     return build

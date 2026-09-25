@@ -4,11 +4,15 @@
 * BIGINT and NUMERIC: strings (node-postgres does not parse them)
 * JSONB: passed through untouched
 * attribute names: Sequelize's (``vodId`` for ``vod_id`` on games/emotes)
+
+Fields the legacy API did not have are only ever added next to the legacy
+ones (see ``vod_additions``), never replacing them.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -19,6 +23,7 @@ from typing import Any
 from sqlalchemy import Column, Table
 
 from archive_common.models import Emote, Game, Log, Stream, Vod
+from archive_common.timeutil import hhmmss_to_seconds
 
 
 def js_iso(value: dt.datetime | None) -> str | None:
@@ -57,6 +62,8 @@ class Resource:
     id_key: str
     # extra accepted query names -> JSON key (raw column names Sequelize also accepted)
     aliases: Mapping[str, str]
+    # adds derived fields to a rendered item, in place
+    additions: Callable[[dict[str, Any]], None] | None = None
 
     @cached_property
     def by_key(self) -> dict[str, Field]:
@@ -72,10 +79,48 @@ class Resource:
             if select is not None and f.key not in select:
                 continue
             out[f.key] = f.convert(row[f.key])
+        if self.additions is not None:
+            self.additions(out)
         return out
 
     def columns(self, select: set[str] | None = None) -> list:
         return [f.column.label(f.key) for f in self.fields if select is None or f.key in select]
+
+
+# ── Additive fields ───────────────────────────────────────────────────────
+
+_BOX_ART_SIZE_RE = re.compile(r"-\d+x\d+(\.\w+)$")
+
+
+def box_art_template(url: str | None) -> str | None:
+    """Stored box art (``...-40x53.jpg``) -> the Helix ``box_art_url`` form (``...-{width}x{height}.jpg``)."""
+    if not url:
+        return None
+    return _BOX_ART_SIZE_RE.sub(r"-{width}x{height}\1", url)
+
+
+def duration_seconds(value: str | None) -> int | None:
+    try:
+        return hhmmss_to_seconds(value) if value else None
+    except ValueError:
+        return None
+
+
+def chapter_additions(chapter: Any) -> Any:
+    """``imageTemplate`` next to ``image``, and ``length`` next to ``end`` (which holds the length)."""
+    if not isinstance(chapter, dict):
+        return chapter
+    out = dict(chapter)
+    out.setdefault("imageTemplate", box_art_template(chapter.get("image")))
+    out.setdefault("length", chapter.get("end"))
+    return out
+
+
+def vod_additions(vod: dict[str, Any]) -> None:
+    if isinstance(vod.get("chapters"), list):
+        vod["chapters"] = [chapter_additions(c) for c in vod["chapters"]]
+    if "duration" in vod:
+        vod["duration_seconds"] = duration_seconds(vod["duration"])
 
 
 def _t(model) -> Table:
@@ -101,6 +146,7 @@ VODS = Resource(
     ),
     "id",
     {},
+    vod_additions,
 )
 
 GAMES = Resource(

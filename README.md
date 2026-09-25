@@ -366,7 +366,7 @@ That queues a `live_file` job. As with the old app, the call returns **404 when 
 
 ## 6. Public API reference
 
-This is what the frontend uses. The output is compatible with the old Feathers API. Tests replay 62 responses captured from the old API, and they match field for field.
+This is what the frontend uses. The output is compatible with the old Feathers API. Tests replay 62 responses captured from the old API, and they match field for field (ignoring the added fields below).
 
 | Route | Notes |
 |---|---|
@@ -379,9 +379,20 @@ This is what the frontend uses. The output is compatible with the old Feathers A
 | `GET /v2/badges` | `{channel: [...], global: [...]}` in the Helix `chat/badges` format, cached for 1h. |
 | `GET /healthz` | `{"ok": true}` once the database responds. |
 
-**Query syntax (Feathers):** `$limit`, `$skip`, `$sort[field]=1|-1` and `$select[]=field`. Field filters accept `$ne`, `$in`, `$nin`, `$lt`, `$lte`, `$gt`, `$gte`, `$like`, `$notLike`, `$iLike` and `$notILike`, and can be combined with `$or`/`$and`. `chapters[name]=text` does a case-insensitive substring match on chapter names. Unknown fields and filters on JSON columns return 400. POST, PUT, PATCH and DELETE return 405.
+**Additions for the new sites.** The old API never had these; they only add routes and fields, so the old frontend is unaffected.
 
-Examples: `/vods?$limit=20&$sort[createdAt]=-1`, `/vods?title[$iLike]=%25zelda%25`, `/vods?createdAt[$gte]=2025-01-01&createdAt[$lte]=2025-02-01`, `/vods?chapters[name]=Twilight`.
+| Route / field | Notes |
+|---|---|
+| `GET /v1/games-played` | `[{name, gameId, image, imageTemplate, vods, chapters, lastPlayed}]`, one entry per game across all VODs' chapters. `vods` counts VODs (not chapters), `chapters` counts chapters, `lastPlayed` is the `createdAt` of the newest VOD with the game; `name`, `gameId` and `image` come from its most recent chapter. Grouped by `gameId`, else by name; chapters without a category are one entry named `No category` with `gameId: null`. Sorted by `vods` desc, `lastPlayed` desc, `name`. Cached like `/vods`. |
+| `GET /v1/status` | `{live, stream, vod}`. Live: `stream` is `{id, started_at, title, game: {name, gameId, image, imageTemplate} \| null}` and `vod` is the VOD row of that stream (`null` until the worker has created it). Offline: `stream` is `null` and `vod` is the latest VOD. `vod` has the usual `/vods` fields. Live state comes from `streams.is_live`; title and category from Helix when credentials are set, else from the VOD's title and last chapter. Cached for 45 s. |
+| `GET /v1/emotes/third-party` | `{"7tv": [...], "bttv": [...], "ffz": [...], "failed": [...]}`, each item `{id, code, provider}`: global plus channel emotes for `ARCHIVE_TWITCH_ID` from the providers' APIs (a channel emote replaces a global one with the same code). Build image URLs from the CDNs: `cdn.7tv.app/emote/{id}/1x.webp`, `cdn.betterttv.net/emote/{id}/1x`, `cdn.frankerfacez.com/emote/{id}/1`. A provider that failed is named in `failed` (its list holds whatever part loaded). Cached for 6 h, or 5 min when something failed. |
+| `chapters[].imageTemplate` | On every chapter in `/vods` (and in `vod`s embedded elsewhere): the box art with `{width}x{height}` in place of the stored `40x53`, like Helix's `box_art_url`. `image` is unchanged. |
+| `chapters[].length` | Same value as `end`, which holds the chapter's length in seconds, not its end time. |
+| `duration_seconds` | On each VOD next to `duration` (`"HH:MM:SS"`), as a number. Only present when `duration` is. |
+
+**Query syntax (Feathers):** `$limit`, `$skip`, `$sort[field]=1|-1` and `$select[]=field`. Field filters accept `$ne`, `$in`, `$nin`, `$lt`, `$lte`, `$gt`, `$gte`, `$like`, `$notLike`, `$iLike` and `$notILike`, and can be combined with `$or`/`$and`. `chapters[name]=text` does a case-insensitive substring match on chapter names. `chapters[name][$eq]=text` matches a chapter name exactly (case-sensitive), `chapters[gameId]=id` matches a chapter's gameId exactly, and `chapters[gameId]=null` finds VODs with an uncategorised chapter (the `No category` entry of `/v1/games-played`). Each matches when any chapter matches; several combine with AND. Unknown fields and filters on JSON columns return 400. POST, PUT, PATCH and DELETE return 405.
+
+Examples: `/vods?$limit=20&$sort[createdAt]=-1`, `/vods?title[$iLike]=%25zelda%25`, `/vods?createdAt[$gte]=2025-01-01&createdAt[$lte]=2025-02-01`, `/vods?chapters[name]=Twilight`, `/vods?chapters[gameId]=368205`.
 
 **Differences from the old API:** `$select` now works (it used to return a 500), `/v2/badges` now works, and the `chapters[name]` input is escaped and combines with other filters.
 
