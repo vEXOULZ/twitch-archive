@@ -27,7 +27,7 @@ from archive_common.twitch.helix import Helix
 
 from .comments import Comments
 from .errors import FeathersError, LegacyError, legacy_error
-from .middleware import RateLimiter, ResponseCache, client_ip
+from .middleware import GZIP_MIN_SIZE, RateLimiter, ResponseCache, client_ip
 from .services import build_services
 
 log = logging.getLogger("archive_api")
@@ -54,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await engine.dispose()
 
     app = FastAPI(title="archive-api", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
-    app.add_middleware(GZipMiddleware, minimum_size=1024)
+    app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     @app.middleware("http")
@@ -119,11 +119,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         @app.get(f"/{name}", name=f"{name}-find")
         async def find(request: Request):
             qs = request.url.query
-            return JSONResponse(await service_cache.get_or_set(f"{name}?{qs}", lambda: query(svc.find, qs)))
+            body = await service_cache.get_or_render(f"{name}?{qs}", lambda: query(svc.find, qs))
+            return body.response(request)
 
         @app.get(f"/{name}/{{item_id}}", name=f"{name}-get")
-        async def get(item_id: str):
-            return JSONResponse(await service_cache.get_or_set(f"{name}/{item_id}", lambda: query(svc.get, item_id)))
+        async def get(item_id: str, request: Request):
+            body = await service_cache.get_or_render(f"{name}/{item_id}", lambda: query(svc.get, item_id))
+            return body.response(request)
 
         async def disallowed(request: Request):
             raise FeathersError(405, f"Provider 'rest' can not call '{request.method.lower()}'. (disallow)")
@@ -141,12 +143,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         params = request.query_params
         async with engine.connect() as conn:
             body = await comments.handle(conn, vod_id, params.get("content_offset_seconds"), params.get("cursor"))
-        return JSONResponse(body)
+        return body.response(request)
 
     # ── Badges ────────────────────────────────────────────────────────────
 
     @app.get("/v2/badges")
-    async def badges():
+    async def badges(request: Request):
         async def fetch() -> dict:
             if not helix.configured:
                 raise LegacyError(500, "Twitch credentials are not configured")
@@ -157,7 +159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise LegacyError(500, "Something went wrong trying to retrieve channel badges..") from exc
             return {"channel": channel, "global": glob}
 
-        return JSONResponse(await badges_cache.get_or_set("badges", fetch))
+        return (await badges_cache.get_or_render("badges", fetch)).response(request)
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon():

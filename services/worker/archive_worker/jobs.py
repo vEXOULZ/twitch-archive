@@ -1,9 +1,17 @@
 """Postgres-backed job queue and runner.
 
-A job is a list of named steps (see ``KINDS``). ``jobs.step`` holds the step
-being (or next to be) run, and ``jobs.payload`` carries state between steps, so
-a restarted worker resumes where it stopped. Steps are written to be
-idempotent: re-running one after a crash is safe.
+A job is a list of named steps (see ``KINDS``). ``jobs.step`` is the first step
+that has not finished: the runner advances it (together with ``jobs.payload``,
+which carries state between steps) only after a step returns, so a restarted
+worker never repeats a finished step. A step interrupted part-way is re-run, so
+steps must tolerate that (most checkpoint their own progress in the payload).
+
+Manual gates: a job pauses (state ``paused``) when it is about to start a gated
+step, and waits there until ``resume``. Gates come from the job's own
+``pause_before`` or, when that is NULL, ``Settings.manual_steps[kind]``.
+``pause_next`` pauses at the next step boundary once (single-stepping, or a
+pause requested while the job runs). Gates are checked when a job moves on to
+a step, so resuming, retrying or recovering a job runs its current step.
 """
 
 from __future__ import annotations
@@ -14,8 +22,9 @@ import logging
 import traceback
 from typing import Any
 
-from sqlalchemy import Select, or_, select, update
+from sqlalchemy import Select, func, or_, select, update
 
+from archive_common.config import Settings, get_settings
 from archive_common.db import execute, get_sessionmaker
 from archive_common.models import Job
 
@@ -44,22 +53,52 @@ KINDS: dict[str, list[str]] = {
 }
 
 MAX_ATTEMPTS = 3
-ACTIVE = ("queued", "running")
+ACTIVE = ("queued", "running", "paused")
+STATES = ("queued", "running", "paused", "done", "failed", "cancelled")
 
 
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
-async def enqueue(kind: str, vod_id: str | None, payload: dict[str, Any] | None = None) -> Job:
+def check_steps(kind: str, steps: list[str]) -> None:
+    """ValueError unless ``kind`` exists and every name is one of its steps."""
     if kind not in KINDS:
-        raise ValueError(f"unknown job kind {kind}")
+        raise ValueError(f"unknown job kind {kind!r}; kinds: {', '.join(KINDS)}")
+    unknown = [s for s in steps if s not in KINDS[kind]]
+    if unknown:
+        raise ValueError(f"{kind!r} has no step(s) {', '.join(unknown)}; steps: {', '.join(KINDS[kind])}")
+
+
+def gates(job: Job, settings: Settings) -> list[str]:
+    """Steps this job pauses before: its own override, else the global per-kind setting."""
+    if job.pause_before is not None:
+        return job.pause_before
+    return settings.manual_steps.get(job.kind, [])
+
+
+async def enqueue(
+    kind: str,
+    vod_id: str | None,
+    payload: dict[str, Any] | None = None,
+    *,
+    step: str | None = None,
+    pause_before: list[str] | None = None,
+    paused: bool = False,
+    settings: Settings | None = None,
+) -> Job:
+    """Queue a job at ``step`` (default: its first). ``paused`` holds it until resumed."""
+    check_steps(kind, [step] if step else [])
+    if pause_before is not None:
+        check_steps(kind, pause_before)
+    job = Job(kind=kind, vod_id=vod_id, step=step or KINDS[kind][0], payload=payload or {},
+              pause_before=pause_before)
+    job.state = "paused" if paused or job.step in gates(job, settings or get_settings()) else "queued"
     async with get_sessionmaker()() as s:
-        job = Job(kind=kind, vod_id=vod_id, state="queued", step=KINDS[kind][0], payload=payload or {})
         s.add(job)
         await s.commit()
         await s.refresh(job)
-    log.info("enqueued job %s %s vod=%s", job.id, kind, vod_id)
+    log.info("enqueued job %s %s vod=%s (%s at %s)", job.id, kind, vod_id, job.state, job.step)
     return job
 
 
@@ -91,18 +130,34 @@ async def retry(job_id: int) -> Job | None:
             return None
         job.state = "queued"
         job.attempts = 0
-        job.payload = {k: v for k, v in (job.payload or {}).items() if k != "not_before"}
+        job.not_before = None
         await s.commit()
         return job
 
 
-async def cancel(job_id: int) -> Job | None:
+async def resume(job_id: int, *, once: bool = False) -> tuple[Job | None, bool]:
+    """Queue a paused job at its current step; ``once`` pauses it again after that step.
+    Returns (job, whether it was paused and is now queued)."""
+    async with get_sessionmaker()() as s:
+        job = await s.get(Job, job_id)
+        if job is None or job.state != "paused":
+            return job, False
+        job.state = "queued"
+        job.pause_next = once
+        await s.commit()
+        return job, True
+
+
+async def pause(job_id: int) -> Job | None:
+    """Pause a queued job now, or a running one when its current step finishes."""
     async with get_sessionmaker()() as s:
         job = await s.get(Job, job_id)
         if job is None:
             return None
         if job.state == "queued":
-            job.state = "cancelled"
+            job.state = "paused"
+        elif job.state == "running":
+            job.pause_next = True
         await s.commit()
         return job
 
@@ -120,7 +175,29 @@ class Runner:
         self.concurrency = concurrency
         self.running: dict[int, asyncio.Task] = {}
         self.running_keys: dict[int, str] = {}
+        self.cancelling: set[int] = set()
         self.wakeup = asyncio.Event()
+        for kind, steps in deps.settings.manual_steps.items():
+            check_steps(kind, steps)  # fail at startup on a typo in ARCHIVE_MANUAL_STEPS
+
+    async def cancel(self, job_id: int) -> Job | None:
+        """Cancel a queued or paused job, or stop a running one (at once, mid-step)."""
+        async with get_sessionmaker()() as s:
+            job = await s.get(Job, job_id)
+            if job is None:
+                return None
+            if job.state in ("queued", "paused"):
+                job.state = "cancelled"
+                await s.commit()
+                return job
+        task = self.running.get(job_id)
+        if job.state == "running" and task is not None:
+            self.cancelling.add(job_id)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            async with get_sessionmaker()() as s:
+                job = await s.get(Job, job_id)
+        return job
 
     async def recover(self) -> None:
         """Jobs left 'running' by a previous process are resumed."""
@@ -159,18 +236,15 @@ class Runner:
     def _done(self, job_id: int) -> None:
         self.running.pop(job_id, None)
         self.running_keys.pop(job_id, None)
+        self.cancelling.discard(job_id)
         self.poke()
 
     async def _claim(self) -> Job | None:
         busy = set(self.running_keys.values())
         async with get_sessionmaker()() as s:
-            not_before = Job.payload["not_before"].astext
             stmt = (
                 select(Job)
-                .where(
-                    Job.state == "queued",
-                    or_(not_before.is_(None), not_before <= _now().isoformat()),
-                )
+                .where(Job.state == "queued", or_(Job.not_before.is_(None), Job.not_before <= func.now()))
                 .order_by(Job.id)
                 .with_for_update(skip_locked=True)
                 .limit(50)
@@ -186,24 +260,51 @@ class Runner:
     async def _set(self, job_id: int, **values: Any) -> None:
         await execute(update(Job).where(Job.id == job_id).values(**values))
 
+    async def _advance(self, job: Job, step: str, ctx: JobContext) -> bool:
+        """Checkpoint ``step`` as next; True if the job should pause before it."""
+        async with get_sessionmaker()() as s:
+            pause_next = (
+                await s.execute(
+                    update(Job)
+                    .where(Job.id == job.id)
+                    .values(step=step, payload=ctx.payload, vod_id=ctx.vod_id)
+                    .returning(Job.pause_next)
+                )
+            ).scalar_one()
+            pausing = pause_next or step in gates(job, self.deps.settings)
+            if pausing:
+                await s.execute(update(Job).where(Job.id == job.id).values(state="paused", pause_next=False))
+            await s.commit()
+            return pausing
+
     async def _run(self, job: Job) -> None:
         steps = KINDS.get(job.kind)
         if steps is None:
             await self._set(job.id, state="failed", last_error=f"unknown kind {job.kind}")
             return
         ctx = JobContext(job.id, job.kind, job.vod_id, dict(job.payload or {}), self.deps)
-        ctx.payload.pop("not_before", None)
         start = steps.index(job.step) if job.step in steps else 0
-        ctx.log.info("running %s (vod=%s) from step %s", job.kind, job.vod_id, steps[start])
+        # The step to resume from. Advanced as soon as a step returns, so the error
+        # paths below record progress even if the checkpoint write itself failed.
+        current: str | None = steps[start]
+        ctx.log.info("running %s (vod=%s) from step %s", job.kind, job.vod_id, current)
         try:
-            for step in steps[start:]:
-                await self._set(job.id, step=step, payload=ctx.payload, vod_id=ctx.vod_id)
-                ctx.log.info("step %s", step)
-                await STEPS[step](ctx)
-            await self._set(job.id, state="done", step=None, payload=ctx.payload, vod_id=ctx.vod_id, last_error=None)
+            for i in range(start, len(steps)):
+                ctx.log.info("step %s", steps[i])
+                await STEPS[steps[i]](ctx)
+                current = steps[i + 1] if i + 1 < len(steps) else None
+                if current is not None and await self._advance(job, current, ctx):
+                    ctx.log.info("paused before step %s", current)
+                    return
+            await self._set(job.id, state="done", step=None, payload=ctx.payload, vod_id=ctx.vod_id,
+                            last_error=None, not_before=None, pause_next=False)
             ctx.log.info("job %s finished", job.kind)
         except asyncio.CancelledError:
-            await asyncio.shield(self._set(job.id, state="queued", payload=ctx.payload, vod_id=ctx.vod_id))
+            # Worker shutdown re-queues the job; an admin cancel ends it.
+            state = "cancelled" if job.id in self.cancelling else "queued"
+            await asyncio.shield(
+                self._set(job.id, state=state, step=current, payload=ctx.payload, vod_id=ctx.vod_id)
+            )
             raise
         except Exception as exc:
             attempts = job.attempts + 1
@@ -211,16 +312,17 @@ class Runner:
                 err = str(exc)
             else:
                 err = "".join(traceback.format_exception(exc))[-4000:]
+            not_before = None
             if attempts >= MAX_ATTEMPTS:
                 state = "failed"
                 ctx.log.error("job failed permanently: %s", exc)
             else:
                 state = "queued"
                 delay = 60 * 2**attempts
-                ctx.payload["not_before"] = (_now() + dt.timedelta(seconds=delay)).isoformat()
+                not_before = _now() + dt.timedelta(seconds=delay)
                 ctx.log.warning("job step failed (%s); retry %d in %ds", exc, attempts, delay)
-            await self._set(job.id, state=state, attempts=attempts, last_error=err, payload=ctx.payload,
-                            vod_id=ctx.vod_id)
+            await self._set(job.id, state=state, step=current, attempts=attempts, last_error=err,
+                            payload=ctx.payload, vod_id=ctx.vod_id, not_before=not_before)
 
     async def shutdown(self) -> None:
         for task in list(self.running.values()):

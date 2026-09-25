@@ -29,7 +29,6 @@ async def resolve_vod(ctx: JobContext) -> None:
                 vod_id = video["id"]
         if vod_id:
             ctx.vod_id = vod_id
-            await ctx.save()
             ctx.log.info("stream %s is vod %s", stream_id, vod_id)
             return
         await asyncio.sleep(60)
@@ -70,7 +69,6 @@ async def ensure_source(ctx: JobContext) -> None:
         return
     if not ctx.payload.get("duration"):
         ctx.payload["duration"] = await ffmpeg.probe_duration(ctx.source_mp4)
-    await ctx.save()
 
 
 async def split(ctx: JobContext) -> None:
@@ -99,17 +97,17 @@ async def split(ctx: JobContext) -> None:
             await ffmpeg.cut(src, path, part.start, part.duration)
         out.append({"number": part.number, "start": part.start, "end": part.end, "path": str(path)})
         ctx.payload["parts"] = out
-        await ctx.save()
+        await ctx.save()  # cut parts survive a crash part-way through
     ctx.payload["parts"] = out
     ctx.payload["total_parts"] = len(all_parts)
-    await ctx.save()
 
 
 async def dmca_edit(ctx: JobContext) -> None:
     """Mute / black out claimed ranges. ``dmca`` jobs edit the full source
-    (claims are relative to it); ``part_dmca`` jobs edit the single cut part."""
-    if ctx.payload.get("dmca_done"):
-        return
+    (claims are relative to it); ``part_dmca`` jobs edit the single cut part.
+
+    Not idempotent once finished (it would edit the edited file again); the runner
+    guarantees a finished step is not re-run."""
     plan = planning.plan_dmca(ctx.payload.get("claims") or [])
     if plan.empty:
         raise StepError("no blocking claims to mute or black out")
@@ -118,12 +116,10 @@ async def dmca_edit(ctx: JobContext) -> None:
     edited: list[Path] = []
     for src in targets:
         cur = src
-        for i, (a, b) in enumerate(plan.blackout):
-            nxt = work / f"{src.stem}-black{i}.mp4"
-            ctx.log.info("blackout %s %.0f-%.0f", src.name, a, b)
-            await ffmpeg.blackout(cur, nxt, a, b, work)
-            if cur != src:
-                cur.unlink(missing_ok=True)
+        if plan.blackout:
+            nxt = work / f"{src.stem}-black.mp4"
+            ctx.log.info("blackout %s: %s", src.name, ", ".join(f"{a:.0f}-{b:.0f}" for a, b in plan.blackout))
+            await ffmpeg.blackout(cur, nxt, plan.blackout, work)
             cur = nxt
         if plan.mute:
             nxt = work / f"{src.stem}-muted.mp4"
@@ -139,8 +135,6 @@ async def dmca_edit(ctx: JobContext) -> None:
     else:
         ctx.payload["mp4"] = str(edited[0])
         ctx.payload.pop("parts", None)
-    ctx.payload["dmca_done"] = True
-    await ctx.save()
 
 
 async def cleanup(ctx: JobContext) -> None:

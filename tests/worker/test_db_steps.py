@@ -8,6 +8,7 @@ import datetime as dt
 import json
 
 import httpx
+import pytest
 import respx
 from sqlalchemy import delete, select
 
@@ -117,7 +118,7 @@ async def test_runner_resumes_from_failed_step(db, deps, monkeypatch):
     async with get_sessionmaker()() as s:
         after = await s.get(Job, job.id)
     assert (after.state, after.step, after.attempts) == ("queued", "b", 1)
-    assert after.payload["a"] and "not_before" in after.payload
+    assert after.payload == {"a": True, "b": True} and after.not_before is not None
     assert "boom" in after.last_error
 
     await runner._run(after)  # e.g. a restarted worker picks it up again
@@ -125,15 +126,47 @@ async def test_runner_resumes_from_failed_step(db, deps, monkeypatch):
         done = await s.get(Job, job.id)
     assert done.state == "done" and done.step is None
     assert calls == ["a", "b", "b", "c"]
-    assert done.payload == {"a": True, "b": True, "c": True}
+    assert done.payload == {"a": True, "b": True, "c": True} and done.not_before is None
+    await _reset()
+
+
+async def test_runner_does_not_repeat_finished_steps_after_interruption(db, deps, monkeypatch):
+    await _vod()
+    calls: list[str] = []
+
+    async def a(ctx):
+        calls.append("a")
+        ctx.payload["a"] = True
+
+    async def b(ctx):
+        calls.append("b")
+        if calls.count("b") == 1:
+            raise asyncio.CancelledError  # worker shut down mid-step
+
+    monkeypatch.setitem(jobs.KINDS, "test", ["a", "b"])
+    monkeypatch.setitem(jobs.STEPS, "a", a)
+    monkeypatch.setitem(jobs.STEPS, "b", b)
+
+    runner = jobs.Runner(deps)
+    job = await jobs.enqueue("test", VOD)
+    with pytest.raises(asyncio.CancelledError):
+        await runner._run(job)
+    async with get_sessionmaker()() as s:
+        after = await s.get(Job, job.id)
+    assert (after.state, after.step, after.payload) == ("queued", "b", {"a": True})
+
+    await runner._run(after)
+    assert calls == ["a", "b", "b"]
     await _reset()
 
 
 async def test_claim_respects_not_before_and_exclusivity(db, deps):
     await _vod()
     runner = jobs.Runner(deps)
-    later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
-    await jobs.enqueue("emotes", VOD, {"not_before": later})
+    later = await jobs.enqueue("emotes", VOD)
+    async with get_sessionmaker()() as s:
+        (await s.get(Job, later.id)).not_before = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+        await s.commit()
     assert await runner._claim() is None
     j1 = await jobs.enqueue("emotes", VOD)
     j2 = await jobs.enqueue("chapters", VOD)
