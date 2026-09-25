@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from archive_common import logs
 from archive_common.config import Settings, get_settings
 from archive_common.db import get_engine
 from archive_common.http import close_client
@@ -171,7 +172,7 @@ def run() -> None:
     import uvicorn
 
     settings = get_settings()
-    logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logs.setup(settings.log_level)
     uvicorn.run(
         "archive_api.main:create_app",
         factory=True,
@@ -180,6 +181,8 @@ def run() -> None:
         proxy_headers=True,
         forwarded_allow_ips="*",
         access_log=False,
+        log_level=settings.log_level.lower(),
+        log_config=None,  # use the handler from logs.setup
     )
 
 

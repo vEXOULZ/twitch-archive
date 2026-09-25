@@ -16,7 +16,7 @@ from pathlib import Path
 
 import uvicorn
 
-from archive_common import http
+from archive_common import http, logs
 from archive_common.config import get_settings
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
@@ -27,15 +27,6 @@ from .context import Deps
 from .monitor import Monitor
 
 log = logging.getLogger("archive_worker")
-
-
-def _logging(level: str) -> None:
-    logging.basicConfig(
-        level=level.upper(),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
-    for noisy in ("httpx", "httpcore", "googleapiclient.discovery_cache"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 async def serve(dry_run: bool = False) -> None:
@@ -51,6 +42,7 @@ async def serve(dry_run: bool = False) -> None:
             host=settings.admin_host,
             port=settings.admin_port,
             log_level=settings.log_level.lower(),
+            log_config=None,  # use the handler from logs.setup
             proxy_headers=False,
         )
     )
@@ -122,7 +114,7 @@ def run() -> None:
     p_enq.add_argument("payload", nargs="?", help="JSON object, e.g. '{\"start_part\": 2}'")
     args = parser.parse_args()
 
-    _logging(get_settings().log_level)
+    logs.setup(get_settings().log_level)
     if args.cmd == "import-youtube-token":
         asyncio.run(youtube.import_legacy_token(args.config))
         print("YouTube refresh token imported.")
