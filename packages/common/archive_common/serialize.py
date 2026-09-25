@@ -20,7 +20,8 @@ from functools import cached_property
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Column, Table
+from sqlalchemy import Column, Table, select
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.models import Emote, Game, Log, Stream, Vod
 from archive_common.timeutil import hhmmss_to_seconds
@@ -217,3 +218,35 @@ STREAMS = Resource(
     "id",
     {},
 )
+
+
+# ── Associations ──────────────────────────────────────────────────────────
+
+
+async def _games_for(conn: AsyncConnection, vod_ids: list[str]) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {v: [] for v in vod_ids}
+    if not vod_ids:
+        return out
+    rows = await conn.execute(
+        select(*GAMES.columns()).where(GAMES.table.c.vod_id.in_(vod_ids)).order_by(GAMES.table.c.id)
+    )
+    for row in rows.mappings():
+        out[row["vodId"]].append(GAMES.to_json(row))
+    return out
+
+
+async def attach_games(conn: AsyncConnection, vods: list[dict]) -> None:
+    """``games`` on each VOD, as the legacy include() hook added it."""
+    games = await _games_for(conn, [v["id"] for v in vods])
+    for vod in vods:
+        vod["games"] = games[vod["id"]]
+
+
+async def vod_json(conn: AsyncConnection, vod_id: str) -> dict[str, Any] | None:
+    """One VOD exactly as ``GET /vods/{id}`` renders it, or None."""
+    row = (await conn.execute(select(*VODS.columns()).where(VODS.table.c.id == vod_id))).mappings().first()
+    if row is None:
+        return None
+    vod = VODS.to_json(row)
+    await attach_games(conn, [vod])
+    return vod

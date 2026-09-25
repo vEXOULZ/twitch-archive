@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 import httpx
 
-from archive_api.serialize import box_art_template
+from archive_common.serialize import box_art_template
 
 
 async def _all_vods(client: httpx.AsyncClient, query: str = "") -> list[dict]:

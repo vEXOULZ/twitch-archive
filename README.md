@@ -144,7 +144,10 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_LIVE_END_THRESHOLD` | `90` | Polls with no new segments before the recorder checks whether the stream ended |
 | `ARCHIVE_SEGMENT_CONCURRENCY` | `4` | Parallel segment downloads |
 | `ARCHIVE_ADMIN_HOST` / `ARCHIVE_ADMIN_PORT` | `0.0.0.0` / `3031` | |
-| `ARCHIVE_ADMIN_API_KEY` | – | **Required** for any admin call |
+| `ARCHIVE_ADMIN_API_KEY` | – | **Required** for any admin call from a script |
+| `ARCHIVE_ADMIN_PASSWORD` | – | Password for the web dashboard's login; unset turns password login off. See [Browser access](#browser-access-dashboard) |
+| `ARCHIVE_ADMIN_TRUSTED_PROXIES` | `[]` | Reverse proxies (addresses or CIDR ranges, JSON list) whose `X-Forwarded-For` / `X-Real-IP` is believed when rate-limiting logins |
+| `ARCHIVE_API_INTERNAL_URL` | `http://127.0.0.1:<api port>` | Where `/admin/health` checks archive-api |
 | `ARCHIVE_GOOGLE_CLIENT_ID` / `ARCHIVE_GOOGLE_CLIENT_SECRET` | – | Google OAuth client for YouTube |
 | `ARCHIVE_GOOGLE_REDIRECT_URL` | `http://localhost:3031/admin/refreshtoken` | Must match a redirect URI on the Google client |
 
@@ -196,7 +199,7 @@ To handle the first case and detect the others early, the worker has a keep-aliv
 
 ## 4. Admin API
 
-The admin API is served by the worker on port 3031. Keep it on your **private network**: never expose it through your reverse proxy or tunnel. Every call needs `Authorization: Bearer <ARCHIVE_ADMIN_API_KEY>`. The old app accepted any word before the key, and so does this one.
+The admin API is served by the worker on port 3031. Keep it on your **private network**: never expose it through your reverse proxy or tunnel. Every call needs `Authorization: Bearer <ARCHIVE_ADMIN_API_KEY>`, or a dashboard login (see [Browser access](#browser-access-dashboard)). The old app accepted any word before the key, and so does this one.
 
 Long-running actions enqueue a job and return right away with `{"error": false, "msg": "...", "jobId": N}`. Errors return `{"error": true, "msg": "..."}`. Request bodies use the same field names as the old app. `platform` is accepted and ignored.
 
@@ -327,6 +330,43 @@ curl -s "${H[@]}" -X DELETE "$A/admin/delete" -d '{"vodId":"123"}'   # vod + log
 ```
 
 Paths in request bodies are **inside the worker container**, where `/data` is `ARCHIVE_HOST_DATA_DIR` on the host.
+
+### Browser access (dashboard)
+
+A web dashboard logs in with `ARCHIVE_ADMIN_PASSWORD` instead of carrying the API key. The key keeps working for scripts; every `/admin/*` route accepts either.
+
+| Route | |
+|---|---|
+| `GET /admin/session` | No auth. `{"authenticated", "csrf", "expiresAt", "passwordLogin"}` |
+| `POST /admin/session` `{"password"}` | Logs in: the same shape plus the `archive_admin` cookie. `401` wrong password, `429` + `Retry-After` after 5 failed logins in 5 minutes from one address, `404` when password login is off |
+| `DELETE /admin/session` | Logs out (`204`) and clears the cookie |
+
+The cookie is `HttpOnly; Secure; SameSite=Strict` and lasts 8 hours. Sessions live in the worker's memory, so a restart logs everyone out. With the cookie, every request except `GET` must also send the session's `csrf` value as `X-CSRF-Token`, or it gets `403`. `Secure` means browsers only send the cookie over HTTPS (or to `localhost`), so serve the dashboard through something that terminates TLS. If that is a reverse proxy, list its address in `ARCHIVE_ADMIN_TRUSTED_PROXIES` so the login rate limit counts the real client and not the proxy. Forwarded headers from any other address are ignored.
+
+What the dashboard reads and edits (all take the key or the cookie):
+
+```bash
+curl -s "${H[@]}" "$A/admin/health"                     # worker, api, youtube token, live stream, job counts + last 5 failures
+curl -s "${H[@]}" "$A/admin/jobs?before=120&limit=50"   # older jobs: ids below 120
+curl -s "${H[@]}" -X PATCH "$A/admin/jobs/42" -d '{"pauseBefore":["upload"],"pauseNext":false}'
+curl -s "${H[@]}" "$A/admin/jobs/42/events?after=0&limit=200"   # log lines, step changes, progress; poll with after=<next>
+curl -s "${H[@]}" "$A/admin/vods/123"                   # as GET /vods/123, plus chaptersLocked and recent jobs
+curl -s "${H[@]}" -X PATCH "$A/admin/vods/123" -d '{"title":"..."}'
+curl -s "${H[@]}" -X PUT "$A/admin/vods/123/chapters" \
+  -d '{"locked":true,"chapters":[{"name":"Just Chatting","gameId":"509658","imageTemplate":"https://.../509658-{width}x{height}.jpg","start":0,"length":3600,"restricted":false}]}'
+curl -s "${H[@]}" -X PUT "$A/admin/vods/123/youtube" -d '{"youtube":[{"id":"abc","type":"vod","part":1}]}'
+curl -s "${H[@]}" -X PUT "$A/admin/vods/123/drive" -d '{"drive":[{"id":"...","type":"live"}]}'
+curl -s "${H[@]}" "$A/admin/vods/123/emotes"            # the saved emotes row, or null
+curl -s "${H[@]}" "$A/admin/twitch/games?query=chat"    # Twitch categories: gameId, name, imageTemplate
+curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
+```
+
+- **Health** refreshes the YouTube token at most every 10 minutes; `/admin/youtube/status` always does.
+- **Job events** keep about the last 1000 entries per job. `capture`, `split` and `upload` add `progress` (`{"done", "total", "unit"}`, unit `parts`, `bytes` or `percent`).
+- **Chapters** must be sorted, must not overlap, must have `length > 0` and must end inside the VOD. They are stored in the legacy shape, with `image` filled in at 40x53 for older readers. `"locked": true` makes the automatic `chapters` step skip the VOD. `POST /admin/chapters` with `{"force": true}` (or a job payload with `"force": true`) overrides the lock.
+- **YouTube entries** keep their stored thumbnail, and keep their duration unless you send a new one.
+- **Edits show up on the public API at once:** the worker sends a Postgres `NOTIFY`, and archive-api drops its cached responses for that VOD and for the lists that include it.
+- **Audit log:** every state-changing admin request that succeeds is stored as `{at, actor, action, target, detail}`. `actor` is `password` or `api-key`, `action` is the method and route, and `detail` is the request body. A login password is never stored.
 
 ---
 

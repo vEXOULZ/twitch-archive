@@ -24,6 +24,7 @@ from archive_common.twitch.helix import Helix
 from . import jobs, youtube
 from .admin import create_admin_app
 from .context import Deps
+from .events import JobEvents
 from .monitor import Monitor
 
 log = logging.getLogger("archive_worker")
@@ -33,7 +34,9 @@ async def serve(dry_run: bool = False) -> None:
     settings = get_settings()
     if dry_run:
         settings.dry_run = True
-    deps = Deps(settings, Helix(settings), Gql(settings), youtube.YouTube(settings))
+    events = JobEvents()
+    events.install()  # job log lines -> GET /admin/jobs/{id}/events
+    deps = Deps(settings, Helix(settings), Gql(settings), youtube.YouTube(settings), events)
     runner = jobs.Runner(deps)
     monitor = Monitor(deps.helix, runner)
     admin = uvicorn.Server(
@@ -64,6 +67,7 @@ async def serve(dry_run: bool = False) -> None:
     tasks = [
         asyncio.create_task(runner.run_forever(), name="runner"),
         asyncio.create_task(monitor.run_forever(), name="monitor"),
+        asyncio.create_task(events.run_forever(), name="job-events"),  # flushes on cancel
     ]
     if settings.youtube_upload and settings.google_client_id:
         # Daily refresh: surfaces a revoked token in the logs before a stream needs

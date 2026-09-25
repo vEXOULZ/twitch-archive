@@ -27,6 +27,9 @@ def setup(level: str) -> None:
     """Log to stderr at ``level`` (a name such as ``INFO``, any case)."""
     handler = logging.StreamHandler()
     handler.setFormatter(_Formatter(FORMAT))
+    # On the handler too: a logger may be set lower for another handler (the worker's
+    # job event log records INFO whatever this level is), and stderr should not follow it.
+    handler.setLevel(level.upper())
     logging.basicConfig(level=level.upper(), handlers=[handler], force=True)
     for name in QUIET:
         logging.getLogger(name).setLevel(logging.WARNING)

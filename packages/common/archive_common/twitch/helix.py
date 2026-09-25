@@ -104,6 +104,10 @@ class Helix:
         self._games[game_id] = game
         return game
 
+    async def search_categories(self, query: str, first: int = 20) -> list[dict]:
+        data = await self.get("/search/categories", {"query": query, "first": first})
+        return data.get("data") or []
+
     async def channel_badges(self, broadcaster_id: str) -> list[dict] | None:
         data = await self.get("/chat/badges", {"broadcaster_id": broadcaster_id})
         return data.get("data")

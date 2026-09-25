@@ -14,6 +14,7 @@ import json
 import logging
 import random
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -114,6 +115,8 @@ class YouTube:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._creds: Credentials | None = None
+        self.last_check: dict[str, Any] | None = None  # check() result plus "checkedAt"
+        self._check_lock = asyncio.Lock()
 
     async def _credentials(self) -> Credentials:
         if self._creds is None:
@@ -148,6 +151,21 @@ class YouTube:
         revoked), and counts as "use" for Google's rule that revokes refresh
         tokens left unused for six months.
         """
+        result = await self._check()
+        self.last_check = {**result, "checkedAt": dt.datetime.now(dt.timezone.utc)}
+        return result
+
+    async def cached_check(self, max_age: float = 600) -> dict[str, Any]:
+        """The last check() result (with ``checkedAt``), running a new one if it is older
+        than ``max_age`` seconds. Cheap enough to call on every dashboard refresh."""
+        async with self._check_lock:
+            last = self.last_check
+            age = (dt.datetime.now(dt.timezone.utc) - last["checkedAt"]).total_seconds() if last else None
+            if age is None or age > max_age:
+                await self.check()
+            return self.last_check
+
+    async def _check(self) -> dict[str, Any]:
         if not self.settings.google_client_id:
             return {"authorized": False, "valid": False, "error": "ARCHIVE_GOOGLE_CLIENT_ID is not configured"}
         self._creds = None
@@ -189,7 +207,9 @@ class YouTube:
         description: str,
         privacy_status: str,
         category_id: str = "20",
+        on_progress: Callable[[int], None] | None = None,
     ) -> dict[str, Any]:
+        """``on_progress(percent)`` is called (from a worker thread) about every 10%."""
         service = await self._service()
         body = {
             "snippet": {"title": title, "description": description, "categoryId": category_id},
@@ -199,9 +219,9 @@ class YouTube:
         request = service.videos().insert(
             part="id,snippet,status", body=body, media_body=media, notifySubscribers=True
         )
-        return await asyncio.to_thread(self._resumable, request, path)
+        return await asyncio.to_thread(self._resumable, request, path, on_progress)
 
-    def _resumable(self, request, path: Path) -> dict[str, Any]:
+    def _resumable(self, request, path: Path, on_progress: Callable[[int], None] | None = None) -> dict[str, Any]:
         response = None
         retries = 0
         last_pct = -10
@@ -213,6 +233,8 @@ class YouTube:
                     if pct >= last_pct + 10:
                         log.info("upload %s: %d%%", path.name, pct)
                         last_pct = pct
+                        if on_progress is not None:
+                            on_progress(pct)
                 retries = 0
             except HttpError as exc:
                 if exc.resp.status not in RETRIABLE_STATUS:

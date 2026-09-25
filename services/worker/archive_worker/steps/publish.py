@@ -48,14 +48,20 @@ async def upload(ctx: JobContext) -> None:
     status = planning.privacy(ctx.video_type, s.youtube_public, s.multi_track)
     uploaded: dict[str, dict] = ctx.payload.setdefault("uploaded", {})
 
-    for part in ctx.payload["parts"]:
+    parts = ctx.payload["parts"]
+    for part in parts:
         key = str(part["number"])
         if key in uploaded:
             continue
         path = Path(part["path"])
         title = planning.video_title(s.channel, ctx.video_type, vod.created_at, s.timezone, part["number"], total)
         ctx.log.info("uploading %s as %r (%s)", path.name, title, status)
-        res = await ctx.deps.youtube.upload(path, title=title, description=description, privacy_status=status)
+
+        def progress(pct: int, number=part["number"]) -> None:
+            ctx.progress(pct, 100, "percent", f"uploading part {number}: {pct}%")
+
+        res = await ctx.deps.youtube.upload(path, title=title, description=description, privacy_status=status,
+                                            on_progress=progress)
         thumbs = (res.get("snippet") or {}).get("thumbnails") or {}
         entry = {
             "id": res["id"],
@@ -69,6 +75,8 @@ async def upload(ctx: JobContext) -> None:
         uploaded[key] = entry
         await ctx.save()
         ctx.log.info("uploaded part %s -> https://youtu.be/%s", key, res["id"])
+        done = sum(1 for p in parts if str(p["number"]) in uploaded)
+        ctx.progress(done, len(parts), "parts", f"uploaded {done}/{len(parts)} parts")
 
 
 async def describe(ctx: JobContext) -> None:

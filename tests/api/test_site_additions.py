@@ -8,9 +8,9 @@ import respx
 
 from archive_api import third_party_emotes as tpe
 from archive_api.main import create_app
-from archive_api.serialize import box_art_template, chapter_additions, duration_seconds, vod_additions
 from archive_api.status import _helix_stream
 from archive_common.config import Settings
+from archive_common.serialize import box_art_template, chapter_additions, duration_seconds, vod_additions
 
 TWITCH_ID = "38656648"
 

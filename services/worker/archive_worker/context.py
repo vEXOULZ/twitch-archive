@@ -15,6 +15,7 @@ from archive_common.models import Job, Vod
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
 
+from .events import JOB_LOGGER, UNITS, JobEvents
 from .youtube import YouTube
 
 
@@ -24,6 +25,7 @@ class Deps:
     helix: Helix
     gql: Gql
     youtube: YouTube
+    events: JobEvents | None = None  # the job event log (GET /admin/jobs/{id}/events)
 
 
 class StepError(RuntimeError):
@@ -40,9 +42,24 @@ class JobContext:
     log: logging.LoggerAdapter = field(init=False)
 
     def __post_init__(self) -> None:
-        self.log = logging.LoggerAdapter(
-            logging.getLogger("archive_worker.job"), {"job": self.job_id}
-        )
+        # The runner updates "step" as the job moves on, so every line records where it came from.
+        self.log = logging.LoggerAdapter(logging.getLogger(JOB_LOGGER), {"job": self.job_id, "step": None})
+
+    @property
+    def step(self) -> str | None:
+        return self.log.extra["step"]
+
+    @step.setter
+    def step(self, name: str | None) -> None:
+        self.log.extra["step"] = name
+
+    def progress(self, done: float, total: float, unit: str, message: str) -> None:
+        """Record how far the current step is, for the dashboard (not the process log).
+        Safe to call from a worker thread."""
+        assert unit in UNITS, unit
+        if self.deps.events is not None:
+            self.deps.events.add(self.job_id, "info", self.step, message,
+                                 {"done": done, "total": total, "unit": unit})
 
     @property
     def settings(self) -> Settings:
