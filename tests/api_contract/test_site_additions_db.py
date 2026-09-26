@@ -5,10 +5,13 @@ Like test_contract.py, these run against the local Postgres and skip without it.
 
 from __future__ import annotations
 
+import json
 from urllib.parse import quote
 
 import httpx
+from sqlalchemy import text
 
+from archive_api.games_played import games_played
 from archive_common.serialize import box_art_template
 
 
@@ -51,10 +54,43 @@ async def test_games_played_matches_the_client_side_computation(client: httpx.As
         assert g["name"] == e["name"], key
         assert g["image"] == e.get("image"), key
         assert g["imageTemplate"] == box_art_template(g["image"])
+        assert 0 <= g["watchableSeconds"] <= g["seconds"], key
 
     # vods desc, then lastPlayed desc (name order is the database collation's)
     for a, b in zip(got, got[1:]):
         assert (a["vods"], a["lastPlayed"]) >= (b["vods"], b["lastPlayed"])
+
+
+async def test_games_played_sums_chapter_lengths(client: httpx.AsyncClient) -> None:
+    """``end`` is each chapter's length; a missing, empty or non-numeric one counts as 0."""
+    from archive_common.db import get_engine
+
+    chapters = [
+        {"name": "Test Game A", "gameId": "test-gp-a", "start": 0, "end": 1800},
+        {"name": "Test Game B", "gameId": "test-gp-b", "start": 1800, "end": "600"},
+        {"name": "Test Game A", "gameId": "test-gp-a", "start": 2400, "end": 1200.4, "restricted": True},
+        {"name": "Test Game A", "gameId": "test-gp-a", "start": 3600, "end": ""},
+        {"name": "Test Game B", "gameId": "test-gp-b", "start": 3600},
+        {"name": "Test Game B", "gameId": "test-gp-b", "start": 3600, "end": "abc"},
+    ]
+    async with get_engine().connect() as conn:
+        tx = await conn.begin()
+        try:
+            await conn.execute(
+                text(
+                    """insert into vods (id, chapters, platform, "createdAt", "updatedAt")
+                       values ('test-games-played', cast(:chapters as jsonb), 'twitch', now(), now())"""
+                ),
+                {"chapters": json.dumps(chapters)},
+            )
+            got = {g["gameId"]: g for g in await games_played(conn)}
+        finally:
+            await tx.rollback()
+
+    a, b = got["test-gp-a"], got["test-gp-b"]
+    assert (a["chapters"], a["seconds"], a["watchableSeconds"]) == (3, 3000, 1800)
+    assert (b["chapters"], b["seconds"], b["watchableSeconds"]) == (3, 600, 600)
+    assert isinstance(a["seconds"], int) and isinstance(a["watchableSeconds"], int)
 
 
 async def test_game_id_filter_is_exact(client: httpx.AsyncClient) -> None:
