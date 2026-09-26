@@ -26,6 +26,12 @@ def test_chapters_stored_in_the_legacy_shape():
     ]
 
 
+def test_gap_chapters_stay_gap_chapters():
+    gap = {"name": "Technical difficulties", "gameId": None, "start": 10, "length": 5, "restricted": True, "kind": "gap"}
+    [plain, out] = vod_edits.chapters([ch(0, 10), gap], 15)
+    assert out["kind"] == "gap" and "kind" not in plain
+
+
 def test_chapter_without_category_or_image():
     [out] = vod_edits.chapters([{"name": None, "gameId": None, "start": 0, "length": 10, "restricted": False}], 10)
     assert (out["name"], out["gameId"], out["image"], out["imageTemplate"]) == (None, None, None, None)
@@ -44,6 +50,7 @@ def test_chapter_without_category_or_image():
         ([{**ch(0, 5), "restricted": "no"}], 100, "restricted must be true or false"),
         ([{**ch(0, 5), "gameId": 5}], 100, "gameId must be a string"),
         ([{**ch(0, 5), "extra": 1}], 100, "unknown field(s) extra"),
+        ([ch(0, 5, kind="cut")], 100, "kind must be 'gap' or absent"),
         ([{"name": "x", "start": 0, "length": 5, "restricted": False}], 100, "missing gameId"),
     ],
 )

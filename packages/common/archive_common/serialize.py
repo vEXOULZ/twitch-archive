@@ -115,7 +115,8 @@ def duration_seconds(value: str | None) -> int | None:
 
 
 def chapter_additions(chapter: Any) -> Any:
-    """``imageTemplate`` next to ``image``, and ``length`` next to ``end`` (which holds the length)."""
+    """``imageTemplate`` next to ``image``, and ``length`` next to ``end`` (which holds the length).
+    Any other stored key, such as ``kind`` ("gap" on a merge's gap chapter), passes through."""
     if not isinstance(chapter, dict):
         return chapter
     out = dict(chapter)
@@ -125,6 +126,8 @@ def chapter_additions(chapter: Any) -> Any:
 
 
 def vod_additions(vod: dict[str, Any]) -> None:
+    if "merged_into" in vod and vod["merged_into"] is None:
+        del vod["merged_into"]  # only on VODs merged into another: {"id", "offset"}
     if isinstance(vod.get("chapters"), list):
         vod["chapters"] = [chapter_additions(c) for c in vod["chapters"]]
     if "duration" in vod:
@@ -151,11 +154,19 @@ VODS = Resource(
         Field("platform", _vt.c.platform),
         Field("createdAt", _vt.c.createdAt, js_iso),
         Field("updatedAt", _vt.c.updatedAt, js_iso),
+        # Added after the legacy API; left out of the JSON while NULL (see vod_additions).
+        Field("merged_into", _vt.c.merged_into),
     ),
     "id",
     {},
     vod_additions,
 )
+
+
+def not_merged_away() -> Any:
+    """VODs that were not merged into another one (lists and search leave those out)."""
+    return _vt.c.merged_into.is_(None)
+
 
 GAMES = Resource(
     _gt,

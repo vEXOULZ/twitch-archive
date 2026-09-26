@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, and_, func, select, true
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.config import Settings
-from archive_common.serialize import EMOTES, GAMES, STREAMS, VODS, Resource, attach_games, vods_json
+from archive_common.serialize import (
+    EMOTES, GAMES, STREAMS, VODS, Resource, attach_games, not_merged_away, vods_json,
+)
 
 from . import feathers_query as fq
 from .errors import FeathersError, bad_literal
@@ -30,6 +32,10 @@ class Service:
     async def embed(self, conn: AsyncConnection, items: list[dict]) -> None:
         """Associations the legacy include() hooks added."""
 
+    def scope(self, query: dict[str, Any]) -> ColumnElement[bool]:
+        """Rows ``find`` considers at all, before the query's own filters."""
+        return true()
+
     async def find(self, conn: AsyncConnection, qs: str) -> dict[str, Any]:
         q = fq.parse(
             self.resource,
@@ -38,12 +44,13 @@ class Service:
             max_limit=self.settings.paginate_max,
             special=self.special,
         )
-        total = (await conn.execute(select(func.count()).select_from(self.resource.table).where(q.where))).scalar_one()
+        where = and_(self.scope(q.query), q.where)
+        total = (await conn.execute(select(func.count()).select_from(self.resource.table).where(where))).scalar_one()
         data: list[dict] = []
         if q.limit > 0:
             stmt = (
                 select(*self.resource.columns(q.select))
-                .where(q.where)
+                .where(where)
                 .order_by(*q.order_by)
                 .limit(q.limit)
                 .offset(q.skip)
@@ -76,6 +83,11 @@ class VodsService(Service):
 
     async def embed(self, conn: AsyncConnection, items: list[dict]) -> None:
         await attach_games(conn, items)
+
+    def scope(self, query: dict[str, Any]) -> ColumnElement[bool]:
+        """VODs merged into another one are left out unless ``$merged=true``
+        (``GET /vods/{id}`` still answers for them, with ``merged_into``)."""
+        return true() if query.get("$merged") == "true" else not_merged_away()
 
 
 class GamesService(Service):

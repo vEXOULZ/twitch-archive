@@ -28,11 +28,11 @@ from archive_common.models import AdminAudit, Emote, Game, Job, Log, Stream, Vod
 from archive_common.serialize import EMOTES, box_art_template, vod_json
 from archive_common.timeutil import hhmmss_to_seconds, parse_helix_duration
 
-from . import jobs, vod_edits, youtube
+from . import jobs, splices, vod_edits, youtube
 from .admin_auth import CSRF_HEADER, SESSION_COOKIE, AdminAuth, LoginLimiter, Session, client_address, parse_networks
 from .context import Deps
 from .events import event_json, iso_utc
-from .vods import upsert_vod
+from .vods import splice_reason, upsert_vod
 
 log = logging.getLogger(__name__)
 
@@ -41,11 +41,14 @@ SESSION_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite"
 AUDITED_PREFIXES = ("/admin/", "/v2/")
 YOUTUBE_CHECK_MAX_AGE = 600  # /admin/health refreshes the YouTube token at most this often
 RECENT_JOBS = 20  # jobs shown with a VOD
+# Steps that refetch from Twitch by VOD id; a job with any of them is refused on a merged/split VOD.
+TWITCH_STEPS = {"capture", "fetch_vod", "finalize", "chapters", "chat", "emotes"}
 
 
 class AdminError(Exception):
-    def __init__(self, status: int, msg: str, headers: dict[str, str] | None = None) -> None:
-        self.status, self.msg, self.headers = status, msg, headers
+    def __init__(self, status: int, msg: str, headers: dict[str, str] | None = None,
+                 extra: dict[str, Any] | None = None) -> None:
+        self.status, self.msg, self.headers, self.extra = status, msg, headers, extra or {}
 
 
 def _ok(msg: str, job: Job | None = None, **extra: Any) -> dict:
@@ -125,7 +128,11 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
 
     @app.exception_handler(AdminError)
     async def _admin_error(_req: Request, exc: AdminError) -> JSONResponse:
-        return JSONResponse({"error": True, "msg": exc.msg}, status_code=exc.status, headers=exc.headers)
+        return JSONResponse({"error": True, "msg": exc.msg, **exc.extra}, status_code=exc.status, headers=exc.headers)
+
+    @app.exception_handler(splices.SpliceError)
+    async def _splice_error(req: Request, exc: splices.SpliceError) -> JSONResponse:
+        return await _admin_error(req, AdminError(exc.status, exc.msg, extra=exc.extra))
 
     @app.exception_handler(jobs.JobNotFound)
     async def _job_not_found(req: Request, _exc: jobs.JobNotFound) -> JSONResponse:
@@ -263,8 +270,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         events.add(job.id, "info", job.step, msg)
         return _ok(msg, job)
 
-    enqueue = runner.enqueue
-
     async def vod_exists(vod_id: str) -> Vod | None:
         async with get_sessionmaker()() as s:
             return await s.get(Vod, str(vod_id))
@@ -274,6 +279,19 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         if vod is None:
             raise AdminError(404, "No Vod Data")
         return vod
+
+    async def refuse_spliced(vod_id: str, what: str) -> None:
+        """Actions that refetch from Twitch by VOD id, or need the VOD's one source video,
+        do not fit a merged or split VOD (its row no longer matches Twitch's VOD)."""
+        reason = await splice_reason(str(vod_id))
+        if reason:
+            raise AdminError(409, f"{reason}; {what} would refetch or replace it. Undo the merge/split first")
+
+    async def enqueue(kind: str, vod_id: str | None, payload: dict[str, Any] | None = None, **kwargs: Any) -> Job:
+        """``runner.enqueue``, refused for a job with a TWITCH_STEPS step on a merged or split VOD."""
+        if vod_id is not None and TWITCH_STEPS & set(jobs.KINDS.get(kind, [])):
+            await refuse_spliced(vod_id, f"a {kind} job")
+        return await runner.enqueue(kind, vod_id, payload, **kwargs)
 
     def require_helix() -> None:
         if not helix.configured:
@@ -513,6 +531,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def delete_vod(body: dict = Body(...)) -> dict:
         _require(body, "vodId")
         vod_id = str(body["vodId"])
+        await refuse_spliced(vod_id, "deleting it (with the chat rows it holds)")
         async with get_sessionmaker()() as s:
             for model in (Log, Emote, Game):
                 await s.execute(delete(model).where(model.vod_id == vod_id))
@@ -524,6 +543,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def save_duration(body: dict = Body(...)) -> dict:
         _require(body, "vodId")
         await require_vod(body["vodId"])
+        await refuse_spliced(body["vodId"], "setting its duration from Twitch")
         video = await helix_video(body["vodId"])
         duration = _helix_hhmmss(video)
         await save_vod(str(body["vodId"]), duration=duration)
@@ -549,7 +569,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             recent = (await s.execute(
                 select(Job).where(Job.vod_id == vod_id).order_by(Job.id.desc()).limit(RECENT_JOBS)
             )).scalars()
-            return {**vod, "chaptersLocked": locked, "jobs": [_job_json(j) for j in recent]}
+            recent = [_job_json(j) for j in recent]
+        return {**vod, "chaptersLocked": locked, "jobs": recent, "splices": await splices.active_splices(vod_id)}
 
     def edited(parse, *args) -> Any:
         try:
@@ -604,6 +625,55 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
                 select(*EMOTES.columns()).where(EMOTES.table.c.vod_id == vod_id)
             )).mappings().first()
         return EMOTES.to_json(row) if row else None
+
+    # ── Merging and splitting VODs (see splices) ─────────────────────────
+
+    def force(body: dict) -> bool:
+        if body.get("force") not in (None, True, False):
+            raise AdminError(400, "force must be true or false")
+        return body.get("force") is True
+
+    @app.get("/admin/vods/{vod_id}/merge-candidates", dependencies=auth)
+    async def merge_candidates(vod_id: str) -> dict:
+        """VODs that started within ARCHIVE_MERGE_CANDIDATE_MINUTES after this one ended."""
+        return await splices.merge_candidates(vod_id, settings.merge_candidate_minutes)
+
+    @app.post("/admin/vods/{vod_id}/merge", dependencies=auth)
+    async def merge_vods(vod_id: str, body: dict = Body(...)) -> dict:
+        """``{"source": id, "gap"?: seconds}``: append ``source`` (the later VOD) to this one."""
+        _require(body, "source")
+        source = str(body["source"])
+        result = await splices.merge(vod_id, source, body.get("gap"))
+        return _ok(f"Merged {source} into {vod_id} at {result['splice']['offset']}s", **result,
+                   vod=await admin_vod(vod_id))
+
+    @app.post("/admin/vods/{vod_id}/unmerge", dependencies=auth)
+    async def unmerge_vods(vod_id: str, body: dict = Body(...)) -> dict:
+        """``{"source": id, "force"?: true}``: restore both VODs as they were before the merge."""
+        _require(body, "source")
+        source = str(body["source"])
+        result = await splices.unmerge(vod_id, source, force(body))
+        return _ok(f"Unmerged {source} from {vod_id}", **result, vod=await admin_vod(vod_id))
+
+    @app.post("/admin/vods/{vod_id}/split", dependencies=auth)
+    async def split_vod(vod_id: str, body: dict = Body(...)) -> dict:
+        """``{"at": seconds}``: the rest of the VOD from ``at`` becomes a new VOD, or, at a
+        merge's join, that merge is undone. 409 with ``validPoints`` inside an upload."""
+        _require(body, "at")
+        result = await splices.split(vod_id, body["at"], force(body))
+        if result.get("undid") == "merge":
+            msg = f"{body['at']}s is where {result['splice']['otherId']} was merged in; undid that merge"
+        else:
+            msg = f"Split {vod_id} at {result['splice']['offset']}s; the rest is {result['newVodId']}"
+        return _ok(msg, **result, vod=await admin_vod(vod_id))
+
+    @app.post("/admin/vods/{vod_id}/unsplit", dependencies=auth)
+    async def unsplit_vod(vod_id: str, body: dict | None = Body(None)) -> dict:
+        """``{"source"?: second half's id, "force"?: true}``: join the halves again (default: the latest split)."""
+        body = body or {}
+        other = str(body["source"]) if body.get("source") not in (None, "") else None
+        result = await splices.unsplit(vod_id, other, force(body))
+        return _ok(f"Joined {result['splice']['otherId']} back into {vod_id}", **result, vod=await admin_vod(vod_id))
 
     @app.get("/admin/twitch/games", dependencies=auth)
     async def search_games(query: str = "") -> list[dict]:
@@ -705,6 +775,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         """Chapters from Twitch; ``{"force": true}`` also replaces chapters edited by hand."""
         _require(body, "vodId")
         vod = await require_vod(body["vodId"])
+        await refuse_spliced(vod.id, "Twitch's chapters")  # before asking Twitch; enqueue would refuse after
         video = await helix_video(vod.id)
         payload: dict[str, Any] = {"duration": parse_helix_duration(video.get("duration", ""))}
         if body.get("force") is True:
@@ -756,7 +827,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         # Non-200 tells the recorder to delete its file (legacy contract).
         if not settings.multi_track:
             raise AdminError(404, "multiTrack is disabled")
-        job = await enqueue("live_file", vod.id, {"type": "live", "stream_id": stream_id, "path": body["path"]})
+        # Not the guarded enqueue: a refusal here would make the recorder delete its file.
+        job = await runner.enqueue("live_file", vod.id, {"type": "live", "stream_id": stream_id, "path": body["path"]})
         return _ok("Starting upload to youtube", job)
 
     # ── YouTube OAuth ─────────────────────────────────────────────────────

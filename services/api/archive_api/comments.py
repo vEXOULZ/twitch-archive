@@ -9,6 +9,9 @@ paging keeps working unchanged:
 * ``?cursor=`` continues from a base64 JSON cursor
   ``{"id": _id, "content_offset_seconds": n, "createdAt": iso}``.
 * 201 rows are fetched; the 201st only exists to build the next cursor.
+
+A VOD merged into another has no rows of its own any more (they were re-keyed to
+that VOD), so it answers every request with an empty page.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ import logging
 import math
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import Row, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from archive_common.models import Log, Vod
@@ -33,6 +36,7 @@ from .middleware import JsonBody, ResponseCache
 log = logging.getLogger(__name__)
 
 PAGE = 200
+EMPTY: dict[str, Any] = {"comments": []}
 _lt = Log.__table__
 _vt = Vod.__table__
 
@@ -74,6 +78,16 @@ class Comments:
         self.cache = cache  # offset pages, 5 min
         self.long_cache = long_cache  # cursor pages and starting ids, 24 h
 
+    def invalidate(self, vod_id: str) -> None:
+        """Drop everything cached for ``vod_id`` (its chat rows moved: a merge or split)."""
+        prefixes = (f"offset:{vod_id}:", f"cursor:{vod_id}:")
+        for cache in (self.cache, self.long_cache):
+            cache.invalidate(lambda key: key.startswith(prefixes) or key == f"start:{vod_id}")
+
+    def clear(self) -> None:
+        for cache in (self.cache, self.long_cache):
+            cache.clear()
+
     async def handle(
         self, engine: AsyncEngine, vod_id: str, offset_raw: str | None, cursor: str | None
     ) -> JsonBody:
@@ -97,12 +111,12 @@ class Comments:
             async def by_offset() -> dict:
                 # Only pages of existing vods are cached, so a hit skips the vod lookup.
                 async with engine.connect() as conn:
-                    vod_created = (
-                        await conn.execute(select(_vt.c.createdAt).where(_vt.c.id == vod_id))
-                    ).scalar_one_or_none()
-                    if vod_created is None:
+                    vod = await self._vod(conn, vod_id)
+                    if vod is None:
                         raise LegacyError(500, f"Failed to retrieve vod {vod_id}")
-                    result = await self._offset_search(conn, vod_id, seconds, vod_created)
+                    if vod.merged_into is not None:
+                        return EMPTY
+                    result = await self._offset_search(conn, vod_id, seconds, vod.createdAt)
                 if result is None:
                     raise LegacyError(500, f"Failed to retrieve comments from offset {fixed}")
                 return result
@@ -115,11 +129,16 @@ class Comments:
                 raise LegacyError(500, "Failed to parse cursor")
             async with engine.connect() as conn:
                 result = await self._cursor_search(conn, vod_id, cursor_json)
+                if result is None and (vod := await self._vod(conn, vod_id)) and vod.merged_into is not None:
+                    return EMPTY
             if result is None:
                 raise LegacyError(500, f"Failed to retrieve comments from cursor {cursor}")
             return result
 
         return await self.long_cache.get_or_render(f"cursor:{vod_id}:{cursor}", by_cursor)
+
+    async def _vod(self, conn: AsyncConnection, vod_id: str) -> Row | None:
+        return (await conn.execute(select(_vt.c.createdAt, _vt.c.merged_into).where(_vt.c.id == vod_id))).first()
 
     async def _rows(self, conn: AsyncConnection, *where) -> list[dict]:
         stmt = (

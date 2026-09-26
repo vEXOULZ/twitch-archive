@@ -17,6 +17,7 @@ from archive_common.models import Emote, Log, Vod
 from archive_common.timeutil import hhmmss_to_seconds, parse_ts
 
 from .. import planning
+from ..timeline import EMOTE_SETS as CHANNEL_SETS
 from ..context import JobContext, StepError
 
 CHAT_BATCH = 2500
@@ -35,6 +36,7 @@ async def chapters(ctx: JobContext) -> None:
     vod_id = ctx.require_vod_id()
     gql = ctx.deps.gql
     restricted = ctx.settings.restricted_games
+    await ctx.refuse_if_spliced()  # even with force: they are the merged/split chapters
     vod = await ctx.get_vod()
     if vod.chapters_locked and ctx.payload.get("force") is not True:
         ctx.log.info("chapters of %s were edited by hand (locked); keeping them", vod_id)
@@ -91,6 +93,7 @@ async def chat(ctx: JobContext) -> None:
         ctx.log.info("chat download disabled")
         return
     vod_id = ctx.require_vod_id()
+    await ctx.refuse_if_spliced()  # a merged VOD's rows past the join belong to the other VOD
     gql = ctx.deps.gql
     async with get_sessionmaker()() as s:
         offset = (
@@ -166,7 +169,6 @@ async def fetch_emotes(ctx: JobContext, twitch_id: str) -> dict:
             "global_emotes": global_emotes}
 
 
-CHANNEL_SETS = ("ffz_emotes", "bttv_emotes", "seventv_emotes")
 
 
 def merge_emotes(existing: Emote | None, fetched: dict, *, force: bool, now: dt.datetime) -> dict:
@@ -195,6 +197,7 @@ def merge_emotes(existing: Emote | None, fetched: dict, *, force: bool, now: dt.
 async def emotes(ctx: JobContext) -> None:
     """Save the channel and global emote sets. ``payload.force`` overwrites an existing row."""
     vod_id = ctx.require_vod_id()
+    await ctx.refuse_if_spliced()  # a merged VOD holds both VODs' sets
     force = bool(ctx.payload.get("force"))
     fetched = await fetch_emotes(ctx, ctx.settings.twitch_id)
     async with get_sessionmaker()() as s:

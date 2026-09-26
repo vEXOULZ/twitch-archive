@@ -3,6 +3,9 @@
 Database triggers (migration 0006) send ``NOTIFY vods_changed, '<vod id>'`` when
 any write to ``vods`` or ``games`` commits; this LISTENs on its own connection. While the connection is down nothing is heard, so every
 (re)connect clears the caches outright.
+
+A merge or split also moves the VOD's chat rows and emotes, and says so with a
+``ROWS_MOVED`` notice, which drops the chat replay and emotes cached for it.
 """
 
 from __future__ import annotations
@@ -13,8 +16,9 @@ import logging
 import asyncpg
 from sqlalchemy.engine import make_url
 
-from archive_common.db import VOD_CHANGED
+from archive_common.db import ROWS_MOVED, VOD_CHANGED
 
+from .comments import Comments
 from .middleware import ResponseCache
 
 log = logging.getLogger(__name__)
@@ -31,11 +35,18 @@ def asyncpg_dsn(database_url: str) -> str:
     return make_url(database_url).set(drivername="postgresql").render_as_string(hide_password=False)
 
 
+def _emotes_of(vod_id: str, key: str) -> bool:
+    """``emotes/<id>`` or an ``emotes?`` query naming the VOD (a stray match only costs a re-render)."""
+    return key == f"emotes/{vod_id}" or (key.startswith("emotes?") and vod_id in key)
+
+
 class VodInvalidator:
-    def __init__(self, database_url: str, service_cache: ResponseCache, *other_caches: ResponseCache) -> None:
+    def __init__(self, database_url: str, service_cache: ResponseCache, *other_caches: ResponseCache,
+                 comments: Comments | None = None) -> None:
         self.dsn = asyncpg_dsn(database_url)
         self.service_cache = service_cache
         self.other_caches = other_caches  # small ones (e.g. /v1/status): cleared on any change
+        self.comments = comments
 
     def invalidate(self, vod_id: str) -> None:
         own = f"vods/{vod_id}"
@@ -43,13 +54,24 @@ class VodInvalidator:
         for cache in self.other_caches:
             cache.clear()
 
+    def rows_moved(self, vod_id: str) -> None:
+        self.service_cache.invalidate(lambda key: _emotes_of(vod_id, key))
+        if self.comments is not None:
+            self.comments.invalidate(vod_id)
+
     def clear_all(self) -> None:
         for cache in (self.service_cache, *self.other_caches):
             cache.clear()
+        if self.comments is not None:
+            self.comments.clear()
 
     def _on_notify(self, _conn, _pid: int, _channel: str, payload: str) -> None:
-        log.debug("vod %s changed; dropping cached responses", payload)
-        self.invalidate(payload)
+        if payload.startswith(ROWS_MOVED):
+            log.debug("rows of vod %s moved; dropping its chat and emotes", payload.removeprefix(ROWS_MOVED))
+            self.rows_moved(payload.removeprefix(ROWS_MOVED))
+        else:
+            log.debug("vod %s changed; dropping cached responses", payload)
+            self.invalidate(payload)
 
     async def run_forever(self) -> None:
         while True:

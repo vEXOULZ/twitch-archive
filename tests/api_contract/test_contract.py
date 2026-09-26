@@ -24,7 +24,7 @@ KNOWN_DIFFERENCES = {
 
 
 # Fields added for the new sites. Legacy responses never had them; everything else must match.
-ADDED_VOD_FIELDS = {"duration_seconds"}
+ADDED_VOD_FIELDS = {"duration_seconds", "merged_into"}  # merged_into: only on merged-away VODs
 ADDED_CHAPTER_FIELDS = {"imageTemplate", "length"}
 # Global emote sets saved with each VOD (emotes rows are the dicts with "7tv_emotes").
 ADDED_EMOTE_FIELDS = {"global_emotes", "global_emotes_source", "global_emotes_at"}

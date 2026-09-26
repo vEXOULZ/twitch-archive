@@ -29,6 +29,8 @@ async def test_games_played_matches_the_client_side_computation(client: httpx.As
     expected: dict[str, dict] = {}
     for vod in sorted(await _all_vods(client), key=lambda v: v["createdAt"]):
         for ch in vod["chapters"] or []:
+            if ch.get("kind") == "gap":  # a merge's gap: no game
+                continue
             key = "none" if ch.get("name") is None else f"id:{ch['gameId']}" if ch.get("gameId") else f"n:{ch['name']}"
             e = expected.setdefault(key, {"vods": set(), "chapters": 0})
             e["vods"].add(vod["id"])

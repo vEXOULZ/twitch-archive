@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import select, update
+from sqlalchemy import Select, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from archive_common.db import get_sessionmaker
-from archive_common.models import Stream, Vod
+from archive_common.models import Stream, Vod, VodSplice
 from archive_common.timeutil import format_hhmmss, parse_helix_duration, parse_ts
 
 
@@ -28,6 +28,31 @@ async def upsert_vod(video: dict) -> None:
         stmt = stmt.on_conflict_do_update(index_elements=[Vod.id], set_={"title": stmt.excluded.title})
         await s.execute(stmt)
         await s.commit()
+
+
+def active_splices(*vod_ids: str) -> Select:
+    """Splices (merges, splits) touching any of ``vod_ids`` that are not undone, oldest first."""
+    return (
+        select(VodSplice)
+        .where(VodSplice.undone_at.is_(None), or_(VodSplice.vod_id.in_(vod_ids), VodSplice.other_id.in_(vod_ids)))
+        .order_by(VodSplice.id)
+    )
+
+
+async def splice_reason(vod_id: str) -> str | None:
+    """Why ``vod_id`` no longer matches Twitch's VOD of that id (merged or split), or None."""
+    async with get_sessionmaker()() as s:
+        merged_into = (await s.execute(select(Vod.merged_into).where(Vod.id == vod_id))).scalar_one_or_none()
+        if merged_into:
+            return f"vod {vod_id} was merged into {merged_into.get('id')}"
+        splice = (await s.execute(
+            active_splices(vod_id).order_by(None).order_by(VodSplice.id.desc()).limit(1)
+        )).scalar_one_or_none()
+    if splice is None:
+        return None
+    if splice.kind == "merge":
+        return f"vod {vod_id} was merged with {splice.other_id if splice.vod_id == vod_id else splice.vod_id}"
+    return f"vod {vod_id} was split ({splice.vod_id} | {splice.other_id})"
 
 
 async def vod_id_for_stream(stream_id: str) -> str | None:
