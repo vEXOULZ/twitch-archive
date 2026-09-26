@@ -87,6 +87,7 @@ class ParsedQuery:
     limit: int
     skip: int
     select: set[str] | None
+    query: dict[str, Any]  # the parsed query string, for filters of a service's own
 
 
 def _as_list(v: Any) -> list:
@@ -200,7 +201,7 @@ def parse(
             raise FeathersError(400, f"Invalid $select attribute(s): {', '.join(sorted(unknown))}")
         select = keys | {resource.id_key}
 
-    return ParsedQuery(where=where, order_by=order_by, limit=limit, skip=skip, select=select)
+    return ParsedQuery(where=where, order_by=order_by, limit=limit, skip=skip, select=select, query=query)
 
 
 # ── Chapter filters (vods only) ────────────────────────────────────────────

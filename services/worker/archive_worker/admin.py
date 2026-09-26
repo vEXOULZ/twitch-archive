@@ -270,8 +270,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         events.add(job.id, "info", job.step, msg)
         return _ok(msg, job)
 
-    enqueue = runner.enqueue
-
     async def vod_exists(vod_id: str) -> Vod | None:
         async with get_sessionmaker()() as s:
             return await s.get(Vod, str(vod_id))
@@ -288,6 +286,12 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         reason = await splice_reason(str(vod_id))
         if reason:
             raise AdminError(409, f"{reason}; {what} would refetch or replace it. Undo the merge/split first")
+
+    async def enqueue(kind: str, vod_id: str | None, payload: dict[str, Any] | None = None, **kwargs: Any) -> Job:
+        """``runner.enqueue``, refused for a job with a TWITCH_STEPS step on a merged or split VOD."""
+        if vod_id is not None and TWITCH_STEPS & set(jobs.KINDS.get(kind, [])):
+            await refuse_spliced(vod_id, f"a {kind} job")
+        return await runner.enqueue(kind, vod_id, payload, **kwargs)
 
     def require_helix() -> None:
         if not helix.configured:
@@ -422,8 +426,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         vod_id = str(body["vodId"]) if body.get("vodId") not in (None, "") else None
         if vod_id is not None:
             await require_vod(vod_id)
-            if TWITCH_STEPS & set(jobs.KINDS.get(str(body["kind"]), [])):
-                await refuse_spliced(vod_id, f"a {body['kind']} job")
         pause_before = _step_names(body.get("pauseBefore"), "pauseBefore must be a list of step names")
         payload = body.get("payload") or {}
         if not isinstance(payload, dict):
@@ -703,7 +705,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         """Download the whole VOD (or use ``path``), split, upload. Optional part range."""
         _require(body, "vodId")
         vod = await require_vod(body["vodId"])
-        await refuse_spliced(vod.id, "a download")
         payload = source_payload(vod, body)
         for src, dst in (("startPart", "start_part"), ("endPart", "end_part")):
             if body.get(src) not in (None, ""):
@@ -720,7 +721,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         if vod is None:
             await upsert_vod(await helix_video(body["vodId"]))
             vod = await require_vod(body["vodId"])
-        await refuse_spliced(vod.id, "an HLS download")
         if await jobs.find_active("archive", vod_id=vod.id):
             raise AdminError(409, f"An archive job for {vod.id} is already running")
         job = await enqueue("archive", vod.id, {"type": "vod", "stream_id": vod.stream_id})
@@ -730,7 +730,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def reupload(body: dict = Body(...)) -> dict:
         _require(body, "vodId", "part")
         vod = await require_vod(body["vodId"])
-        await refuse_spliced(vod.id, "a re-upload")
         payload = source_payload(vod, body)
         part = single_part(payload, body)
         job = await enqueue("reupload", vod.id, payload)
@@ -740,7 +739,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def dmca(body: dict = Body(...)) -> dict:
         _require(body, "vodId", "receivedClaims")
         vod = await require_vod(body["vodId"])
-        await refuse_spliced(vod.id, "a DMCA edit")
         payload = source_payload(vod, body)
         payload["claims"] = body["receivedClaims"]
         job = await enqueue("dmca", vod.id, payload)
@@ -750,7 +748,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def part_dmca(body: dict = Body(...)) -> dict:
         _require(body, "vodId", "part", "receivedClaims")
         vod = await require_vod(body["vodId"])
-        await refuse_spliced(vod.id, "a DMCA edit")
         payload = source_payload(vod, body)
         payload["claims"] = body["receivedClaims"]
         part = single_part(payload, body)
@@ -763,7 +760,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     async def logs(body: dict = Body(...)) -> dict:
         _require(body, "vodId")
         await require_vod(body["vodId"])
-        await refuse_spliced(body["vodId"], "crawling its chat again")
         job = await enqueue("chat", str(body["vodId"]))
         return _ok("Getting logs..", job)
 
@@ -779,7 +775,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         """Chapters from Twitch; ``{"force": true}`` also replaces chapters edited by hand."""
         _require(body, "vodId")
         vod = await require_vod(body["vodId"])
-        await refuse_spliced(vod.id, "Twitch's chapters")
+        await refuse_spliced(vod.id, "Twitch's chapters")  # before asking Twitch; enqueue would refuse after
         video = await helix_video(vod.id)
         payload: dict[str, Any] = {"duration": parse_helix_duration(video.get("duration", ""))}
         if body.get("force") is True:
@@ -792,7 +788,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         """Fill the VOD's missing emote sets; ``{"force": true}`` replaces the saved ones."""
         _require(body, "vodId")
         await require_vod(body["vodId"])
-        await refuse_spliced(body["vodId"], "saving today's emote sets")
         force = body.get("force") is True
         job = await enqueue("emotes", str(body["vodId"]), {"force": True} if force else None)
         return _ok("Saving emotes (overwriting).." if force else "Saving emotes..", job)
@@ -832,7 +827,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         # Non-200 tells the recorder to delete its file (legacy contract).
         if not settings.multi_track:
             raise AdminError(404, "multiTrack is disabled")
-        job = await enqueue("live_file", vod.id, {"type": "live", "stream_id": stream_id, "path": body["path"]})
+        # Not the guarded enqueue: a refusal here would make the recorder delete its file.
+        job = await runner.enqueue("live_file", vod.id, {"type": "live", "stream_id": stream_id, "path": body["path"]})
         return _ok("Starting upload to youtube", job)
 
     # ── YouTube OAuth ─────────────────────────────────────────────────────

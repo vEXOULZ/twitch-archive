@@ -4,16 +4,20 @@ A (2 h, 5 s missing at its start) and B (1 h, 10 s missing at its start) are one
 that Twitch cut in two: B started 7500 s after A, so there is a 300 s gap between them.
 """
 
+import asyncio
 import datetime as dt
 import uuid
 
+import asyncpg
 import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import delete, func, or_, select
 
+from archive_api.invalidation import asyncpg_dsn
 from archive_api.main import create_app
-from archive_common.db import get_sessionmaker
+from archive_common.config import get_settings
+from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_sessionmaker
 from archive_common.models import AdminAudit, Emote, Game, Job, Log, Vod, VodSplice
 from archive_common.timeutil import hhmmss_to_seconds
 from archive_worker import jobs
@@ -205,6 +209,25 @@ async def test_merge_then_unmerge_restores_both_exactly(vods, admin):
         assert r.json()["splice"]["undoneAt"] and r.json()["vod"]["splices"] == []
         assert (await c.post(f"/admin/vods/{A}/unmerge", headers=KEY, json={"source": B})).status_code == 404
     assert (await _state()) == before
+
+
+async def test_merge_and_unmerge_tell_the_api_rows_moved(vods, admin):
+    """archive-api drops its cached chat and emotes of both VODs on these notices."""
+    c, _ = admin
+    conn = await asyncpg.connect(asyncpg_dsn(get_settings().database_url))
+    heard: asyncio.Queue[str] = asyncio.Queue()
+    await conn.add_listener(VOD_CHANGED, lambda _c, _pid, _ch, payload: heard.put_nowait(payload))
+    try:
+        async with c:
+            for route in ("merge", "unmerge"):
+                assert (await c.post(f"/admin/vods/{A}/{route}", headers=KEY, json={"source": B})).status_code == 200
+                moved = set()
+                while moved != {ROWS_MOVED + A, ROWS_MOVED + B}:
+                    payload = await asyncio.wait_for(heard.get(), 5)
+                    if payload.startswith(ROWS_MOVED):
+                        moved.add(payload)
+    finally:
+        await conn.close()
 
 
 async def test_unmerge_refuses_to_lose_edits_unless_forced(vods, admin):

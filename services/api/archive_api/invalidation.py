@@ -4,8 +4,8 @@ Database triggers (migration 0006) send ``NOTIFY vods_changed, '<vod id>'`` when
 any write to ``vods`` or ``games`` commits; this LISTENs on its own connection. While the connection is down nothing is heard, so every
 (re)connect clears the caches outright.
 
-A merge or split also moves the VOD's chat rows and emotes; every one writes the
-``vods`` rows too, so the same notice drops the chat replay and emotes cached for it.
+A merge or split also moves the VOD's chat rows and emotes, and says so with a
+``ROWS_MOVED`` notice, which drops the chat replay and emotes cached for it.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import logging
 import asyncpg
 from sqlalchemy.engine import make_url
 
-from archive_common.db import VOD_CHANGED
+from archive_common.db import ROWS_MOVED, VOD_CHANGED
 
 from .comments import Comments
 from .middleware import ResponseCache
@@ -50,10 +50,12 @@ class VodInvalidator:
 
     def invalidate(self, vod_id: str) -> None:
         own = f"vods/{vod_id}"
-        self.service_cache.invalidate(
-            lambda key: key == own or key.startswith(_LIST_PREFIXES) or _emotes_of(vod_id, key))
+        self.service_cache.invalidate(lambda key: key == own or key.startswith(_LIST_PREFIXES))
         for cache in self.other_caches:
             cache.clear()
+
+    def rows_moved(self, vod_id: str) -> None:
+        self.service_cache.invalidate(lambda key: _emotes_of(vod_id, key))
         if self.comments is not None:
             self.comments.invalidate(vod_id)
 
@@ -61,12 +63,15 @@ class VodInvalidator:
         for cache in (self.service_cache, *self.other_caches):
             cache.clear()
         if self.comments is not None:
-            for cache in (self.comments.cache, self.comments.long_cache):
-                cache.clear()
+            self.comments.clear()
 
     def _on_notify(self, _conn, _pid: int, _channel: str, payload: str) -> None:
-        log.debug("vod %s changed; dropping cached responses", payload)
-        self.invalidate(payload)
+        if payload.startswith(ROWS_MOVED):
+            log.debug("rows of vod %s moved; dropping its chat and emotes", payload.removeprefix(ROWS_MOVED))
+            self.rows_moved(payload.removeprefix(ROWS_MOVED))
+        else:
+            log.debug("vod %s changed; dropping cached responses", payload)
+            self.invalidate(payload)
 
     async def run_forever(self) -> None:
         while True:

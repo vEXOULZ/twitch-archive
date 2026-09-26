@@ -197,7 +197,6 @@ class VodSplice(Base):
     vod_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     other_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     offset_s: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
-    gap_s: Mapped[Decimal | None] = mapped_column(Numeric)
     detail: Mapped[dict] = mapped_column(JSONB, nullable=False)
     snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())

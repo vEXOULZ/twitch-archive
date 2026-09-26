@@ -17,6 +17,7 @@ from archive_common.models import Emote, Log, Vod
 from archive_common.timeutil import hhmmss_to_seconds, parse_ts
 
 from .. import planning
+from ..timeline import EMOTE_SETS as CHANNEL_SETS
 from ..context import JobContext, StepError
 
 CHAT_BATCH = 2500
@@ -168,7 +169,6 @@ async def fetch_emotes(ctx: JobContext, twitch_id: str) -> dict:
             "global_emotes": global_emotes}
 
 
-CHANNEL_SETS = ("ffz_emotes", "bttv_emotes", "seventv_emotes")
 
 
 def merge_emotes(existing: Emote | None, fetched: dict, *, force: bool, now: dt.datetime) -> dict:

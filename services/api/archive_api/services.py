@@ -44,7 +44,7 @@ class Service:
             max_limit=self.settings.paginate_max,
             special=self.special,
         )
-        where = and_(self.scope(fq.parse_query_string(qs)), q.where)
+        where = and_(self.scope(q.query), q.where)
         total = (await conn.execute(select(func.count()).select_from(self.resource.table).where(where))).scalar_one()
         data: list[dict] = []
         if q.limit > 0:

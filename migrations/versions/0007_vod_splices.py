@@ -28,7 +28,6 @@ def upgrade() -> None:
         sa.Column("vod_id", sa.Text, nullable=False),
         sa.Column("other_id", sa.Text, nullable=False),
         sa.Column("offset_s", sa.Numeric, nullable=False),
-        sa.Column("gap_s", sa.Numeric),
         sa.Column("detail", JSONB, nullable=False),
         sa.Column("snapshot", JSONB, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),

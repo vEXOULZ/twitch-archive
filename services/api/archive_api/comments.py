@@ -24,7 +24,7 @@ import logging
 import math
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import Row, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from archive_common.models import Log, Vod
@@ -84,6 +84,10 @@ class Comments:
         for cache in (self.cache, self.long_cache):
             cache.invalidate(lambda key: key.startswith(prefixes) or key == f"start:{vod_id}")
 
+    def clear(self) -> None:
+        for cache in (self.cache, self.long_cache):
+            cache.clear()
+
     async def handle(
         self, engine: AsyncEngine, vod_id: str, offset_raw: str | None, cursor: str | None
     ) -> JsonBody:
@@ -107,9 +111,7 @@ class Comments:
             async def by_offset() -> dict:
                 # Only pages of existing vods are cached, so a hit skips the vod lookup.
                 async with engine.connect() as conn:
-                    vod = (
-                        await conn.execute(select(_vt.c.createdAt, _vt.c.merged_into).where(_vt.c.id == vod_id))
-                    ).first()
+                    vod = await self._vod(conn, vod_id)
                     if vod is None:
                         raise LegacyError(500, f"Failed to retrieve vod {vod_id}")
                     if vod.merged_into is not None:
@@ -127,7 +129,7 @@ class Comments:
                 raise LegacyError(500, "Failed to parse cursor")
             async with engine.connect() as conn:
                 result = await self._cursor_search(conn, vod_id, cursor_json)
-                if result is None and await self._merged_away(conn, vod_id):
+                if result is None and (vod := await self._vod(conn, vod_id)) and vod.merged_into is not None:
                     return EMPTY
             if result is None:
                 raise LegacyError(500, f"Failed to retrieve comments from cursor {cursor}")
@@ -135,9 +137,8 @@ class Comments:
 
         return await self.long_cache.get_or_render(f"cursor:{vod_id}:{cursor}", by_cursor)
 
-    async def _merged_away(self, conn: AsyncConnection, vod_id: str) -> bool:
-        merged = (await conn.execute(select(_vt.c.merged_into).where(_vt.c.id == vod_id))).scalar_one_or_none()
-        return merged is not None
+    async def _vod(self, conn: AsyncConnection, vod_id: str) -> Row | None:
+        return (await conn.execute(select(_vt.c.createdAt, _vt.c.merged_into).where(_vt.c.id == vod_id))).first()
 
     async def _rows(self, conn: AsyncConnection, *where) -> list[dict]:
         stmt = (

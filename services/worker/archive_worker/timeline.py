@@ -16,16 +16,15 @@ so every offset a merge or split moves rows by is a whole number of seconds.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from archive_common.timeutil import format_hhmmss
 
 from .planning import chapter, num_seconds
-from .vod_edits import VIDEO_TYPES
+from .vod_edits import GAP_KIND, VIDEO_TYPES, is_number
 
 GAP_NAME = "Technical difficulties"  # the name of every gap chapter
-GAP_KIND = "gap"
 EPS = 0.001  # float noise tolerated where two times should meet
 SPLIT_SLACK = 0.5  # a split point may be this far from a valid one: points are whole seconds
 
@@ -38,10 +37,6 @@ class PlanError(ValueError):
         self.extra = extra
 
 
-def is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
 # ── Chapters ──────────────────────────────────────────────────────────────
 
 
@@ -51,10 +46,6 @@ def start_of(ch: dict) -> float:
 
 def length_of(ch: dict) -> float:
     return float(ch.get("end") or 0)  # "end" is the length, not the end time
-
-
-def is_gap(ch: Any) -> bool:
-    return isinstance(ch, dict) and ch.get("kind") == GAP_KIND
 
 
 def gap_chapter(start: float, length: float) -> dict[str, Any]:
@@ -214,18 +205,16 @@ class Plan:
     detail: dict
 
 
-MERGE_RULE = (
-    "The target keeps its timeline. The source's timeline is shifted by the offset, so a comment or "
-    "frame at source time x lands at offset + x. The gap chapter (restricted, kind 'gap') runs from "
-    "the end of the target (where its last uploaded frame lands: its own delay stays at its start) to "
-    "where the source's first uploaded frame lands, offset + the source's delay (and any cuts at its "
-    "start), measured on the played type. The chapters under it are clipped. Then duration − Σ parts − "
-    "Σ cuts equals the target's own delay for that type."
-)
-
-
 def plan_merge(a: Side, b: Side, offset: int) -> Plan:
-    """``b`` (the later VOD) appended to ``a`` at ``offset`` seconds of ``a``'s timeline."""
+    """``b`` (the later VOD) appended to ``a`` at ``offset`` seconds of ``a``'s timeline.
+
+    The target keeps its timeline. The source's is shifted by the offset, so a comment or frame
+    at source time x lands at offset + x. The gap chapter (restricted, kind "gap") runs from the
+    end of the target (where its last uploaded frame lands: its own delay stays at its start) to
+    where the source's first uploaded frame lands, offset + the source's delay (and any cuts at
+    its start), measured on the played type. The chapters under it are clipped. Then duration −
+    Σ parts − Σ cuts equals the target's own delay for that type.
+    """
     gap = offset - a.duration
     if gap < 0:
         raise PlanError(f"The VODs overlap: {b.id} starts {offset}s after {a.id}, which is {a.duration}s long "
@@ -269,7 +258,6 @@ def plan_merge(a: Side, b: Side, offset: int) -> Plan:
         # in place; another type's are off by the difference in the source's delays.
         numbers["drift"] = merged.delay - numbers["targetDelay"]
     detail = {
-        "rule": MERGE_RULE,
         "offset": offset,
         "gap": gap,
         "targetDuration": a.duration,
@@ -320,16 +308,17 @@ def plan_split(a: Side, at: int) -> tuple[Plan, Plan]:
     per_type = {}
     for typ in upload_types(a.youtube):
         entries = parts(a.youtube, typ)
-        spans = Timeline.of(a.id, a.duration, a.chapters, a.youtube, typ).part_spans()
-        n_first = sum(1 for _, end in spans if end <= at + SPLIT_SLACK)  # spans are in order
+        whole = Timeline.of(a.id, a.duration, a.chapters, a.youtube, typ)
+        n_first = sum(1 for _, end in whole.part_spans() if end <= at + SPLIT_SLACK)  # spans are in order
         second_yt += entries[n_first:]
-        per_type[typ] = {"firstParts": n_first, "secondParts": len(entries) - n_first}
+        per_type[typ] = {"firstParts": n_first, "secondParts": len(entries) - n_first,
+                         "delay": num_seconds(whole.delay)}
     first_yt = [e for e in a.youtube or [] if e not in second_yt]  # the first half keeps its numbering
 
+    # drive entries carry no times, so they all stay on the first half
     first = Plan(at, clip(a.chapters, -math.inf, at), first_yt, list(a.drive or []), {})
     second = Plan(a.duration - at, shift(clip(a.chapters, at, math.inf), -at), renumber(second_yt), [], {})
     for typ, numbers in per_type.items():
-        numbers["delay"] = num_seconds(Timeline.of(a.id, a.duration, a.chapters, a.youtube, typ).delay)
         numbers["firstDelay"] = num_seconds(Timeline.of(a.id, first.duration, first.chapters, first.youtube,
                                                         typ).delay)
         numbers["secondDelay"] = num_seconds(Timeline.of(a.id, second.duration, second.chapters, second.youtube,
@@ -339,14 +328,13 @@ def plan_split(a: Side, at: int) -> tuple[Plan, Plan]:
         "duration": a.duration,
         "validFrom": next(num_seconds(lo) for lo, hi in intervals if lo - SPLIT_SLACK <= at <= hi + SPLIT_SLACK),
         "types": per_type,
-        "drive": "drive entries carry no times, so they all stay on the first half",
     }
-    return Plan(first.duration, first.chapters, first.youtube, first.drive, detail), second
+    return replace(first, detail=detail), second
 
 
 # ── Emotes ────────────────────────────────────────────────────────────────
 
-EMOTE_SETS = ("ffz_emotes", "bttv_emotes", "seventv_emotes")
+EMOTE_SETS = ("ffz_emotes", "bttv_emotes", "seventv_emotes")  # the emotes row's per-channel columns
 
 
 def _union(a: Any, b: Any) -> list:

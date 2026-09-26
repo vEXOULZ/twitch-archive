@@ -12,11 +12,11 @@ from archive_api.comments import Comments
 from archive_api.invalidation import VodInvalidator, asyncpg_dsn
 from archive_api.middleware import ResponseCache
 from archive_common.config import get_settings
-from archive_common.db import VOD_CHANGED, get_engine
+from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_engine
 
 KEYS = ["vods/1", "vods/12", "vods?$limit=10", "games?vodId=1", "games/5", "v1/games-played",
         "emotes/1", "emotes/12", "emotes?vodId=1", "streams?"]
-LEFT = ["vods/12", "emotes/12", "streams?"]
+LEFT = ["vods/12", "emotes/1", "emotes/12", "emotes?vodId=1", "streams?"]
 
 
 def _filled(keys=KEYS) -> ResponseCache:
@@ -41,14 +41,17 @@ def test_invalidate_drops_the_vod_and_everything_listing_vods():
     assert status.get("status") is None
 
 
-def test_invalidate_drops_the_vods_chat_replay():
-    """A merge or split re-keys chat rows; the notice for the VOD row drops its cached pages."""
+def test_rows_moved_drops_the_vods_chat_replay_and_emotes():
+    """A merge or split re-keys chat rows and emotes, and says so with a ROWS_MOVED notice."""
     comments = Comments(ResponseCache(300), ResponseCache(300))
     for key in ("offset:1:0", "offset:12:0"):
         comments.cache.set(key, object())
     for key in ("cursor:1:abc", "start:1", "start:12"):
         comments.long_cache.set(key, object())
-    VodInvalidator("postgresql+asyncpg://x@h/db", _filled(), comments=comments).invalidate("1")
+    service = _filled()
+    listener = VodInvalidator("postgresql+asyncpg://x@h/db", service, comments=comments)
+    listener._on_notify(None, 0, VOD_CHANGED, ROWS_MOVED + "1")
+    assert _left(service) == [k for k in KEYS if k not in ("emotes/1", "emotes?vodId=1")]
     assert [k for k in ("offset:1:0", "offset:12:0") if comments.cache.get(k)] == ["offset:12:0"]
     assert [k for k in ("cursor:1:abc", "start:1", "start:12") if comments.long_cache.get(k)] == ["start:12"]
 
