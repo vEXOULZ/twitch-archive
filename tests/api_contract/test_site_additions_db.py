@@ -5,13 +5,13 @@ Like test_contract.py, these run against the local Postgres and skip without it.
 
 from __future__ import annotations
 
-import json
 from urllib.parse import quote
 
 import httpx
-from sqlalchemy import text
+from sqlalchemy import insert
 
 from archive_api.games_played import games_played
+from archive_common.models import Vod
 from archive_common.serialize import box_art_template
 
 
@@ -62,34 +62,24 @@ async def test_games_played_matches_the_client_side_computation(client: httpx.As
 
 
 async def test_games_played_sums_chapter_lengths(client: httpx.AsyncClient) -> None:
-    """``end`` is each chapter's length; a missing, empty or non-numeric one counts as 0."""
+    """``end`` is each chapter's length; one that is missing or not a number counts as 0."""
     from archive_common.db import get_engine
 
+    a, b = {"name": "Test Game A", "gameId": "test-gp-a"}, {"name": "Test Game B", "gameId": "test-gp-b"}
     chapters = [
-        {"name": "Test Game A", "gameId": "test-gp-a", "start": 0, "end": 1800},
-        {"name": "Test Game B", "gameId": "test-gp-b", "start": 1800, "end": "600"},
-        {"name": "Test Game A", "gameId": "test-gp-a", "start": 2400, "end": 1200.4, "restricted": True},
-        {"name": "Test Game A", "gameId": "test-gp-a", "start": 3600, "end": ""},
-        {"name": "Test Game B", "gameId": "test-gp-b", "start": 3600},
-        {"name": "Test Game B", "gameId": "test-gp-b", "start": 3600, "end": "abc"},
+        {**a, "end": 1800},
+        {**b, "end": 600},
+        {**a, "end": 1200.4, "restricted": True},
+        {**a},
+        {**b, "end": ""},
     ]
-    async with get_engine().connect() as conn:
-        tx = await conn.begin()
-        try:
-            await conn.execute(
-                text(
-                    """insert into vods (id, chapters, platform, "createdAt", "updatedAt")
-                       values ('test-games-played', cast(:chapters as jsonb), 'twitch', now(), now())"""
-                ),
-                {"chapters": json.dumps(chapters)},
-            )
-            got = {g["gameId"]: g for g in await games_played(conn)}
-        finally:
-            await tx.rollback()
+    async with get_engine().connect() as conn:  # never committed: rolled back on close
+        await conn.execute(insert(Vod).values(id="test-games-played", chapters=chapters))
+        got = {g["gameId"]: g for g in await games_played(conn)}
 
     a, b = got["test-gp-a"], got["test-gp-b"]
     assert (a["chapters"], a["seconds"], a["watchableSeconds"]) == (3, 3000, 1800)
-    assert (b["chapters"], b["seconds"], b["watchableSeconds"]) == (3, 600, 600)
+    assert (b["chapters"], b["seconds"], b["watchableSeconds"]) == (2, 600, 600)
     assert isinstance(a["seconds"], int) and isinstance(a["watchableSeconds"], int)
 
 

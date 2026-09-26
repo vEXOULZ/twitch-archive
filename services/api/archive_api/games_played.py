@@ -14,22 +14,18 @@ NO_CATEGORY = "No category"
 # Chapters are grouped by gameId, else by name; chapters with no name (no Twitch
 # category) form a single group. Within a group the name, gameId and image come
 # from the most recent chapter that has one (games get renamed on Twitch).
-# A chapter's ``end`` is its length in seconds (not its end time); a missing or
-# non-numeric one counts as 0.
+# A chapter's ``end`` is its length in seconds (not its end time); one that is
+# missing or not a JSON number counts as 0.
 _SQL = text(
-    r"""
+    """
     with chapters as (
         select v.id as vod_id, v."createdAt" as created_at, c.ord,
                c.value ->> 'name' as name,
                nullif(c.value ->> 'gameId', '') as game_id,
                nullif(c.value ->> 'image', '') as image,
-               case
-                   when jsonb_typeof(c.value -> 'end') = 'number'
-                       or c.value ->> 'end' ~ '^\s*[0-9]+(\.[0-9]+)?\s*$'
-                   then (c.value ->> 'end')::numeric
-                   else 0
-               end as length_s,
-               coalesce(c.value ->> 'restricted' = 'true', false) as restricted
+               case when jsonb_typeof(c.value -> 'end') = 'number'
+                   then (c.value ->> 'end')::numeric else 0 end as length_s,
+               c.value @> '{"restricted": true}' as restricted
         from vods v
         cross join lateral jsonb_array_elements(
             case when jsonb_typeof(v.chapters) = 'array' then v.chapters else '[]'::jsonb end
@@ -55,7 +51,7 @@ _SQL = text(
             count(*) as chapters,
             max(created_at) as last_played,
             sum(length_s) as seconds,
-            coalesce(sum(length_s) filter (where not restricted), 0) as watchable_seconds
+            sum(case when restricted then 0 else length_s end) as watchable_seconds
         from keyed
         group by key
     )
