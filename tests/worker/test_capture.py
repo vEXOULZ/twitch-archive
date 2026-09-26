@@ -129,3 +129,31 @@ async def test_live_record_skips_ads_and_handles_rollover(make_ctx, settings, mo
     assert names == ["000000010.ts", "000000011.ts", "000000013.ts"]
     # the ad break becomes a discontinuity before the next real segment
     assert "#EXT-X-DISCONTINUITY\n#EXTINF:2.000,\n000000013.ts" in text
+
+
+@respx.mock
+async def test_live_record_indexes_a_batch_in_order_and_skips_failures(make_ctx, settings, monkeypatch):
+    settings.live_poll_interval_seconds = 0
+    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexoulz"})
+
+    async def no_save():
+        return None
+
+    monkeypatch.setattr(ctx, "save", no_save)
+    respx.post(GQL_URL).mock(side_effect=_token_response)
+    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexoulz.m3u8").respond(
+        200, text='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,VIDEO="chunked"\nhttps://edge.example/live.m3u8\n'
+    )
+    respx.get("https://edge.example/live.m3u8").mock(
+        side_effect=[httpx.Response(200, text=LIVE_1), httpx.Response(200, text=LIVE_2)]
+    )
+    respx.get("https://edge.example/s10.ts").respond(404)  # gone before it was fetched
+    for n in (11, 13):
+        respx.get(f"https://edge.example/s{n}.ts").respond(200, content=f"seg{n}".encode())
+    respx.get("https://edge.example/ad.ts").respond(200, content=b"ad")
+
+    await cap.live_record(ctx)
+
+    text = (ctx.hls_dir / "index.m3u8").read_text()
+    assert [line for line in text.splitlines() if line.endswith(".ts")] == ["000000011.ts", "000000013.ts"]
+    assert "#EXT-X-DISCONTINUITY\n#EXTINF:2.000,\n000000011.ts" in text  # the gap is marked

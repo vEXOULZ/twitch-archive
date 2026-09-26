@@ -72,7 +72,7 @@ async def test_global_gate_pauses_until_resumed(vod, steps, deps):
     assert (after.state, after.step, steps) == ("paused", "b", ["a"])
     assert await runner._claim() is None  # paused jobs are not picked up
 
-    assert (await jobs.resume(job.id))[1]
+    assert (await jobs.resume(job.id)).state == "queued"
     done = await _claim_and_run(runner, job.id)
     assert (done.state, steps) == ("done", ["a", "b", "c"])
 
@@ -83,7 +83,7 @@ async def test_job_override_beats_global_and_gates_first_step(vod, steps, deps):
     job = await jobs.enqueue("test", vod, pause_before=["a"], settings=deps.settings)
     assert (job.state, job.step) == ("paused", "a")
 
-    assert (await jobs.resume(job.id))[1]
+    assert (await jobs.resume(job.id)).state == "queued"
     done = await _claim_and_run(runner, job.id)
     assert (done.state, steps) == ("done", ["a", "b", "c"])  # global gate on b ignored
 
@@ -92,11 +92,11 @@ async def test_resume_once_single_steps(vod, steps, deps):
     runner = jobs.Runner(deps)
     job = await jobs.enqueue("test", vod, paused=True, settings=deps.settings)
 
-    assert (await jobs.resume(job.id, once=True))[1]
+    assert (await jobs.resume(job.id, once=True)).state == "queued"
     after = await _claim_and_run(runner, job.id)
     assert (after.state, after.step, after.pause_next, steps) == ("paused", "b", False, ["a"])
 
-    assert (await jobs.resume(job.id))[1]
+    assert (await jobs.resume(job.id)).state == "queued"
     assert (await _claim_and_run(runner, job.id)).state == "done"
 
 
@@ -178,3 +178,22 @@ async def test_admin_launch_list_pause_resume(vod, steps, deps):
         assert (await c.post(f"/admin/jobs/{job_id}/resume", headers=headers)).status_code == 200
         assert (await c.post(f"/admin/jobs/{job_id}/resume", headers=headers)).status_code == 409
         assert (await _claim_and_run(runner, job_id)).state == "done"
+
+
+async def test_admin_job_routes_404_and_409(vod, steps, deps):
+    deps.settings.admin_api_key = SecretStr("k")
+    runner = jobs.Runner(deps)
+    app = create_admin_app(deps, runner)
+    headers = {"Authorization": "Bearer k"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://admin") as c:
+        missing = 2**62
+        for method, path in (("get", ""), ("post", "/resume"), ("post", "/pause"), ("post", "/retry"),
+                             ("post", "/cancel"), ("patch", "")):
+            kwargs = {"json": {"pauseNext": True}} if method == "patch" else {}
+            r = await c.request(method.upper(), f"/admin/jobs/{missing}{path}", headers=headers, **kwargs)
+            assert (r.status_code, r.json()["msg"]) == (404, "No such job"), path
+
+        job = await jobs.enqueue("test", vod, settings=deps.settings)
+        assert (await _claim_and_run(runner, job.id)).state == "done"
+        r = await c.post(f"/admin/jobs/{job.id}/pause", headers=headers)
+        assert (r.status_code, r.json()["msg"]) == (409, "Job is done; only queued or running jobs can be paused")

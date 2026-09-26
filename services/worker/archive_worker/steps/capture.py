@@ -129,10 +129,6 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
     s = ctx.settings
     helix = ctx.deps.helix
     vod_id = ctx.require_vod_id()
-    # ensure_source runs this inside its own step; the flag stops a retry of that
-    # step from capturing again.
-    if ctx.payload.get("capture_done"):
-        return
     last_sig = None
     no_change = 0
     errors = 0
@@ -188,8 +184,6 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
 
     if not (ctx.hls_dir / "index.m3u8").exists():
         raise StepError("nothing was captured")
-    ctx.payload["capture_done"] = True
-    await ctx.save()
 
 
 # ── Live stream recording ─────────────────────────────────────────────────
@@ -274,17 +268,25 @@ async def live_record(ctx: JobContext) -> None:
                 pending_disc = True  # we fell behind the live window
             idle = 0 if new else idle + 1
 
+            # Fetch the batch in parallel (it can be a whole live window after a stall),
+            # then index it in order.
+            names = {
+                seg.sequence: f"{seg.sequence:09d}{Path(hls.local_name(seg.uri)).suffix or '.ts'}"
+                for seg in new if not seg.ad
+            }
+            lost = await _download_all(
+                [(_abs(base, seg.uri), d / names[seg.sequence]) for seg in new if not seg.ad],
+                s.segment_concurrency,
+            )
+            failed = {dest.name: exc for dest, exc in lost}
             for seg in new:
                 last_seq = seg.sequence
                 if seg.ad:
                     pending_disc = True
                     continue
-                ext = Path(hls.local_name(seg.uri)).suffix or ".ts"
-                name = f"{seg.sequence:09d}{ext}"
-                try:
-                    await _download(_abs(base, seg.uri), d / name)
-                except httpx.HTTPError as exc:
-                    ctx.log.warning("live segment %s failed: %s", seg.sequence, exc)
+                name = names[seg.sequence]
+                if name in failed:
+                    ctx.log.warning("live segment %s failed: %s", seg.sequence, failed[name])
                     pending_disc = True
                     continue
                 index.write(json.dumps({"name": name, "duration": seg.duration, "disc": pending_disc}) + "\n")

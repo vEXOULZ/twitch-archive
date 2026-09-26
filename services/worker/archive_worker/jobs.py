@@ -37,14 +37,14 @@ KINDS: dict[str, list[str]] = {
     # Stream went live (or /admin/hls/download): follow the VOD playlist, then process.
     "archive": ["capture", "finalize", "chapters", "chat", "emotes", "split", "upload", "describe", "cleanup"],
     # /admin/download: full VOD (or a given file), split + upload, optional part range.
-    "download": ["ensure_source", "chapters", "split", "upload", "describe", "cleanup"],
-    "reupload": ["ensure_source", "split", "upload", "describe", "cleanup"],
+    "download": ["ensure_source", "fetch_vod", "finalize", "chapters", "split", "upload", "describe", "cleanup"],
+    "reupload": ["ensure_source", "fetch_vod", "finalize", "split", "upload", "describe", "cleanup"],
     # Recording of the live stream itself (unmuted), uploaded as type "live".
     "live": ["live_record", "resolve_vod", "finalize", "chapters", "split", "upload", "describe", "cleanup"],
     # /v2/live callback from an external recorder.
     "live_file": ["ensure_source", "chapters", "split", "upload", "describe"],
-    "dmca": ["ensure_source", "dmca_edit", "split", "upload", "describe", "cleanup"],
-    "part_dmca": ["ensure_source", "split", "dmca_edit", "upload", "describe", "cleanup"],
+    "dmca": ["ensure_source", "fetch_vod", "finalize", "dmca_edit", "split", "upload", "describe", "cleanup"],
+    "part_dmca": ["ensure_source", "fetch_vod", "finalize", "split", "dmca_edit", "upload", "describe", "cleanup"],
     "chat": ["chat"],
     "logs_manual": ["logs_manual"],
     "chapters": ["chapters"],
@@ -59,17 +59,30 @@ ACTIVE = ("queued", "running", "paused")
 STATES = ("queued", "running", "paused", "done", "failed", "cancelled")
 
 
+class JobNotFound(LookupError):
+    def __init__(self, job_id: int) -> None:
+        super().__init__(f"no job {job_id}")
+
+
+class JobConflict(Exception):
+    """The job is in a state that does not allow the action; the message says why."""
+
+
+class InvalidJob(ValueError):
+    """An unknown job kind or step name."""
+
+
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
 def check_steps(kind: str, steps: list[str]) -> None:
-    """ValueError unless ``kind`` exists and every name is one of its steps."""
+    """InvalidJob unless ``kind`` exists and every name is one of its steps."""
     if kind not in KINDS:
-        raise ValueError(f"unknown job kind {kind!r}; kinds: {', '.join(KINDS)}")
+        raise InvalidJob(f"unknown job kind {kind!r}; kinds: {', '.join(KINDS)}")
     unknown = [s for s in steps if s not in KINDS[kind]]
     if unknown:
-        raise ValueError(f"{kind!r} has no step(s) {', '.join(unknown)}; steps: {', '.join(KINDS[kind])}")
+        raise InvalidJob(f"{kind!r} has no step(s) {', '.join(unknown)}; steps: {', '.join(KINDS[kind])}")
 
 
 def gates(job: Job, settings: Settings) -> list[str]:
@@ -125,11 +138,22 @@ async def exists_any(kind: str, *, vod_id: str | None = None, stream_id: str | N
         return (await s.execute(_matching(select(Job.id), kind, vod_id, stream_id))).first() is not None
 
 
-async def retry(job_id: int) -> Job | None:
+async def get(job_id: int) -> Job:
     async with get_sessionmaker()() as s:
-        job = await s.get(Job, job_id)
-        if job is None:
-            return None
+        return await _load(s, job_id)
+
+
+async def _load(s, job_id: int) -> Job:
+    job = await s.get(Job, job_id)
+    if job is None:
+        raise JobNotFound(job_id)
+    return job
+
+
+async def retry(job_id: int) -> Job:
+    """Queue a job again at its current step, with a fresh attempt count."""
+    async with get_sessionmaker()() as s:
+        job = await _load(s, job_id)
         job.state = "queued"
         job.attempts = 0
         job.not_before = None
@@ -137,41 +161,39 @@ async def retry(job_id: int) -> Job | None:
         return job
 
 
-async def resume(job_id: int, *, once: bool = False) -> tuple[Job | None, bool]:
-    """Queue a paused job at its current step; ``once`` pauses it again after that step.
-    Returns (job, whether it was paused and is now queued)."""
+async def resume(job_id: int, *, once: bool = False) -> Job:
+    """Queue a paused job at its current step; ``once`` pauses it again after that step."""
     async with get_sessionmaker()() as s:
-        job = await s.get(Job, job_id)
-        if job is None or job.state != "paused":
-            return job, False
+        job = await _load(s, job_id)
+        if job.state != "paused":
+            raise JobConflict(f"Job is {job.state}; only paused jobs can be resumed")
         job.state = "queued"
         job.pause_next = once
-        await s.commit()
-        return job, True
-
-
-async def pause(job_id: int) -> Job | None:
-    """Pause a queued job now, or a running one when its current step finishes."""
-    async with get_sessionmaker()() as s:
-        job = await s.get(Job, job_id)
-        if job is None:
-            return None
-        if job.state == "queued":
-            job.state = "paused"
-        elif job.state == "running":
-            job.pause_next = True
         await s.commit()
         return job
 
 
-async def set_control(job_id: int, **values: Any) -> Job | None:
-    """Change a job's ``pause_before`` and/or ``pause_next``. ValueError on a step the
+async def pause(job_id: int) -> Job:
+    """Pause a queued job now, or a running one when its current step finishes
+    (``state`` stays "running" until then). Pausing a paused job is a no-op."""
+    async with get_sessionmaker()() as s:
+        job = await _load(s, job_id)
+        if job.state == "queued":
+            job.state = "paused"
+        elif job.state == "running":
+            job.pause_next = True
+        elif job.state != "paused":
+            raise JobConflict(f"Job is {job.state}; only queued or running jobs can be paused")
+        await s.commit()
+        return job
+
+
+async def set_control(job_id: int, **values: Any) -> Job:
+    """Change a job's ``pause_before`` and/or ``pause_next``. InvalidJob on a step the
     job's kind does not have. Like every gate, it applies when the job next moves on
     to a step, not to the step it is at."""
     async with get_sessionmaker()() as s:
-        job = await s.get(Job, job_id)
-        if job is None:
-            return None
+        job = await _load(s, job_id)
         if values.get("pause_before") is not None:
             check_steps(job.kind, values["pause_before"])
         for key, value in values.items():
@@ -199,12 +221,27 @@ class Runner:
         for kind, steps in deps.settings.manual_steps.items():
             check_steps(kind, steps)  # fail at startup on a typo in ARCHIVE_MANUAL_STEPS
 
-    async def cancel(self, job_id: int) -> Job | None:
+    async def enqueue(self, kind: str, vod_id: str | None, payload: dict[str, Any] | None = None,
+                      **kwargs: Any) -> Job:
+        """``enqueue`` with this worker's settings, started as soon as there is room."""
+        job = await enqueue(kind, vod_id, payload, settings=self.deps.settings, **kwargs)
+        self.poke()
+        return job
+
+    async def resume(self, job_id: int, *, once: bool = False) -> Job:
+        job = await resume(job_id, once=once)
+        self.poke()
+        return job
+
+    async def retry(self, job_id: int) -> Job:
+        job = await retry(job_id)
+        self.poke()
+        return job
+
+    async def cancel(self, job_id: int) -> Job:
         """Cancel a queued or paused job, or stop a running one (at once, mid-step)."""
         async with get_sessionmaker()() as s:
-            job = await s.get(Job, job_id)
-            if job is None:
-                return None
+            job = await _load(s, job_id)
             if job.state in ("queued", "paused"):
                 job.state = "cancelled"
                 await s.commit()
@@ -215,7 +252,9 @@ class Runner:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             async with get_sessionmaker()() as s:
-                job = await s.get(Job, job_id)
+                job = await _load(s, job_id)
+        if job.state != "cancelled":
+            raise JobConflict(f"Job is {job.state}; only queued, paused or running jobs can be cancelled")
         return job
 
     async def recover(self) -> None:

@@ -36,6 +36,9 @@ async def resolve_vod(ctx: JobContext) -> None:
 
 
 async def finalize(ctx: JobContext) -> None:
+    """Convert the captured HLS to the job's MP4 (kept if already done)."""
+    if ctx.payload.get("path"):
+        return  # a given file is the source; ensure_source checked it
     out = ctx.default_mp4
     if not (out.exists() and ctx.payload.get("duration")):
         playlist = ctx.hls_dir / "index.m3u8"
@@ -51,9 +54,13 @@ async def finalize(ctx: JobContext) -> None:
     ctx.log.info("mp4 ready: %s (%s)", out, format_hhmmss(ctx.payload["duration"]))
 
 
+def _have_source(ctx: JobContext) -> bool:
+    return bool(ctx.payload.get("path")) or ctx.default_mp4.exists()
+
+
 async def ensure_source(ctx: JobContext) -> None:
-    """Make sure a full-length MP4 exists: a given path, a previous download,
-    or (for Twitch VOD copies) a fresh one-shot HLS download."""
+    """Pick the full-length MP4: a given path, or a previous download. Without
+    either, ``fetch_vod`` and ``finalize`` download the VOD from Twitch again."""
     given = ctx.payload.get("path")
     if given:
         path = Path(given)
@@ -64,11 +71,15 @@ async def ensure_source(ctx: JobContext) -> None:
         if ctx.video_type == "live":
             raise StepError(f"live recording {ctx.default_mp4} not found")
         ctx.log.info("no local copy of %s; downloading", ctx.vod_id)
-        await capture(ctx, one_shot=True)
-        await finalize(ctx)
         return
     if not ctx.payload.get("duration"):
         ctx.payload["duration"] = await ffmpeg.probe_duration(ctx.source_mp4)
+
+
+async def fetch_vod(ctx: JobContext) -> None:
+    """One-shot HLS download of a past VOD, unless ensure_source found a source."""
+    if not _have_source(ctx):
+        await capture(ctx, one_shot=True)
 
 
 async def split(ctx: JobContext) -> None:

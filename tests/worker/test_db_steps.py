@@ -177,3 +177,19 @@ async def test_claim_respects_not_before_and_exclusivity(db, deps):
     runner.running_keys.clear()
     assert (await runner._claim()).id == j2.id
     await _reset()
+
+
+async def test_upsert_vod_sets_helix_fields_only_on_insert(db):
+    from archive_worker.vods import upsert_vod
+
+    await _reset()
+    video = {"id": VOD, "title": "first", "created_at": "2026-02-21T03:00:00Z", "duration": "1h2m3s",
+             "thumbnail_url": "https://thumb/1"}
+    try:
+        await upsert_vod(video)
+        await upsert_vod({**video, "title": "renamed", "duration": "9h", "thumbnail_url": ""})
+        async with get_sessionmaker()() as s:
+            vod = await s.get(Vod, VOD)
+        assert (vod.title, vod.duration, vod.thumbnail_url) == ("renamed", "01:02:03", "https://thumb/1")
+    finally:
+        await _reset()

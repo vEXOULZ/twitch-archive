@@ -136,12 +136,17 @@ class Comments:
             created = cursor["createdAt"]
             if not isinstance(created, str):
                 return None
-            rows = await self._rows(
-                conn,
+            where = [
                 _lt.c.vod_id == vod_id,
                 _lt.c["_id"] >= seq,
                 _lt.c.createdAt >= dt.datetime.fromisoformat(created),
-            )
+            ]
+            # Lets the (vod_id, content_offset_seconds, _id) index seek to the cursor instead of
+            # scanning from the start of the VOD. Unlike the legacy API, a comment stored with
+            # a later _id but an earlier offset than the cursor is not shown again.
+            if cursor.get("content_offset_seconds") is not None:
+                where.append(_lt.c.content_offset_seconds >= math.floor(float(cursor["content_offset_seconds"])))
+            rows = await self._rows(conn, *where)
         except (KeyError, TypeError, ValueError):
             return None
         if not rows:
