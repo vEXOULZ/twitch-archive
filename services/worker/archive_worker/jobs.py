@@ -37,14 +37,14 @@ KINDS: dict[str, list[str]] = {
     # Stream went live (or /admin/hls/download): follow the VOD playlist, then process.
     "archive": ["capture", "finalize", "chapters", "chat", "emotes", "split", "upload", "describe", "cleanup"],
     # /admin/download: full VOD (or a given file), split + upload, optional part range.
-    "download": ["ensure_source", "chapters", "split", "upload", "describe", "cleanup"],
-    "reupload": ["ensure_source", "split", "upload", "describe", "cleanup"],
+    "download": ["ensure_source", "fetch_vod", "finalize", "chapters", "split", "upload", "describe", "cleanup"],
+    "reupload": ["ensure_source", "fetch_vod", "finalize", "split", "upload", "describe", "cleanup"],
     # Recording of the live stream itself (unmuted), uploaded as type "live".
     "live": ["live_record", "resolve_vod", "finalize", "chapters", "split", "upload", "describe", "cleanup"],
     # /v2/live callback from an external recorder.
     "live_file": ["ensure_source", "chapters", "split", "upload", "describe"],
-    "dmca": ["ensure_source", "dmca_edit", "split", "upload", "describe", "cleanup"],
-    "part_dmca": ["ensure_source", "split", "dmca_edit", "upload", "describe", "cleanup"],
+    "dmca": ["ensure_source", "fetch_vod", "finalize", "dmca_edit", "split", "upload", "describe", "cleanup"],
+    "part_dmca": ["ensure_source", "fetch_vod", "finalize", "split", "dmca_edit", "upload", "describe", "cleanup"],
     "chat": ["chat"],
     "logs_manual": ["logs_manual"],
     "chapters": ["chapters"],

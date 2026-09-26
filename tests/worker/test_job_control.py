@@ -178,3 +178,22 @@ async def test_admin_launch_list_pause_resume(vod, steps, deps):
         assert (await c.post(f"/admin/jobs/{job_id}/resume", headers=headers)).status_code == 200
         assert (await c.post(f"/admin/jobs/{job_id}/resume", headers=headers)).status_code == 409
         assert (await _claim_and_run(runner, job_id)).state == "done"
+
+
+async def test_admin_job_routes_404_and_409(vod, steps, deps):
+    deps.settings.admin_api_key = SecretStr("k")
+    runner = jobs.Runner(deps)
+    app = create_admin_app(deps, runner)
+    headers = {"Authorization": "Bearer k"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://admin") as c:
+        missing = 2**62
+        for method, path in (("get", ""), ("post", "/resume"), ("post", "/pause"), ("post", "/retry"),
+                             ("post", "/cancel"), ("patch", "")):
+            kwargs = {"json": {"pauseNext": True}} if method == "patch" else {}
+            r = await c.request(method.upper(), f"/admin/jobs/{missing}{path}", headers=headers, **kwargs)
+            assert (r.status_code, r.json()["msg"]) == (404, "No such job"), path
+
+        job = await jobs.enqueue("test", vod, settings=deps.settings)
+        assert (await _claim_and_run(runner, job.id)).state == "done"
+        r = await c.post(f"/admin/jobs/{job.id}/pause", headers=headers)
+        assert (r.status_code, r.json()["msg"]) == (409, "Job is done; only queued or running jobs can be paused")

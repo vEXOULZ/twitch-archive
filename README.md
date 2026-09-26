@@ -240,16 +240,16 @@ Job kinds and their steps:
 | Kind | Steps | Started by |
 |---|---|---|
 | `archive` | capture → finalize → chapters → chat → emotes → split → upload → describe → cleanup | monitor (stream went live), `/admin/hls/download` |
-| `download` | ensure_source → chapters → split → upload → describe → cleanup | `/admin/download` |
-| `reupload` | ensure_source → split → upload → describe → cleanup | `/admin/reupload` |
+| `download` | ensure_source → fetch_vod → finalize → chapters → split → upload → describe → cleanup | `/admin/download` |
+| `reupload` | ensure_source → fetch_vod → finalize → split → upload → describe → cleanup | `/admin/reupload` |
 | `live` | live_record → resolve_vod → finalize → chapters → split → upload → describe → cleanup | monitor (when `LIVE_RECORD=true`) |
 | `live_file` | ensure_source → chapters → split → upload → describe | `/v2/live` |
-| `dmca` | ensure_source → dmca_edit → split → upload → describe → cleanup | `/admin/dmca` |
-| `part_dmca` | ensure_source → split → dmca_edit → upload → describe → cleanup | `/admin/part/dmca` |
+| `dmca` | ensure_source → fetch_vod → finalize → dmca_edit → split → upload → describe → cleanup | `/admin/dmca` |
+| `part_dmca` | ensure_source → fetch_vod → finalize → split → dmca_edit → upload → describe → cleanup | `/admin/part/dmca` |
 | `chat`, `logs_manual`, `chapters`, `emotes`, `describe` | one step each | the matching admin routes |
 | `global_emotes_backfill` | one step | `/admin/emotes/backfill` |
 
-`ensure_source` uses `path` if one was given, otherwise the MP4 already on disk, otherwise it downloads the whole VOD from Twitch again (only while Twitch still has it).
+`ensure_source` uses `path` if one was given, otherwise the MP4 already on disk. With neither, `fetch_vod` downloads the whole VOD from Twitch again (only while Twitch still has it) and `finalize` converts it; both do nothing when there is a source already.
 
 ### Recipes
 

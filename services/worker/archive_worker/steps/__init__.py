@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from ..context import JobContext
 from . import capture
-from .media import cleanup, dmca_edit, ensure_source, finalize, resolve_vod, split
+from .media import cleanup, dmca_edit, ensure_source, fetch_vod, finalize, resolve_vod, split
 from .metadata import chapters, chat, emotes, global_emotes_backfill, logs_manual
 from .publish import describe, upload
 
@@ -18,6 +18,7 @@ STEPS: dict[str, Step] = {
     "resolve_vod": resolve_vod,
     "finalize": finalize,
     "ensure_source": ensure_source,
+    "fetch_vod": fetch_vod,
     "chapters": chapters,
     "chat": chat,
     "emotes": emotes,
