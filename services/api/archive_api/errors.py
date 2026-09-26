@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 
 _CLASS = {
     400: ("BadRequest", "bad-request"),
@@ -23,6 +24,12 @@ class FeathersError(Exception):
         name, class_name = _CLASS.get(self.code, ("GeneralError", "general-error"))
         body = {"name": name, "message": self.message, "code": self.code, "className": class_name}
         return JSONResponse(body, status_code=self.code)
+
+
+def bad_literal(exc: DBAPIError) -> bool:
+    """The database rejected a value from the request (SQLSTATE class 22, e.g. 'abc'::bigint),
+    as opposed to failing for its own reasons."""
+    return str(getattr(exc.orig, "sqlstate", "") or "").startswith("22")
 
 
 def legacy_error(status: int, msg: str) -> JSONResponse:

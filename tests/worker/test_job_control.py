@@ -72,7 +72,7 @@ async def test_global_gate_pauses_until_resumed(vod, steps, deps):
     assert (after.state, after.step, steps) == ("paused", "b", ["a"])
     assert await runner._claim() is None  # paused jobs are not picked up
 
-    assert (await jobs.resume(job.id))[1]
+    assert (await jobs.resume(job.id)).state == "queued"
     done = await _claim_and_run(runner, job.id)
     assert (done.state, steps) == ("done", ["a", "b", "c"])
 
@@ -83,7 +83,7 @@ async def test_job_override_beats_global_and_gates_first_step(vod, steps, deps):
     job = await jobs.enqueue("test", vod, pause_before=["a"], settings=deps.settings)
     assert (job.state, job.step) == ("paused", "a")
 
-    assert (await jobs.resume(job.id))[1]
+    assert (await jobs.resume(job.id)).state == "queued"
     done = await _claim_and_run(runner, job.id)
     assert (done.state, steps) == ("done", ["a", "b", "c"])  # global gate on b ignored
 
@@ -92,11 +92,11 @@ async def test_resume_once_single_steps(vod, steps, deps):
     runner = jobs.Runner(deps)
     job = await jobs.enqueue("test", vod, paused=True, settings=deps.settings)
 
-    assert (await jobs.resume(job.id, once=True))[1]
+    assert (await jobs.resume(job.id, once=True)).state == "queued"
     after = await _claim_and_run(runner, job.id)
     assert (after.state, after.step, after.pause_next, steps) == ("paused", "b", False, ["a"])
 
-    assert (await jobs.resume(job.id))[1]
+    assert (await jobs.resume(job.id)).state == "queued"
     assert (await _claim_and_run(runner, job.id)).state == "done"
 
 

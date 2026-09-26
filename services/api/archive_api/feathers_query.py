@@ -97,7 +97,8 @@ def _as_list(v: Any) -> list:
     return [v]
 
 
-def _value(col, v: Any):
+def typed_value(col, v: Any):
+    """``v`` (a query-string value) as a literal of ``col``'s type; Postgres does the cast."""
     if v is None:
         return None
     if not isinstance(v, str):
@@ -108,13 +109,13 @@ def _value(col, v: Any):
 
 
 _OPS: dict[str, Callable] = {
-    "$ne": lambda c, v: c.is_not(None) if v is None else c != _value(c, v),
-    "$lt": lambda c, v: c < _value(c, v),
-    "$lte": lambda c, v: c <= _value(c, v),
-    "$gt": lambda c, v: c > _value(c, v),
-    "$gte": lambda c, v: c >= _value(c, v),
-    "$in": lambda c, v: c.in_([_value(c, x) for x in _as_list(v)]),
-    "$nin": lambda c, v: c.not_in([_value(c, x) for x in _as_list(v)]),
+    "$ne": lambda c, v: c.is_not(None) if v is None else c != typed_value(c, v),
+    "$lt": lambda c, v: c < typed_value(c, v),
+    "$lte": lambda c, v: c <= typed_value(c, v),
+    "$gt": lambda c, v: c > typed_value(c, v),
+    "$gte": lambda c, v: c >= typed_value(c, v),
+    "$in": lambda c, v: c.in_([typed_value(c, x) for x in _as_list(v)]),
+    "$nin": lambda c, v: c.not_in([typed_value(c, x) for x in _as_list(v)]),
     "$like": lambda c, v: c.like(v),
     "$notLike": lambda c, v: c.not_like(v),
     "$iLike": lambda c, v: c.ilike(v),
@@ -148,9 +149,9 @@ def build_where(resource: Resource, query: dict[str, Any], special: dict[str, Sp
                     raise FeathersError(400, f"Invalid value for '{key}[{op}]'")
                 clauses.append(fn(col, operand))
         elif isinstance(value, list):
-            clauses.append(col.in_([_value(col, x) for x in value]))
+            clauses.append(col.in_([typed_value(col, x) for x in value]))
         else:
-            clauses.append(col == _value(col, value))
+            clauses.append(col == typed_value(col, value))
     if not clauses:
         return true()
     return and_(*clauses)

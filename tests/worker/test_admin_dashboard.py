@@ -8,11 +8,11 @@ import httpx
 import pytest
 import respx
 from pydantic import SecretStr
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from archive_common.config import get_settings
-from archive_common.db import VOD_CHANGED, get_sessionmaker
-from archive_common.models import AdminAudit, Emote, Job, Stream, Vod
+from archive_common.db import VOD_CHANGED, execute, get_sessionmaker
+from archive_common.models import AdminAudit, Emote, Game, Job, Stream, Vod
 from archive_common.twitch.helix import HELIX, TOKEN_URL
 from archive_api.invalidation import asyncpg_dsn
 from archive_worker import events as events_mod
@@ -32,6 +32,7 @@ async def _reset(audit_after: int | None = None):
     async with get_sessionmaker()() as s:
         await s.execute(delete(Job).where(Job.vod_id == VOD))  # job_events cascade
         await s.execute(delete(Emote).where(Emote.vod_id == VOD))
+        await s.execute(delete(Game).where(Game.vod_id == VOD))
         await s.execute(delete(Vod).where(Vod.id == VOD))
         await s.execute(delete(Stream).where(Stream.id == STREAM))
         if audit_after is not None:
@@ -234,14 +235,36 @@ async def test_vod_editing(vod, app, make_ctx, monkeypatch):
     assert calls == [vod]
 
 
-async def test_vod_edit_notifies_the_api(vod, app):
+async def _listen() -> tuple[asyncpg.Connection, asyncio.Queue[str]]:
     conn = await asyncpg.connect(asyncpg_dsn(get_settings().database_url))
     heard: asyncio.Queue[str] = asyncio.Queue()
     await conn.add_listener(VOD_CHANGED, lambda _c, _pid, _ch, payload: heard.put_nowait(payload))
+    return conn, heard
+
+
+async def test_vod_edit_notifies_the_api(vod, app):
+    conn, heard = await _listen()
     try:
         async with client(app) as c:
             assert (await c.patch(f"/admin/vods/{vod}", headers=KEY, json={"title": "x"})).status_code == 200
         assert await asyncio.wait_for(heard.get(), 5) == vod
+    finally:
+        await conn.close()
+
+
+async def test_any_vod_or_game_write_notifies_the_api(vod):
+    """The trigger covers writers outside the admin API (job steps, the monitor)."""
+    conn, heard = await _listen()
+    try:
+        await execute(update(Vod).where(Vod.id == vod).values(duration="03:00:00"))
+        assert await asyncio.wait_for(heard.get(), 5) == vod
+        await execute(update(Vod).where(Vod.id == vod).values(duration="03:00:00"))  # no change: silent
+        async with get_sessionmaker()() as s:
+            s.add(Game(vod_id=vod, game_name="Just Chatting"))
+            await s.commit()
+        assert await asyncio.wait_for(heard.get(), 5) == vod
+        await asyncio.sleep(0.2)
+        assert heard.empty()
     finally:
         await conn.close()
 

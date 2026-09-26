@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.config import Settings
 from archive_common.serialize import EMOTES, GAMES, STREAMS, VODS, Resource, attach_games, vods_json
 
 from . import feathers_query as fq
-from .errors import FeathersError
+from .errors import FeathersError, bad_literal
 
 
 async def _vods_by_id(conn: AsyncConnection, vod_ids: list[str]) -> dict[str, dict]:
@@ -55,10 +56,12 @@ class Service:
     async def get(self, conn: AsyncConnection, id_: str) -> dict[str, Any]:
         id_field = self.resource.by_key[self.resource.id_key]
         col = id_field.column
+        stmt = select(*self.resource.columns()).where(col == fq.typed_value(col, id_))
         try:
-            value = fq._value(col, id_)
-            row = (await conn.execute(select(*self.resource.columns()).where(col == value))).mappings().first()
-        except Exception:  # invalid literal for the id type, e.g. /streams/abc
+            row = (await conn.execute(stmt)).mappings().first()
+        except DBAPIError as exc:
+            if not bad_literal(exc):  # e.g. /streams/abc is a 404; an outage is not
+                raise
             row = None
         if row is None:
             raise FeathersError(404, f"No record found for id '{id_}'")

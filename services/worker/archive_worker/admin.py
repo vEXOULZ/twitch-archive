@@ -23,10 +23,10 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy import delete, func, insert, select, text, update
 
 from archive_common import http
-from archive_common.db import execute, get_sessionmaker, notify_vod_changed
+from archive_common.db import execute, get_sessionmaker
 from archive_common.models import AdminAudit, Emote, Game, Job, Log, Stream, Vod
 from archive_common.serialize import EMOTES, box_art_template, vod_json
-from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds, parse_helix_duration
+from archive_common.timeutil import hhmmss_to_seconds, parse_helix_duration
 
 from . import jobs, vod_edits, youtube
 from .admin_auth import CSRF_HEADER, SESSION_COOKIE, AdminAuth, LoginLimiter, Session, client_address, parse_networks
@@ -94,10 +94,6 @@ def _states(value: str) -> list[str]:
     return out
 
 
-def _helix_hhmmss(video: dict) -> str:
-    return format_hhmmss(parse_helix_duration(video.get("duration", "")))
-
-
 def _audit_json(row: AdminAudit) -> dict:
     return {"id": row.id, "at": iso_utc(row.at), "actor": row.actor, "action": row.action,
             "target": row.target, "detail": row.detail}
@@ -130,6 +126,18 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     @app.exception_handler(AdminError)
     async def _admin_error(_req: Request, exc: AdminError) -> JSONResponse:
         return JSONResponse({"error": True, "msg": exc.msg}, status_code=exc.status, headers=exc.headers)
+
+    @app.exception_handler(jobs.JobNotFound)
+    async def _job_not_found(req: Request, _exc: jobs.JobNotFound) -> JSONResponse:
+        return await _admin_error(req, AdminError(404, "No such job"))
+
+    @app.exception_handler(jobs.JobConflict)
+    async def _job_conflict(req: Request, exc: jobs.JobConflict) -> JSONResponse:
+        return await _admin_error(req, AdminError(409, str(exc)))
+
+    @app.exception_handler(jobs.InvalidJob)
+    async def _invalid_job(req: Request, exc: jobs.InvalidJob) -> JSONResponse:
+        return await _admin_error(req, AdminError(400, str(exc)))
 
     # ── Auth: API key or session cookie ───────────────────────────────────
 
@@ -255,10 +263,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         events.add(job.id, "info", job.step, msg)
         return _ok(msg, job)
 
-    async def enqueue(kind: str, vod_id: str | None, payload: dict | None = None, **kwargs: Any) -> Job:
-        job = await jobs.enqueue(kind, vod_id, payload, settings=settings, **kwargs)
-        runner.poke()
-        return job
+    enqueue = runner.enqueue
 
     async def vod_exists(vod_id: str) -> Vod | None:
         async with get_sessionmaker()() as s:
@@ -407,44 +412,28 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         payload = body.get("payload") or {}
         if not isinstance(payload, dict):
             raise AdminError(400, "payload must be an object")
-        try:
-            job = await enqueue(
-                str(body["kind"]), vod_id, payload, step=body.get("fromStep") or None,
-                pause_before=pause_before, paused=bool(body.get("paused")),
-            )
-        except ValueError as exc:
-            raise AdminError(400, str(exc)) from exc
+        job = await enqueue(
+            str(body["kind"]), vod_id, payload, step=body.get("fromStep") or None,
+            pause_before=pause_before, paused=bool(body.get("paused")),
+        )
         return _ok(f"Job {job.id} {job.kind} {job.state} at step {job.step}", job)
 
     @app.post("/admin/jobs/{job_id}/resume", dependencies=auth)
     async def resume_job(job_id: int, body: dict | None = Body(None)) -> dict:
         """Run a paused job from its current step. ``{"once": true}`` pauses again after it."""
-        job, resumed = await jobs.resume(job_id, once=bool((body or {}).get("once")))
-        if job is None:
-            raise AdminError(404, "No such job")
-        if not resumed:
-            raise AdminError(409, f"Job is {job.state}; only paused jobs can be resumed")
-        runner.poke()
+        job = await runner.resume(job_id, once=bool((body or {}).get("once")))
         return job_action(f"Job {job_id} resumed at step {job.step}", job)
 
     @app.post("/admin/jobs/{job_id}/pause", dependencies=auth)
     async def pause_job(job_id: int) -> dict:
         job = await jobs.pause(job_id)
-        if job is None:
-            raise AdminError(404, "No such job")
-        if job.state == "paused":
-            return job_action(f"Job {job_id} paused at step {job.step}", job)
         if job.state == "running":
             return job_action(f"Job {job_id} will pause when step {job.step} finishes", job)
-        raise AdminError(409, f"Job is {job.state}; only queued or running jobs can be paused")
+        return job_action(f"Job {job_id} paused at step {job.step}", job)
 
     @app.get("/admin/jobs/{job_id}", dependencies=auth)
     async def get_job(job_id: int) -> dict:
-        async with get_sessionmaker()() as s:
-            job = await s.get(Job, job_id)
-        if job is None:
-            raise AdminError(404, "No such job")
-        return _job_json(job)
+        return _job_json(await jobs.get(job_id))
 
     @app.patch("/admin/jobs/{job_id}", dependencies=auth)
     async def patch_job(job_id: int, body: dict = Body(...)) -> dict:
@@ -462,12 +451,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             if not isinstance(body["pauseNext"], bool):
                 raise AdminError(400, "pauseNext must be true or false")
             values["pause_next"] = body["pauseNext"]
-        try:
-            job = await jobs.set_control(job_id, **values)
-        except ValueError as exc:
-            raise AdminError(400, str(exc)) from exc
-        if job is None:
-            raise AdminError(404, "No such job")
+        job = await jobs.set_control(job_id, **values)
         events.add(job.id, "info", job.step,
                    f"manual steps set: pauseBefore={job.pause_before}, pauseNext={job.pause_next}")
         return _job_json(job)
@@ -484,19 +468,12 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
 
     @app.post("/admin/jobs/{job_id}/retry", dependencies=auth)
     async def retry_job(job_id: int) -> dict:
-        job = await jobs.retry(job_id)
-        if job is None:
-            raise AdminError(404, "No such job")
-        runner.poke()
+        job = await runner.retry(job_id)
         return job_action(f"Job {job_id} re-queued from step {job.step}", job)
 
     @app.post("/admin/jobs/{job_id}/cancel", dependencies=auth)
     async def cancel_job(job_id: int) -> dict:
         job = await runner.cancel(job_id)
-        if job is None:
-            raise AdminError(404, "No such job")
-        if job.state != "cancelled":
-            raise AdminError(409, f"Job is {job.state}; only queued, paused or running jobs can be cancelled")
         return job_action(f"Job {job_id} cancelled", job)
 
     # ── VOD rows ──────────────────────────────────────────────────────────
@@ -508,11 +485,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             raise AdminError(400, "Vod data already exists")
         video = await helix_video(body["vodId"])
         await upsert_vod(video)
-        await execute(
-            update(Vod)
-            .where(Vod.id == video["id"])
-            .values(duration=_helix_hhmmss(video), thumbnail_url=video.get("thumbnail_url"))
-        )
         await enqueue("chapters", video["id"])
         job = await enqueue("emotes", video["id"])
         return _ok(f"Created vod {video['id']}", job)
@@ -534,7 +506,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
                     platform=body.get("platform") or "twitch",
                 )
             )
-            await notify_vod_changed(s, str(body["vodId"]))
             await s.commit()
         return _ok(f"Created {body['vodId']} in vods DB!")
 
@@ -546,7 +517,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             for model in (Log, Emote, Game):
                 await s.execute(delete(model).where(model.vod_id == vod_id))
             await s.execute(delete(Vod).where(Vod.id == vod_id))
-            await notify_vod_changed(s, vod_id)
             await s.commit()
         return _ok(f"Deleted {vod_id} (vod, logs, emotes, games)")
 
@@ -562,12 +532,11 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     # ── VOD editing (dashboard) ───────────────────────────────────────────
 
     async def save_vod(vod_id: str, **values: Any) -> None:
-        """Update a VOD row and tell archive-api to drop its cached copies."""
+        """Update a VOD row (a database trigger tells archive-api to drop its cached copies)."""
         async with get_sessionmaker()() as s:
             res = await s.execute(update(Vod).where(Vod.id == vod_id).values(**values))
             if res.rowcount == 0:
                 raise AdminError(404, "No Vod Data")
-            await notify_vod_changed(s, vod_id)
             await s.commit()
 
     async def admin_vod(vod_id: str) -> dict:
@@ -783,7 +752,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
                 raise AdminError(404, "No Vod found")
             if body.get("driveId"):
                 vod.drive = [*(vod.drive or []), {"id": body["driveId"], "type": "live"}]
-                await notify_vod_changed(s, vod.id)
                 await s.commit()
         # Non-200 tells the recorder to delete its file (legacy contract).
         if not settings.multi_track:

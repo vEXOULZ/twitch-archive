@@ -48,8 +48,7 @@ class Monitor:
         if s.live_record and not await jobs.exists_any("live", stream_id=stream_id):
             log.info("stream %s is live; starting live recording", stream_id)
             payload = {"type": "live", "stream_id": stream_id, "login": s.twitch_username}
-            await jobs.enqueue("live", None, payload, settings=s)
-            self.runner.poke()
+            await self.runner.enqueue("live", None, payload)
 
         if s.vod_download and not await jobs.exists_any("archive", stream_id=stream_id):
             video = await self.helix.video_for_stream(s.twitch_id, stream_id)
@@ -58,5 +57,4 @@ class Monitor:
                 return
             await upsert_vod(video)
             log.info("stream %s -> vod %s; starting archive job", stream_id, video["id"])
-            await jobs.enqueue("archive", video["id"], {"type": "vod", "stream_id": stream_id}, settings=s)
-            self.runner.poke()
+            await self.runner.enqueue("archive", video["id"], {"type": "vod", "stream_id": stream_id})

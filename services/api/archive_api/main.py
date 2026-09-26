@@ -26,7 +26,7 @@ from archive_common.http import close_client
 from archive_common.twitch.helix import Helix
 
 from .comments import Comments
-from .errors import FeathersError, LegacyError, legacy_error
+from .errors import FeathersError, LegacyError, bad_literal, legacy_error
 from .games_played import games_played
 from .invalidation import VodInvalidator
 from .middleware import GZIP_MIN_SIZE, JsonBody, RateLimiter, ResponseCache, client_ip
@@ -101,8 +101,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return legacy_error(exc.status_code, str(exc.detail))
 
     @app.exception_handler(DBAPIError)
-    async def db_error(_: Request, exc: DBAPIError):
-        # Typically an invalid literal in a filter (e.g. createdAt[$gte]=garbage)
+    async def db_error(request: Request, exc: DBAPIError):
+        if not bad_literal(exc):
+            return await unhandled(request, exc)
+        # An invalid literal in a filter (e.g. createdAt[$gte]=garbage)
         log.info("query rejected by database: %s", exc.orig)
         return FeathersError(400, "Invalid query").response()
 

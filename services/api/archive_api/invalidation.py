@@ -1,8 +1,7 @@
-"""Drop cached responses as soon as the worker's admin API edits a VOD.
+"""Drop cached responses as soon as a VOD (or its games) changes.
 
-The worker sends ``NOTIFY vods_changed, '<vod id>'`` in the transaction that
-edits the row (archive_common.db.notify_vod_changed); this LISTENs on its own
-connection. While the connection is down nothing is heard, so every
+Database triggers (migration 0006) send ``NOTIFY vods_changed, '<vod id>'`` when
+any write to ``vods`` or ``games`` commits; this LISTENs on its own connection. While the connection is down nothing is heard, so every
 (re)connect clears the caches outright.
 """
 
