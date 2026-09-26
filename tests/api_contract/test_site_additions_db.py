@@ -8,7 +8,10 @@ from __future__ import annotations
 from urllib.parse import quote
 
 import httpx
+from sqlalchemy import insert
 
+from archive_api.games_played import games_played
+from archive_common.models import Vod
 from archive_common.serialize import box_art_template
 
 
@@ -51,10 +54,33 @@ async def test_games_played_matches_the_client_side_computation(client: httpx.As
         assert g["name"] == e["name"], key
         assert g["image"] == e.get("image"), key
         assert g["imageTemplate"] == box_art_template(g["image"])
+        assert 0 <= g["watchableSeconds"] <= g["seconds"], key
 
     # vods desc, then lastPlayed desc (name order is the database collation's)
     for a, b in zip(got, got[1:]):
         assert (a["vods"], a["lastPlayed"]) >= (b["vods"], b["lastPlayed"])
+
+
+async def test_games_played_sums_chapter_lengths(client: httpx.AsyncClient) -> None:
+    """``end`` is each chapter's length; one that is missing or not a number counts as 0."""
+    from archive_common.db import get_engine
+
+    a, b = {"name": "Test Game A", "gameId": "test-gp-a"}, {"name": "Test Game B", "gameId": "test-gp-b"}
+    chapters = [
+        {**a, "end": 1800},
+        {**b, "end": 600},
+        {**a, "end": 1200.4, "restricted": True},
+        {**a},
+        {**b, "end": ""},
+    ]
+    async with get_engine().connect() as conn:  # never committed: rolled back on close
+        await conn.execute(insert(Vod).values(id="test-games-played", chapters=chapters))
+        got = {g["gameId"]: g for g in await games_played(conn)}
+
+    a, b = got["test-gp-a"], got["test-gp-b"]
+    assert (a["chapters"], a["seconds"], a["watchableSeconds"]) == (3, 3000, 1800)
+    assert (b["chapters"], b["seconds"], b["watchableSeconds"]) == (2, 600, 600)
+    assert isinstance(a["seconds"], int) and isinstance(a["watchableSeconds"], int)
 
 
 async def test_game_id_filter_is_exact(client: httpx.AsyncClient) -> None:
