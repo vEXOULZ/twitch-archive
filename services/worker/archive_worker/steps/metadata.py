@@ -35,6 +35,7 @@ async def chapters(ctx: JobContext) -> None:
     vod_id = ctx.require_vod_id()
     gql = ctx.deps.gql
     restricted = ctx.settings.restricted_games
+    await ctx.refuse_if_spliced()  # even with force: they are the merged/split chapters
     vod = await ctx.get_vod()
     if vod.chapters_locked and ctx.payload.get("force") is not True:
         ctx.log.info("chapters of %s were edited by hand (locked); keeping them", vod_id)
@@ -91,6 +92,7 @@ async def chat(ctx: JobContext) -> None:
         ctx.log.info("chat download disabled")
         return
     vod_id = ctx.require_vod_id()
+    await ctx.refuse_if_spliced()  # a merged VOD's rows past the join belong to the other VOD
     gql = ctx.deps.gql
     async with get_sessionmaker()() as s:
         offset = (
@@ -195,6 +197,7 @@ def merge_emotes(existing: Emote | None, fetched: dict, *, force: bool, now: dt.
 async def emotes(ctx: JobContext) -> None:
     """Save the channel and global emote sets. ``payload.force`` overwrites an existing row."""
     vod_id = ctx.require_vod_id()
+    await ctx.refuse_if_spliced()  # a merged VOD holds both VODs' sets
     force = bool(ctx.payload.get("force"))
     fetched = await fetch_emotes(ctx, ctx.settings.twitch_id)
     async with get_sessionmaker()() as s:

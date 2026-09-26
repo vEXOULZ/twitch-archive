@@ -129,6 +129,7 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
     s = ctx.settings
     helix = ctx.deps.helix
     vod_id = ctx.require_vod_id()
+    await ctx.refuse_if_spliced()
     last_sig = None
     no_change = 0
     errors = 0

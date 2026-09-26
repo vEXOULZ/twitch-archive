@@ -28,7 +28,7 @@ from archive_common.config import Settings, get_settings
 from archive_common.db import execute, get_sessionmaker
 from archive_common.models import Job
 
-from .context import Deps, JobContext, StepError
+from .context import Deps, JobContext, StepError, StepRefused
 from .steps import STEPS
 
 log = logging.getLogger(__name__)
@@ -370,7 +370,8 @@ class Runner:
             )
             raise
         except Exception as exc:
-            attempts = job.attempts + 1
+            # A refused step would be refused again: no retries.
+            attempts = MAX_ATTEMPTS if isinstance(exc, StepRefused) else job.attempts + 1
             if isinstance(exc, StepError):
                 err = str(exc)
             else:

@@ -15,7 +15,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from archive_common.serialize import STREAMS, VODS, box_art_image, box_art_template, vods_json
+from archive_common.serialize import STREAMS, VODS, box_art_image, box_art_template, not_merged_away, vods_json
 from archive_common.twitch.helix import Helix
 
 
@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 
 async def _latest_vod(conn: AsyncConnection, stream_id: str | None = None) -> dict | None:
-    where = [VODS.table.c.stream_id == stream_id] if stream_id is not None else []
+    where = [not_merged_away()] + ([VODS.table.c.stream_id == stream_id] if stream_id is not None else [])
     vods = await vods_json(conn, *where, order_by=VODS.table.c.createdAt.desc(), limit=1)
     return vods[0] if vods else None
 

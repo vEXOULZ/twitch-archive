@@ -85,6 +85,8 @@ class Settings(BaseSettings):
     admin_trusted_proxies: list[str] = []
     # Where /admin/health looks for archive-api; empty = http://127.0.0.1:<api_port>.
     api_internal_url: str = ""
+    # GET /admin/vods/{id}/merge-candidates: VODs that started up to this long after one ended.
+    merge_candidate_minutes: int = 30
 
     google_client_id: str = ""
     google_client_secret: SecretStr = SecretStr("")

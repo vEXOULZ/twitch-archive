@@ -54,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     limiter = RateLimiter(settings.rate_limit_points, settings.rate_limit_window_seconds)
     helix = Helix(settings)
     # Admin edits reach the public API at once instead of after the cache TTL.
-    invalidator = VodInvalidator(settings.database_url, service_cache, status_cache)
+    invalidator = VodInvalidator(settings.database_url, service_cache, status_cache, comments=comments)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

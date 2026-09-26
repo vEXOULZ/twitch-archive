@@ -28,7 +28,8 @@ REVOKE ALL ON ALL TABLES IN SCHEMA public FROM archive_api;
 GRANT SELECT ON vods, games, emotes, logs, streams TO archive_api;
 
 -- archive-worker: DML on the app tables (no DDL).
-GRANT SELECT, INSERT, UPDATE, DELETE ON vods, games, emotes, logs, streams, jobs, app_state, job_events TO archive_worker;
+GRANT SELECT, INSERT, UPDATE, DELETE ON vods, games, emotes, logs, streams, jobs, app_state, job_events,
+    vod_splices, vod_splice_logs TO archive_worker;
 -- The audit log is append-only for the worker.
 GRANT SELECT, INSERT ON admin_audit TO archive_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO archive_worker;

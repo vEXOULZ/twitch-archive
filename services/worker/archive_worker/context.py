@@ -16,6 +16,7 @@ from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
 
 from .events import JOB_LOGGER, UNITS, JobEvents
+from .vods import splice_reason
 from .youtube import YouTube
 
 
@@ -30,6 +31,10 @@ class Deps:
 
 class StepError(RuntimeError):
     """Expected failure with a readable message (no traceback in job.last_error)."""
+
+
+class StepRefused(StepError):
+    """A step that must not run on this VOD; the job fails at once instead of retrying."""
 
 
 @dataclass
@@ -113,3 +118,10 @@ class JobContext:
 
     async def update_vod(self, **values: Any) -> None:
         await execute(update(Vod).where(Vod.id == self.require_vod_id()).values(**values))
+
+    async def refuse_if_spliced(self) -> None:
+        """For steps that fetch from Twitch by VOD id: the row of a merged or split VOD no
+        longer matches Twitch's VOD, and a refresh would overwrite (or add to) it."""
+        reason = await splice_reason(self.vod_id) if self.vod_id else None
+        if reason:
+            raise StepRefused(f"{reason}; step {self.step} refetches it from Twitch, so it is refused")

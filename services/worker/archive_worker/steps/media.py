@@ -39,6 +39,8 @@ async def finalize(ctx: JobContext) -> None:
     """Convert the captured HLS to the job's MP4 (kept if already done)."""
     if ctx.payload.get("path"):
         return  # a given file is the source; ensure_source checked it
+    if ctx.video_type == "vod":
+        await ctx.refuse_if_spliced()  # it sets the VOD's duration from the file
     out = ctx.default_mp4
     if not (out.exists() and ctx.payload.get("duration")):
         playlist = ctx.hls_dir / "index.m3u8"

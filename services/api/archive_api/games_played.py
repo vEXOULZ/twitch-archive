@@ -15,7 +15,8 @@ NO_CATEGORY = "No category"
 # category) form a single group. Within a group the name, gameId and image come
 # from the most recent chapter that has one (games get renamed on Twitch).
 # A chapter's ``end`` is its length in seconds (not its end time); one that is
-# missing or not a JSON number counts as 0.
+# missing or not a JSON number counts as 0. A merge's gap chapters (kind "gap") are
+# no game, and a VOD merged into another is counted once, as part of that one.
 _SQL = text(
     """
     with chapters as (
@@ -31,6 +32,8 @@ _SQL = text(
             case when jsonb_typeof(v.chapters) = 'array' then v.chapters else '[]'::jsonb end
         ) with ordinality as c(value, ord)
         where jsonb_typeof(c.value) = 'object'
+          and not c.value @> '{"kind": "gap"}'
+          and v.merged_into is null
     ),
     keyed as (
         select *,

@@ -59,6 +59,8 @@ class Vod(Base):
     # Alembic 0005: chapters edited by hand; the automatic chapters step leaves them alone.
     chapters_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"),
                                                   default=False)
+    # Alembic 0007: {"id": <vod id>, "offset": <seconds>} once merged into that VOD; NULL otherwise.
+    merged_into: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     created_at: Mapped[dt.datetime] = _created()
     updated_at: Mapped[dt.datetime] = _updated()
 
@@ -178,6 +180,39 @@ class JobEvent(Base):
     step: Mapped[str | None] = mapped_column(Text)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     progress: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))  # {done, total, unit}
+
+
+class VodSplice(Base):
+    """A merge of two VODs or a split of one (Alembic 0007), kept so it can be undone.
+
+    merge: ``other_id`` was merged into ``vod_id`` at ``offset_s``; split: the part of
+    ``vod_id`` from ``offset_s`` on became ``other_id``. ``snapshot`` holds the rows as
+    they were before (and as the operation left them), ``detail`` the numbers it used.
+    """
+
+    __tablename__ = "vod_splices"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # merge | split
+    vod_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    other_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    offset_s: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    gap_s: Mapped[Decimal | None] = mapped_column(Numeric)
+    detail: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    undone_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VodSpliceLog(Base):
+    """The chat rows a merge moved, so the undo moves exactly those back (Alembic 0007)."""
+
+    __tablename__ = "vod_splice_logs"
+
+    splice_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("vod_splices.id", ondelete="CASCADE"), primary_key=True
+    )
+    log_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
 
 
 class AdminAudit(Base):
