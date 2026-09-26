@@ -10,20 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterable
 from typing import Any
 
 import httpx
 
+from archive_common import emote_providers as providers
 from archive_common import http
 
 log = logging.getLogger(__name__)
-
-SEVENTV = "https://7tv.io/v3"
-BTTV = "https://api.betterttv.net/3"
-FFZ = "https://api.frankerfacez.com/v1"
-
-Pairs = Iterable[tuple[Any, Any]]  # (id, code)
 
 
 async def _get(url: str) -> Any:
@@ -36,66 +30,14 @@ async def _get(url: str) -> Any:
         raise
 
 
-# ── Response parsing (per provider: global set, channel set) ───────────────
-
-
-def _seventv_set(emote_set: Any) -> Pairs:
-    return ((e.get("id"), e.get("name")) for e in (emote_set or {}).get("emotes") or [])
-
-
-def seventv_global(data: Any) -> Pairs:
-    return _seventv_set(data)
-
-
-def seventv_channel(data: Any) -> Pairs:
-    return _seventv_set((data or {}).get("emote_set"))
-
-
-def bttv_global(data: Any) -> Pairs:
-    return ((e.get("id"), e.get("code")) for e in data or [])
-
-
-def bttv_channel(data: Any) -> Pairs:
-    data = data or {}
-    return ((e.get("id"), e.get("code")) for e in (data.get("channelEmotes") or []) + (data.get("sharedEmotes") or []))
-
-
-def _ffz_sets(data: Any, set_ids: Iterable[Any]) -> Pairs:
-    sets = (data or {}).get("sets") or {}
-    for set_id in set_ids:
-        for e in (sets.get(str(set_id)) or {}).get("emoticons") or []:
-            yield e.get("id"), e.get("name")
-
-
-def ffz_global(data: Any) -> Pairs:
-    return _ffz_sets(data, (data or {}).get("default_sets") or [])
-
-
-def ffz_channel(data: Any) -> Pairs:
-    room_set = ((data or {}).get("room") or {}).get("set")
-    return _ffz_sets(data, [room_set] if room_set is not None else [])
-
-
-# ── Fetching ──────────────────────────────────────────────────────────────
-
-Part = tuple[str, Callable[[Any], Pairs]]  # (url, parser)
-
-
-def _parts(twitch_id: str) -> dict[str, list[Part]]:
+def _parts(twitch_id: str) -> dict[str, list[providers.Endpoint]]:
     """Global first, then channel (a channel emote wins over a global one with the same code)."""
-    channel = bool(twitch_id)
-    return {
-        "7tv": [(f"{SEVENTV}/emote-sets/global", seventv_global)]
-        + ([(f"{SEVENTV}/users/twitch/{twitch_id}", seventv_channel)] if channel else []),
-        "bttv": [(f"{BTTV}/cached/emotes/global", bttv_global)]
-        + ([(f"{BTTV}/cached/users/twitch/{twitch_id}", bttv_channel)] if channel else []),
-        "ffz": [(f"{FFZ}/set/global", ffz_global)]
-        + ([(f"{FFZ}/room/id/{twitch_id}", ffz_channel)] if channel else []),
-    }
+    channel = providers.channel(twitch_id) if twitch_id else {}
+    return {p: [providers.GLOBAL[p]] + ([channel[p]] if channel else []) for p in providers.PROVIDERS}
 
 
-async def _fetch_part(url: str, parse: Callable[[Any], Pairs]) -> list[tuple[str, str]]:
-    return [(str(i), str(c)) for i, c in parse(await _get(url)) if i is not None and c]
+async def _fetch_part(url: str, parse: providers.Parser) -> list[tuple[str, str]]:
+    return [(str(e["id"]), str(e["code"])) for e in parse(await _get(url))]
 
 
 async def fetch_third_party_emotes(twitch_id: str) -> dict[str, Any]:

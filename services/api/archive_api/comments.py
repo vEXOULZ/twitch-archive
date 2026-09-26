@@ -22,7 +22,7 @@ import math
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from archive_common.models import Log, Vod
 from archive_common.serialize import LOGS, js_iso
@@ -75,8 +75,9 @@ class Comments:
         self.long_cache = long_cache  # cursor pages and starting ids, 24 h
 
     async def handle(
-        self, conn: AsyncConnection, vod_id: str, offset_raw: str | None, cursor: str | None
+        self, engine: AsyncEngine, vod_id: str, offset_raw: str | None, cursor: str | None
     ) -> JsonBody:
+        """A connection is only taken on a cache miss."""
         offset: float | None = None
         if offset_raw not in (None, ""):
             try:
@@ -91,25 +92,29 @@ class Comments:
         if offset is not None:
             fixed = _js_to_fixed1(offset)
 
+            seconds = int(float(fixed))  # all the search uses
+
             async def by_offset() -> dict:
                 # Only pages of existing vods are cached, so a hit skips the vod lookup.
-                vod_created = (
-                    await conn.execute(select(_vt.c.createdAt).where(_vt.c.id == vod_id))
-                ).scalar_one_or_none()
-                if vod_created is None:
-                    raise LegacyError(500, f"Failed to retrieve vod {vod_id}")
-                result = await self._offset_search(conn, vod_id, int(float(fixed)), vod_created)
+                async with engine.connect() as conn:
+                    vod_created = (
+                        await conn.execute(select(_vt.c.createdAt).where(_vt.c.id == vod_id))
+                    ).scalar_one_or_none()
+                    if vod_created is None:
+                        raise LegacyError(500, f"Failed to retrieve vod {vod_id}")
+                    result = await self._offset_search(conn, vod_id, seconds, vod_created)
                 if result is None:
                     raise LegacyError(500, f"Failed to retrieve comments from offset {fixed}")
                 return result
 
-            return await self.cache.get_or_render(f"offset:{vod_id}:{fixed}", by_offset)
+            return await self.cache.get_or_render(f"offset:{vod_id}:{seconds}", by_offset)
 
         async def by_cursor() -> dict:
             cursor_json = _decode_cursor(cursor or "")
             if cursor_json is None:
                 raise LegacyError(500, "Failed to parse cursor")
-            result = await self._cursor_search(conn, vod_id, cursor_json)
+            async with engine.connect() as conn:
+                result = await self._cursor_search(conn, vod_id, cursor_json)
             if result is None:
                 raise LegacyError(500, f"Failed to retrieve comments from cursor {cursor}")
             return result

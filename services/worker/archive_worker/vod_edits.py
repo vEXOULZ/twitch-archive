@@ -9,12 +9,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from archive_common.timeutil import format_hhmmss
+from archive_common.serialize import box_art_image
 
 from . import planning
 
 VIDEO_TYPES = ("vod", "live")
-IMAGE_SIZE = ("40", "53")  # the size stored chapters have always had in "image"
 OVERLAP_SLACK = 0.001  # seconds of float noise tolerated where chapters meet
 DURATION_SLACK = 1.0  # stored durations are whole seconds (HH:MM:SS), so allow the lost fraction
 
@@ -50,13 +49,6 @@ def _optional_str(item: dict, key: str, where: str) -> str | None:
     return value
 
 
-def image_from_template(template: str | None) -> str | None:
-    """Helix box art template (``...-{width}x{height}.jpg``) at the stored chapter size."""
-    if not template:
-        return None
-    return template.replace("{width}", IMAGE_SIZE[0]).replace("{height}", IMAGE_SIZE[1])
-
-
 def chapters(items: Any, duration: float) -> list[dict[str, Any]]:
     """Admin chapters -> the stored shape (see planning): sorted by start, no overlaps,
     every length > 0, and inside ``duration`` seconds (unchecked when that is 0/unknown)."""
@@ -83,14 +75,8 @@ def chapters(items: Any, duration: float) -> list[dict[str, Any]]:
             raise ValueError(f"{where} ends at {start + length}s, after the end of the VOD ({duration:g}s)")
         prev_start, prev_end = start, start + length
         out.append({
-            "gameId": game_id,
-            "name": name,
-            "image": image_from_template(template),
+            **planning.chapter(game_id, name, box_art_image(template), start, length, ch["restricted"]),
             "imageTemplate": template,
-            "duration": format_hhmmss(start),  # the legacy field holds the start
-            "start": planning.num_seconds(start),
-            "end": planning.num_seconds(length),  # ... and "end" the length
-            "restricted": ch["restricted"],
         })
     return out
 
@@ -135,7 +121,7 @@ def youtube(items: Any, existing: list[dict] | None) -> list[dict[str, Any]]:
                 raise ValueError(f"{where}.duration must be a number of seconds >= 0")
             entry["duration"] = planning.num_seconds(duration)
         entry["part"] = part
-        entry["thumbnail_url"] = old.get("thumbnail_url") or f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
+        entry["thumbnail_url"] = old.get("thumbnail_url") or planning.youtube_thumbnail(video_id)
         out.append(entry)
     return out
 

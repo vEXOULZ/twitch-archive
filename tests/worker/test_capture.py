@@ -27,9 +27,10 @@ async def test_variant_falls_back_to_1080p_on_403(make_ctx):
     respx.get(url__startswith="https://usher.ttvnw.net/vod/v2/100.m3u8").respond(200, text=MASTER)
     chunked = respx.get("https://cdn.example/h_vexoulz_1/chunked/index-dvr.m3u8").respond(403)
     respx.get("https://cdn.example/h_vexoulz_1/1080p60/index-dvr.m3u8").respond(200, text="#EXTM3U")
-    url = await cap._resolve_variant(make_ctx())
+    url, text = await cap._resolve_variant(make_ctx())
     assert chunked.called
     assert url == "https://cdn.example/h_vexoulz_1/1080p60/index-dvr.m3u8"
+    assert text == "#EXTM3U"
 
 
 @respx.mock

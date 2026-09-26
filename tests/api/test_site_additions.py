@@ -7,6 +7,7 @@ import pytest
 import respx
 
 from archive_api import third_party_emotes as tpe
+from archive_common import emote_providers as providers
 from archive_api.main import create_app
 from archive_api.status import _helix_stream
 from archive_common.config import Settings
@@ -77,23 +78,23 @@ def test_vod_additions_follow_select() -> None:
 
 def _mock_providers(router: respx.MockRouter, **overrides) -> None:
     routes = {
-        "7tv_global": (f"{tpe.SEVENTV}/emote-sets/global", {"emotes": [{"id": "g1", "name": "EZ"}, {"id": "g2", "name": "Clap"}]}),
+        "7tv_global": (f"{providers.SEVENTV}/emote-sets/global", {"emotes": [{"id": "g1", "name": "EZ"}, {"id": "g2", "name": "Clap"}]}),
         "7tv_channel": (
-            f"{tpe.SEVENTV}/users/twitch/{TWITCH_ID}",
+            f"{providers.SEVENTV}/users/twitch/{TWITCH_ID}",
             {"emote_set": {"emotes": [{"id": "c1", "name": "vexHi"}, {"id": "c2", "name": "EZ"}]}},
         ),
-        "bttv_global": (f"{tpe.BTTV}/cached/emotes/global", [{"id": "b1", "code": "monkaS"}]),
+        "bttv_global": (f"{providers.BTTV}/cached/emotes/global", [{"id": "b1", "code": "monkaS"}]),
         "bttv_channel": (
-            f"{tpe.BTTV}/cached/users/twitch/{TWITCH_ID}",
+            f"{providers.BTTV}/cached/users/twitch/{TWITCH_ID}",
             {"channelEmotes": [{"id": "b2", "code": "catJAM"}], "sharedEmotes": [{"id": "b3", "code": "pepeD"}]},
         ),
         "ffz_global": (
-            f"{tpe.FFZ}/set/global",
+            f"{providers.FFZ}/set/global",
             {"default_sets": [3], "sets": {"3": {"emoticons": [{"id": 25927, "name": "CatBag"}]},
                                           "4330": {"emoticons": [{"id": 1, "name": "NotDefault"}]}}},
         ),
         "ffz_channel": (
-            f"{tpe.FFZ}/room/id/{TWITCH_ID}",
+            f"{providers.FFZ}/room/id/{TWITCH_ID}",
             {"room": {"set": 123}, "sets": {"123": {"emoticons": [{"id": 99, "name": "vexLUL"}]}}},
         ),
     }

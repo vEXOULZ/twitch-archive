@@ -64,11 +64,10 @@ async def request(
     attempts: int = 3,
     retry_statuses: Iterable[int] = DEFAULT_RETRY_STATUSES,
     max_wait: float = 10.0,
-    client: httpx.AsyncClient | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """Send a request, raising ``httpx.HTTPStatusError`` on non-2xx, with retries."""
-    http = client or get_client()
+    http = get_client()
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(attempts),
         wait=wait_exponential_jitter(initial=1, max=max_wait),

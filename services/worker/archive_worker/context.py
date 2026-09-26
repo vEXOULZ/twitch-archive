@@ -25,7 +25,7 @@ class Deps:
     helix: Helix
     gql: Gql
     youtube: YouTube
-    events: JobEvents | None = None  # the job event log (GET /admin/jobs/{id}/events)
+    events: JobEvents = field(default_factory=JobEvents)  # the job event log (GET /admin/jobs/{id}/events)
 
 
 class StepError(RuntimeError):
@@ -57,9 +57,8 @@ class JobContext:
         """Record how far the current step is, for the dashboard (not the process log).
         Safe to call from a worker thread."""
         assert unit in UNITS, unit
-        if self.deps.events is not None:
-            self.deps.events.add(self.job_id, "info", self.step, message,
-                                 {"done": done, "total": total, "unit": unit})
+        self.deps.events.add(self.job_id, "info", self.step, message,
+                             {"done": done, "total": total, "unit": unit})
 
     @property
     def settings(self) -> Settings:

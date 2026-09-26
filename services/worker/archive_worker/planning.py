@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from archive_common.serialize import box_art_image
 from archive_common.timeutil import format_hhmmss
 
 # ── Chapters ──────────────────────────────────────────────────────────────
@@ -31,30 +32,31 @@ def chapters_from_moments(
         dur_ms = node.get("durationMilliseconds") or 0
         start = pos_ms / 1000
         name = game.get("displayName") if game else None
-        out.append(
-            {
-                "gameId": game.get("id") if game else None,
-                "name": name,
-                "image": game.get("boxArtURL") if game else None,
-                "duration": format_hhmmss(start),
-                "start": num_seconds(start),
-                "end": num_seconds(dur_ms / 1000 if dur_ms else vod_duration - start),
-                "restricted": bool(name and name in restricted_games),
-            }
-        )
+        out.append(chapter(
+            game.get("id") if game else None, name, game.get("boxArtURL") if game else None,
+            start, dur_ms / 1000 if dur_ms else vod_duration - start,
+            bool(name and name in restricted_games),
+        ))
     return out
 
 
 def single_chapter(game: dict | None, box_art: str | None, vod_duration: float, restricted_games: list[str]) -> dict:
     name = game.get("displayName") if game else None
+    return chapter(game.get("id") if game else None, name, box_art_image(box_art), 0, vod_duration,
+                   bool(name and name in restricted_games))
+
+
+def chapter(game_id: str | None, name: str | None, image: str | None, start: float, length: float,
+            restricted: bool) -> dict[str, Any]:
+    """One chapter in the legacy shape (see above: ``duration`` is the start, ``end`` the length)."""
     return {
-        "gameId": game.get("id") if game else None,
+        "gameId": game_id,
         "name": name,
-        "image": box_art.replace("{width}x{height}", "40x53") if box_art else None,
-        "duration": "00:00:00",
-        "start": 0,
-        "end": num_seconds(vod_duration),
-        "restricted": bool(name and name in restricted_games),
+        "image": image,
+        "duration": format_hhmmss(start),
+        "start": num_seconds(start),
+        "end": num_seconds(length),
+        "restricted": restricted,
     }
 
 
@@ -182,6 +184,11 @@ def privacy(kind: str, public: bool, multi_track: bool) -> str:
     if public and ((multi_track and kind == "live") or (not multi_track and kind == "vod")):
         return "public"
     return "unlisted"
+
+
+def youtube_thumbnail(video_id: str) -> str:
+    """YouTube's default thumbnail, for when the API gave none."""
+    return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
 
 
 def upsert_youtube_entry(entries: list[dict] | None, entry: dict) -> list[dict]:

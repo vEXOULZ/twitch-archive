@@ -37,26 +37,20 @@ def hash_password(password: str, salt: bytes | None = None) -> tuple[bytes, byte
 @dataclass
 class Session:
     token: str
-    created_at: float  # clock() seconds (wall clock, so it can be shown as a date)
     csrf: str
     expires_at: float
 
 
-@dataclass
 class AdminAuth:
-    """Password check plus session bookkeeping. ``enabled`` is False when no password is configured."""
+    """Password check plus session bookkeeping. ``enabled`` is False when no password is configured.
+    Only the scrypt hash of the password is kept."""
 
-    password: str | None = None
-    ttl_s: float = SESSION_TTL_S
-    clock: Callable[[], float] = time.time
-    _salt: bytes = field(default=b"", repr=False)
-    _digest: bytes = field(default=b"", repr=False)
-    _sessions: dict[str, Session] = field(default_factory=dict, repr=False)
-
-    def __post_init__(self) -> None:
-        if self.password:
-            self._salt, self._digest = hash_password(self.password)
-        self.password = None  # keep only the hash
+    def __init__(self, password: str | None = None, ttl_s: float = SESSION_TTL_S,
+                 clock: Callable[[], float] = time.time) -> None:
+        self.ttl_s = ttl_s
+        self.clock = clock
+        self._salt, self._digest = hash_password(password) if password else (b"", b"")
+        self._sessions: dict[str, Session] = {}
 
     @property
     def enabled(self) -> bool:
@@ -72,7 +66,7 @@ class AdminAuth:
         now = self.clock()
         for token in [t for t, s in self._sessions.items() if s.expires_at <= now]:
             del self._sessions[token]
-        session = Session(secrets.token_urlsafe(32), now, secrets.token_urlsafe(32), now + self.ttl_s)
+        session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), now + self.ttl_s)
         self._sessions[session.token] = session
         return session
 

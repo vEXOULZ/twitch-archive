@@ -9,6 +9,7 @@ attributes are queryable; anything else is a 400.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from typing import Any
 from urllib.parse import parse_qsl
 
 from sqlalchemy import Boolean, ColumnElement, Text, and_, cast, func, literal, or_, true
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 
 from archive_common.serialize import Resource
 
@@ -218,10 +219,6 @@ def chapter_filter(chapters_col) -> Special:
     JSONPath: the substring is regex-escaped (as the legacy API should have
     done), the exact matches are passed as JSONPath variables.
     """
-    import json
-
-    from sqlalchemy.dialects.postgresql import JSONPATH
-
     def jsonpath(path: str) -> ColumnElement:
         return cast(literal(path, Text), JSONPATH)
 

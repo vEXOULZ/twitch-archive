@@ -20,7 +20,7 @@ class Clock:
 
 def test_password_is_hashed_and_checked():
     auth = AdminAuth("hunter2")
-    assert auth.enabled and auth.password is None  # only the scrypt hash is kept
+    assert auth.enabled and not hasattr(auth, "password")  # only the scrypt hash is kept
     assert auth.check_password("hunter2")
     assert not auth.check_password("hunter3")
     assert not AdminAuth(None).enabled

@@ -100,6 +100,13 @@ def box_art_template(url: str | None) -> str | None:
     return _BOX_ART_SIZE_RE.sub(r"-{width}x{height}\1", url)
 
 
+def box_art_image(template: str | None) -> str | None:
+    """Helix ``box_art_url`` template -> the 40x53 image stored in chapters (inverse of ``box_art_template``)."""
+    if not template:
+        return None
+    return template.replace("{width}", "40").replace("{height}", "53")
+
+
 def duration_seconds(value: str | None) -> int | None:
     try:
         return hhmmss_to_seconds(value) if value else None
@@ -242,11 +249,19 @@ async def attach_games(conn: AsyncConnection, vods: list[dict]) -> None:
         vod["games"] = games[vod["id"]]
 
 
+async def vods_json(
+    conn: AsyncConnection, *where: Any, order_by: Any = None, limit: int | None = None
+) -> list[dict[str, Any]]:
+    """VODs matching ``where``, each exactly as ``GET /vods/{id}`` renders it."""
+    stmt = select(*VODS.columns()).where(*where).limit(limit)
+    if order_by is not None:
+        stmt = stmt.order_by(order_by)
+    vods = [VODS.to_json(r) for r in (await conn.execute(stmt)).mappings()]
+    await attach_games(conn, vods)
+    return vods
+
+
 async def vod_json(conn: AsyncConnection, vod_id: str) -> dict[str, Any] | None:
     """One VOD exactly as ``GET /vods/{id}`` renders it, or None."""
-    row = (await conn.execute(select(*VODS.columns()).where(VODS.table.c.id == vod_id))).mappings().first()
-    if row is None:
-        return None
-    vod = VODS.to_json(row)
-    await attach_games(conn, [vod])
-    return vod
+    vods = await vods_json(conn, VODS.table.c.id == vod_id)
+    return vods[0] if vods else None
