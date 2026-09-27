@@ -20,7 +20,7 @@ from typing import Any
 from sqlalchemy import delete, func, insert, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_sessionmaker
+from archive_common.db import get_sessionmaker
 from archive_common.models import Emote, Game, Job, Log, Vod, VodSplice, VodSpliceLog
 from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds
 
@@ -29,6 +29,7 @@ from .events import iso_utc
 from .jobs import ACTIVE
 from .timeline import Plan, PlanError, Side
 from .vods import active_splices as _active_query
+from .vods import notify_rows_moved
 
 # Rows of a VOD that a splice replaces, and restores on undo.
 FIELDS = ("title", "duration", "chapters", "youtube", "drive", "chapters_locked", "thumbnail_url")
@@ -70,12 +71,6 @@ def _restore(vod: Vod, fields: dict[str, Any]) -> None:
 def _apply(vod: Vod, plan: Plan) -> None:
     vod.duration, vod.chapters, vod.youtube, vod.drive = format_hhmmss(plan.duration), plan.chapters, plan.youtube, plan.drive
     vod.chapters_locked = True  # the automatic chapters step would put Twitch's (one-VOD) chapters back
-
-
-async def _rows_moved(s: AsyncSession, *vod_ids: str) -> None:
-    """Tell archive-api (on commit) that these VODs' chat rows and emotes moved."""
-    for vod_id in vod_ids:
-        await s.execute(select(func.pg_notify(VOD_CHANGED, ROWS_MOVED + vod_id)))
 
 
 def splice_json(sp: VodSplice) -> dict[str, Any]:
@@ -271,7 +266,7 @@ async def merge(target_id: str, source_id: str, gap: Any = None) -> dict[str, An
         }
         splice.snapshot = {**before, "targetEmotes": _emote_json(target_emotes), "games": games,
                            "repointed": repointed, "result": {a.id: _fields(a), b.id: _fields(b)}}
-        await _rows_moved(s, a.id, b.id)
+        await notify_rows_moved(s, a.id, b.id)
         await s.flush()
         return {"splice": splice_json(splice), "warnings": _drift_warnings(plan.detail)}
 
@@ -294,7 +289,7 @@ async def _undo(s: AsyncSession, splice: VodSplice, force: bool) -> dict[str, An
     await (_unmerge_rows if splice.kind == "merge" else _unsplit_rows)(s, splice, a, b)
     await _unpoint(s, splice.snapshot["repointed"])
     _restore(a, splice.snapshot["target"])
-    await _rows_moved(s, a.id, b.id)
+    await notify_rows_moved(s, a.id, b.id)
     splice.undone_at = func.now()
     await s.flush()
     await s.refresh(splice)
@@ -400,7 +395,7 @@ async def split(vod_id: str, at: Any, force: bool = False) -> dict[str, Any]:
         }, snapshot={"target": before, "games": games, "repointed": repointed,
                      "result": {a.id: _fields(a), new_id: _fields(new)}})
         s.add(splice)
-        await _rows_moved(s, a.id, new_id)
+        await notify_rows_moved(s, a.id, new_id)
         await s.flush()
         return {"splice": splice_json(splice), "newVodId": new_id}
 

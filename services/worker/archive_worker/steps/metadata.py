@@ -7,6 +7,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
+import httpx
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
@@ -17,6 +18,7 @@ from archive_common.models import Emote, Log, Vod
 from archive_common.timeutil import hhmmss_to_seconds, parse_ts
 
 from .. import planning
+from ..vods import notify_rows_moved
 from ..timeline import EMOTE_SETS as CHANNEL_SETS
 from ..context import JobContext, StepError
 
@@ -242,3 +244,91 @@ async def global_emotes_backfill(ctx: JobContext) -> None:
         count = (await s.execute(stmt)).rowcount
         await s.commit()
     ctx.log.info("backfilled global emotes on %d row(s)", count)
+
+
+# ── 7TV zero-width flags on sets saved before ``flags`` was kept ─────────────
+
+SEVENTV_CONCURRENCY = 5
+
+
+def apply_flags(entries: list | None, emote_flags: dict[str, int]) -> list | None:
+    """``entries`` with ``flags`` added where it is missing, or None if nothing changed.
+
+    ``emote_flags`` maps an emote id to 7TV's own ``data.flags``. The entry gets the
+    set-entry form new captures have (``flags``: 1 = zero-width) and keeps 7TV's value
+    as ``data_flags``. Ids 7TV no longer knows are left without ``flags``.
+    """
+    out, changed = [], False
+    for e in entries or []:
+        emote = emote_flags.get(str(e.get("id"))) if isinstance(e, dict) and "flags" not in e else None
+        if emote is None:
+            out.append(e)
+            continue
+        zero_width = emote & providers.SEVENTV_EMOTE_ZERO_WIDTH
+        out.append({**e, "flags": providers.SEVENTV_ENTRY_ZERO_WIDTH if zero_width else 0, "data_flags": emote})
+        changed = True
+    return out if changed else None
+
+
+def _missing_flag_ids(entries: list | None) -> set[str]:
+    return {str(e["id"]) for e in entries or [] if isinstance(e, dict) and e.get("id") is not None and "flags" not in e}
+
+
+async def _seventv_emote_flags(ids: set[str], ctx: JobContext) -> dict[str, int]:
+    """7TV's ``flags`` for each id it knows. Unknown ids and failed requests are left out."""
+    sem = asyncio.Semaphore(SEVENTV_CONCURRENCY)
+    unknown: list[str] = []
+
+    async def one(emote_id: str) -> tuple[str, int | None]:
+        async with sem:
+            try:
+                data = (await http.request("GET", providers.seventv_emote(emote_id))).json()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (400, 404):
+                    unknown.append(emote_id)
+                else:
+                    ctx.log.warning("7TV emote %s: %s", emote_id, exc)
+                return emote_id, None
+            except Exception as exc:
+                ctx.log.warning("7TV emote %s: %s", emote_id, exc)
+                return emote_id, None
+        flags = data.get("flags") if isinstance(data, dict) else None
+        return emote_id, flags if isinstance(flags, int) else None
+
+    results = dict(await asyncio.gather(*(one(i) for i in sorted(ids))))
+    if unknown:
+        ctx.log.info("7TV no longer knows %d emote(s); they keep no flags", len(unknown))
+    return {i: f for i, f in results.items() if f is not None}
+
+
+async def seventv_flags_backfill(ctx: JobContext) -> None:
+    """Add 7TV's zero-width flags to saved channel sets from before ``flags`` was kept.
+
+    Each distinct emote id is looked up once (``GET /v3/emotes/{id}``). Only entries
+    without ``flags`` change, so a re-run retries just the ones that failed.
+    ``payload.vod_ids`` limits it to those VODs. The globals were always saved with flags.
+    Undoing a merge or split made before this ran restores its snapshot, flags-less; run it again after.
+    """
+    stmt = select(Emote.vod_id, Emote.seventv_emotes)
+    if ctx.payload.get("vod_ids"):
+        stmt = stmt.where(Emote.vod_id.in_([str(v) for v in ctx.payload["vod_ids"]]))
+    async with get_sessionmaker()() as s:
+        missing = {vod_id: ids for vod_id, entries in (await s.execute(stmt)).all() if (ids := _missing_flag_ids(entries))}
+    ids = set().union(*missing.values())
+    if not ids:
+        ctx.log.info("every saved 7TV set already has flags")
+        return
+    ctx.log.info("looking up %d 7TV emote(s) for %d VOD(s)", len(ids), len(missing))
+    emote_flags = await _seventv_emote_flags(ids, ctx)
+
+    updated = 0
+    for vod_id in sorted(missing):
+        async with get_sessionmaker()() as s:
+            row = (await s.execute(select(Emote).where(Emote.vod_id == vod_id).with_for_update())).scalar_one_or_none()
+            entries = apply_flags(row.seventv_emotes, emote_flags) if row is not None else None
+            if entries is not None:
+                row.seventv_emotes = entries
+                await notify_rows_moved(s, vod_id)
+                updated += 1
+            await s.commit()
+    ctx.log.info("added 7TV flags on %d row(s) (%d of %d emotes known to 7TV)", updated, len(emote_flags), len(ids))

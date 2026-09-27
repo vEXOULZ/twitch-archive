@@ -1,4 +1,4 @@
-"""Emotes step: global sets, fill-missing re-runs, and the global backfill (needs the dev DB)."""
+"""Emotes step: global sets, fill-missing re-runs, and the global and 7TV-flags backfills (needs the dev DB)."""
 
 import datetime as dt
 
@@ -122,6 +122,25 @@ def test_merge_emotes():
     assert metadata.merge_emotes(complete, fetched, force=False, now=now) == {}
 
 
+def test_apply_flags():
+    entries = [
+        {"id": "zw", "code": "Blush"},  # zero-width on 7TV
+        {"id": "plain", "code": "Cute0"},
+        {"id": "gone", "code": "Deleted"},  # 7TV no longer knows it
+        {"id": "kept", "code": "New", "flags": 0},  # saved after flags were kept
+    ]
+    out = metadata.apply_flags(entries, {"zw": 256 | 2, "plain": 0, "kept": 256})
+    assert out == [
+        {"id": "zw", "code": "Blush", "flags": 1, "data_flags": 258},
+        {"id": "plain", "code": "Cute0", "flags": 0, "data_flags": 0},
+        {"id": "gone", "code": "Deleted"},
+        {"id": "kept", "code": "New", "flags": 0},
+    ]
+    assert metadata.apply_flags(out, {"zw": 256, "plain": 0, "gone": 256, "kept": 256})[2]["flags"] == 1
+    assert metadata.apply_flags(entries[3:], {"kept": 256}) is None  # nothing to change
+    assert metadata.apply_flags(None, {}) is None
+
+
 # ── Against the dev database ──────────────────────────────────────────────
 
 
@@ -198,6 +217,54 @@ async def test_backfill_writes_nothing_when_a_provider_fails(vods, make_ctx):
     with pytest.raises(StepError, match="bttv"):
         await metadata.global_emotes_backfill(make_ctx("global_emotes_backfill", None, {"vod_ids": [VOD]}))
     assert (await _row()).global_emotes is None
+
+
+def mock_seventv_emotes(**flags):
+    """GET /v3/emotes/{id} per id: an int is its flags, a Response is sent as is."""
+    routes = {}
+    for emote_id, value in flags.items():
+        response = value if isinstance(value, httpx.Response) else httpx.Response(200, json={"id": emote_id, "flags": value})
+        routes[emote_id] = respx.get(providers.seventv_emote(emote_id)).mock(return_value=response)
+    return routes
+
+
+@respx.mock
+async def test_seventv_flags_backfill_looks_each_emote_up_once(vods, make_ctx):
+    old = [{"id": "zw", "code": "Blush"}, {"id": "plain", "code": "Cute0"}, {"id": "gone", "code": "Deleted"}]
+    await _insert(VOD, **{**OLD, "seventv_emotes": old})
+    await _insert(OTHER, **{**OLD, "seventv_emotes": [{"id": "zw", "code": "Blush"}, {"id": "s1", "code": "stv", "flags": 0}]})
+    routes = mock_seventv_emotes(zw=256, plain=0, gone=httpx.Response(404))
+    ctx = make_ctx("seventv_flags_backfill", None, {"vod_ids": [VOD, OTHER]})
+
+    await metadata.seventv_flags_backfill(ctx)
+    assert [r.call_count for r in routes.values()] == [1, 1, 1]  # "zw" is in both VODs, fetched once
+    row, other = await _row(VOD), await _row(OTHER)
+    assert row.seventv_emotes == [
+        {"id": "zw", "code": "Blush", "flags": 1, "data_flags": 256},
+        {"id": "plain", "code": "Cute0", "flags": 0, "data_flags": 0},
+        {"id": "gone", "code": "Deleted"},
+    ]
+    assert other.seventv_emotes == [{"id": "zw", "code": "Blush", "flags": 1, "data_flags": 256},
+                                    {"id": "s1", "code": "stv", "flags": 0}]
+    assert (row.ffz_emotes, row.bttv_emotes, row.global_emotes) == (OLD["ffz_emotes"], OLD["bttv_emotes"], None)
+
+    # A re-run only asks about what is still missing, and changes nothing if 7TV still doesn't know it.
+    await metadata.seventv_flags_backfill(ctx)
+    assert [r.call_count for r in routes.values()] == [1, 1, 2]
+    assert (await _row(VOD)).seventv_emotes == row.seventv_emotes
+
+
+@respx.mock
+async def test_seventv_flags_backfill_leaves_failed_lookups_for_a_rerun(vods, make_ctx):
+    await _insert(VOD, **{**OLD, "seventv_emotes": [{"id": "zw", "code": "Blush"}]})
+    ctx = make_ctx("seventv_flags_backfill", None, {"vod_ids": [VOD]})
+    mock_seventv_emotes(zw=httpx.Response(403))  # not retried, unlike a 5xx
+    await metadata.seventv_flags_backfill(ctx)  # does not raise
+    assert (await _row(VOD)).seventv_emotes == [{"id": "zw", "code": "Blush"}]
+
+    mock_seventv_emotes(zw=256)
+    await metadata.seventv_flags_backfill(ctx)
+    assert (await _row(VOD)).seventv_emotes == [{"id": "zw", "code": "Blush", "flags": 1, "data_flags": 256}]
 
 
 async def test_admin_emotes_force_and_backfill_routes(vods, deps):

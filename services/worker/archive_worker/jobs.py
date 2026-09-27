@@ -51,6 +51,8 @@ KINDS: dict[str, list[str]] = {
     "emotes": ["emotes"],
     # One-off: give every emotes row saved before global sets were captured the current ones.
     "global_emotes_backfill": ["global_emotes_backfill"],
+    # One-off: add 7TV's zero-width flags to channel sets saved before flags were kept.
+    "seventv_flags_backfill": ["seventv_flags_backfill"],
     "describe": ["describe"],
 }
 
