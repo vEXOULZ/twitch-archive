@@ -81,7 +81,7 @@ def _mock_providers(router: respx.MockRouter, **overrides) -> None:
         "7tv_global": (f"{providers.SEVENTV}/emote-sets/global", {"emotes": [{"id": "g1", "name": "EZ"}, {"id": "g2", "name": "Clap"}]}),
         "7tv_channel": (
             f"{providers.SEVENTV}/users/twitch/{TWITCH_ID}",
-            {"emote_set": {"emotes": [{"id": "c1", "name": "vexHi"}, {"id": "c2", "name": "EZ"}]}},
+            {"emote_set": {"emotes": [{"id": "c1", "name": "vexHi", "flags": 1}, {"id": "c2", "name": "EZ", "flags": 0}]}},
         ),
         "bttv_global": (f"{providers.BTTV}/cached/emotes/global", [{"id": "b1", "code": "monkaS"}]),
         "bttv_channel": (
@@ -108,11 +108,11 @@ async def test_third_party_emotes(respx_mock: respx.MockRouter) -> None:
     _mock_providers(respx_mock)
     out = await tpe.fetch_third_party_emotes(TWITCH_ID)
     assert out["failed"] == []
-    # the channel's "EZ" replaces the global one
+    # the channel's "EZ" replaces the global one; 7TV's flags (zero-width = 1) come along when sent
     assert out["7tv"] == [
-        {"id": "c2", "code": "EZ", "provider": "7tv"},
+        {"id": "c2", "code": "EZ", "provider": "7tv", "flags": 0},
         {"id": "g2", "code": "Clap", "provider": "7tv"},
-        {"id": "c1", "code": "vexHi", "provider": "7tv"},
+        {"id": "c1", "code": "vexHi", "provider": "7tv", "flags": 1},
     ]
     assert [e["code"] for e in out["bttv"]] == ["monkaS", "catJAM", "pepeD"]
     assert out["ffz"] == [

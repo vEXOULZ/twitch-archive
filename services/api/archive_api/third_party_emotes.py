@@ -1,8 +1,8 @@
 """GET /v1/emotes/third-party: the channel's 7TV, BTTV and FFZ emotes (global + channel).
 
 Fetched server-side from the providers' official APIs so viewers don't each
-make those requests. Only ids and codes are returned; clients build image URLs
-from the providers' CDNs. A provider that fails is listed in ``failed`` and
+make those requests. Only ids and codes are returned (plus 7TV's ``flags``);
+clients build image URLs from the providers' CDNs. A provider that fails is listed in ``failed`` and
 its list holds whatever part of it did load.
 """
 
@@ -36,8 +36,8 @@ def _parts(twitch_id: str) -> dict[str, list[providers.Endpoint]]:
     return {p: [providers.GLOBAL[p]] + ([channel[p]] if channel else []) for p in providers.PROVIDERS}
 
 
-async def _fetch_part(url: str, parse: providers.Parser) -> list[tuple[str, str]]:
-    return [(str(e["id"]), str(e["code"])) for e in parse(await _get(url))]
+async def _fetch_part(url: str, parse: providers.Parser) -> list[dict[str, Any]]:
+    return parse(await _get(url))
 
 
 async def fetch_third_party_emotes(twitch_id: str) -> dict[str, Any]:
@@ -55,6 +55,10 @@ async def fetch_third_party_emotes(twitch_id: str) -> dict[str, Any]:
             if provider not in failed:
                 failed.append(provider)
             continue
-        for emote_id, code in result:
-            by_code[provider][code] = {"id": emote_id, "code": code, "provider": provider}
+        for e in result:
+            code = str(e["code"])
+            entry = {"id": str(e["id"]), "code": code, "provider": provider}
+            if e.get("flags") is not None:
+                entry["flags"] = e["flags"]
+            by_code[provider][code] = entry
     return {**{p: list(emotes.values()) for p, emotes in by_code.items()}, "failed": failed}

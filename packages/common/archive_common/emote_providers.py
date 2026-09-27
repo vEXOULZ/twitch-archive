@@ -16,6 +16,10 @@ FFZ = "https://api.frankerfacez.com/v1"
 
 PROVIDERS = ("7tv", "bttv", "ffz")
 
+# 7TV marks zero-width emotes on the set entry (``flags & 1``) and on the emote itself (``data.flags & 256``).
+SEVENTV_ENTRY_ZERO_WIDTH = 1
+SEVENTV_EMOTE_ZERO_WIDTH = 256
+
 Parser = Callable[[Any], list[dict[str, Any]]]
 Endpoint = tuple[str, Parser]  # (url, parser)
 
@@ -62,6 +66,11 @@ def ffz_global(data: Any) -> list[dict[str, Any]]:
 def ffz_channel(data: Any) -> list[dict[str, Any]]:
     room_set = ((data or {}).get("room") or {}).get("set")
     return _ffz_sets(data, [room_set] if room_set is not None else [])
+
+
+def seventv_emote(emote_id: str) -> str:
+    """One 7TV emote (its own ``flags`` among the fields)."""
+    return f"{SEVENTV}/emotes/{emote_id}"
 
 
 GLOBAL: dict[str, Endpoint] = {

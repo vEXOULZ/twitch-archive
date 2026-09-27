@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import Select, or_, select, update
+from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from archive_common.db import get_sessionmaker
+from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_sessionmaker
 from archive_common.models import Stream, Vod, VodSplice
 from archive_common.timeutil import format_hhmmss, parse_helix_duration, parse_ts
 
@@ -70,3 +71,12 @@ async def set_live_stream(stream_id: str | None, started_at: dt.datetime | None 
             offline = offline.where(Stream.id != int(stream_id))
         await s.execute(offline.values(is_live=False))
         await s.commit()
+
+
+async def notify_rows_moved(s: AsyncSession, *vod_ids: str) -> None:
+    """Tell archive-api (on commit) to drop these VODs' cached chat and emotes.
+
+    The vods/games triggers (migration 0006) don't cover the logs and emotes tables.
+    """
+    for vod_id in vod_ids:
+        await s.execute(select(func.pg_notify(VOD_CHANGED, ROWS_MOVED + vod_id)))
