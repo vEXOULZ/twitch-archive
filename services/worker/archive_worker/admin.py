@@ -5,7 +5,8 @@ Request bodies follow the legacy admin routes (``vodId``, ``type``, ...);
 enqueues a job and answers ``{"error": false, "msg": ..., "jobId": ...}``.
 
 Every /admin route takes either ``Authorization: Bearer <admin_api_key>``
-(scripts) or the dashboard's session cookie (see admin_auth). Every
+(scripts) or the dashboard's session cookie (see admin_auth), which comes from
+the password (local network only) or a Twitch sign-in (see admin_signin). Every
 state-changing request that succeeds is written to the audit log.
 """
 
@@ -16,7 +17,9 @@ import datetime as dt
 import hmac
 import json
 import logging
+import secrets
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import Body, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -29,7 +32,28 @@ from archive_common.serialize import EMOTES, box_art_template, vod_json
 from archive_common.timeutil import hhmmss_to_seconds, parse_helix_duration
 
 from . import jobs, splices, vod_edits, youtube
-from .admin_auth import CSRF_HEADER, SESSION_COOKIE, AdminAuth, LoginLimiter, Session, client_address, parse_networks
+from .admin_auth import (
+    CSRF_HEADER,
+    SESSION_COOKIE,
+    AdminAuth,
+    LoginLimiter,
+    Session,
+    client_address,
+    parse_networks,
+    parse_password_networks,
+    password_allowed,
+)
+from .admin_signin import (
+    CHECK_S,
+    ERRORS,
+    STATE_COOKIE,
+    STATE_TTL_S,
+    AuthClient,
+    PendingStates,
+    SignInError,
+    VexoulzAuth,
+    safe_next,
+)
 from .context import Deps
 from .events import event_json, iso_utc
 from .vods import splice_reason, upsert_vod
@@ -38,6 +62,7 @@ log = logging.getLogger(__name__)
 
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 SESSION_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite": "strict"}
+STATE_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite": "lax"}
 AUDITED_PREFIXES = ("/admin/", "/v2/")
 YOUTUBE_CHECK_MAX_AGE = 600  # /admin/health refreshes the YouTube token at most this often
 RECENT_JOBS = 20  # jobs shown with a VOD
@@ -121,7 +146,8 @@ def _job_json(job: Job) -> dict:
     }
 
 
-def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
+def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None = None) -> FastAPI:
+    """``signin``: the vexoulz-auth client; by default built from the settings (None when not configured)."""
     settings = deps.settings
     helix = deps.helix
     app = FastAPI(title="archive-worker admin", docs_url=None, redoc_url=None, openapi_url=None)
@@ -151,10 +177,35 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
     passwords = AdminAuth(settings.admin_password.get_secret_value() or None)
     login_limiter = LoginLimiter()
     trusted_proxies = parse_networks(settings.admin_trusted_proxies)
+    password_networks = parse_password_networks(settings.admin_password_networks)
+    signin = signin or VexoulzAuth.from_settings(settings)
+    twitch_ids = {str(i) for i in settings.admin_twitch_ids}
+    pending = PendingStates()
+    app.state.admin_sessions = passwords  # for tests
     events = deps.events
     started_at = dt.datetime.now(dt.timezone.utc)
 
-    def verify(request: Request) -> None:
+    async def live_session(token: str | None) -> Session | None:
+        """The cookie's session, unless it has expired or its vexoulz-auth session was signed out.
+        If vexoulz-auth can't be reached, the session stands and is checked again next time."""
+        session = passwords.session(token)
+        if session is None or session.sid is None or signin is None:
+            return session
+        now = passwords.clock()
+        if now - session.checked_at < CHECK_S:
+            return session
+        try:
+            active = await signin.active(session.sid)
+        except SignInError as exc:
+            log.warning("could not check the admin sign-in: %s", exc)
+            return session
+        if not active:
+            passwords.logout(token)
+            return None
+        session.checked_at = now
+        return session
+
+    async def verify(request: Request) -> None:
         header = request.headers.get("authorization")
         if header:
             # Legacy parser: "<anything> <key>"; "Bearer <key>" is the documented form.
@@ -167,12 +218,12 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         token = request.cookies.get(SESSION_COOKIE)
         if not token:
             raise AdminError(403, "Missing auth key")
-        session = passwords.session(token)
+        session = await live_session(token)
         if session is None:
             raise AdminError(403, "Session expired; log in again")
         if request.method not in SAFE_METHODS and not passwords.valid_csrf(session, request.headers.get(CSRF_HEADER)):
             raise AdminError(403, "Missing or wrong X-CSRF-Token")
-        request.state.actor = "password"
+        request.state.actor = session.actor
 
     auth = [Depends(verify)]
 
@@ -217,23 +268,31 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
 
     # ── Session (browser login) ───────────────────────────────────────────
 
-    def session_json(session: Session | None) -> dict:
+    def password_here(request: Request) -> bool:
+        return passwords.enabled and password_allowed(client_address(request, trusted_proxies), password_networks)
+
+    def session_json(request: Request, session: Session | None) -> dict:
         return {
             "authenticated": session is not None,
             "csrf": session.csrf if session else None,
             "expiresAt": iso_utc(dt.datetime.fromtimestamp(session.expires_at, dt.timezone.utc)) if session else None,
-            "passwordLogin": passwords.enabled,
+            "passwordLogin": password_here(request),  # offered to this address
+            "twitchLogin": signin is not None,
+            "user": session.user if session else None,  # the Twitch user; null for a password login
         }
 
     @app.get("/admin/session")
     async def get_session(request: Request) -> dict:
-        return session_json(passwords.session(request.cookies.get(SESSION_COOKIE)))
+        return session_json(request, await live_session(request.cookies.get(SESSION_COOKIE)))
 
     @app.post("/admin/session")
     async def login(request: Request, body: dict | None = Body(None)) -> Response:
         if not passwords.enabled:
             raise AdminError(404, "Password login is off (ARCHIVE_ADMIN_PASSWORD is not set)")
         address = client_address(request, trusted_proxies)
+        if not password_allowed(address, password_networks):
+            log.warning("admin password refused from %s (not in ARCHIVE_ADMIN_PASSWORD_NETWORKS)", address)
+            raise AdminError(403, "The password only works from the local network; sign in with Twitch")
         wait = login_limiter.retry_after(address)
         if wait is not None:
             raise AdminError(429, "Too many failed logins; try again later", {"Retry-After": str(wait)})
@@ -248,8 +307,61 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
         passwords.logout(request.cookies.get(SESSION_COOKIE))
         session = passwords.login()
         request.state.actor = "password"
-        response = JSONResponse(session_json(session))
+        response = JSONResponse(session_json(request, session))
         response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **SESSION_COOKIE_ARGS)
+        return response
+
+    # ── Twitch sign-in (through vexoulz-auth) ─────────────────────────────
+    # The callback is reached through a redirect from another site, which a SameSite=Strict
+    # cookie would not be sent on, so the state cookie is Lax. The session cookie stays Strict:
+    # it is set here and only read by the dashboard's own requests.
+
+    @app.get("/admin/signin")
+    async def signin_start(next: str | None = None) -> Response:
+        if signin is None:
+            raise AdminError(404, "Twitch sign-in is off (see ARCHIVE_ADMIN_AUTH_* in the README)")
+        state = pending.start(safe_next(next))
+        response = RedirectResponse(signin.authorize_url(state), status_code=302)
+        response.set_cookie(STATE_COOKIE, state, max_age=STATE_TTL_S, **STATE_COOKIE_ARGS)
+        return response
+
+    @app.get("/admin/signin/callback")
+    async def signin_callback(request: Request, code: str | None = None, state: str | None = None,
+                              error: str | None = None) -> Response:
+        if signin is None:
+            raise AdminError(404, "Twitch sign-in is off (see ARCHIVE_ADMIN_AUTH_* in the README)")
+        cookie = request.cookies.get(STATE_COOKIE) or ""
+        next_path = pending.finish(state)
+        # The state must be one this worker handed out, to this browser.
+        if next_path is None or not secrets.compare_digest(cookie.encode(), (state or "").encode()):
+            return signin_failed("expired", "/admin")
+        if error or not code:
+            return signin_failed(error if error in ERRORS else "twitch", next_path)
+        try:
+            signed_in = await signin.redeem(code)
+        except SignInError as exc:
+            log.warning("admin sign-in failed: %s", exc)
+            return signin_failed("unavailable", next_path)
+        user_id = str(signed_in.user.get("id", ""))
+        if user_id not in twitch_ids:
+            log.warning("admin sign-in refused for twitch:%s (%s)", user_id, signed_in.user.get("login"))
+            return signin_failed("not_allowed", next_path)
+        passwords.logout(request.cookies.get(SESSION_COOKIE))
+        session = passwords.login(f"twitch:{user_id}", signed_in.user, signed_in.sid)
+        try:
+            await audit(request, session.actor, b"")
+        except Exception:
+            log.exception("could not write the audit log for a sign-in")
+        response = RedirectResponse(next_path, status_code=302)
+        response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **SESSION_COOKIE_ARGS)
+        response.delete_cookie(STATE_COOKIE, **STATE_COOKIE_ARGS)
+        return response
+
+    def signin_failed(reason: str, next_path: str) -> Response:
+        """Back to the dashboard's login page, which explains ``auth_error``."""
+        query = urlencode({"auth_error": reason, "next": next_path})
+        response = RedirectResponse(f"/admin/login?{query}", status_code=302)
+        response.delete_cookie(STATE_COOKIE, **STATE_COOKIE_ARGS)
         return response
 
     @app.delete("/admin/session", status_code=204)
@@ -260,7 +372,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner) -> FastAPI:
             if not passwords.valid_csrf(session, request.headers.get(CSRF_HEADER)):
                 raise AdminError(403, "Missing or wrong X-CSRF-Token")
             passwords.logout(token)
-            request.state.actor = "password"
+            request.state.actor = session.actor
         response = Response(status_code=204)
         response.delete_cookie(SESSION_COOKIE, **SESSION_COOKIE_ARGS)
         return response

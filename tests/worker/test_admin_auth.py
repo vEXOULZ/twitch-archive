@@ -85,7 +85,7 @@ def admin(deps):
     deps.settings.admin_password = SecretStr("correct horse")
     app = create_admin_app(deps, jobs.Runner(deps))
 
-    def client(peer: str = "192.0.2.1") -> httpx.AsyncClient:
+    def client(peer: str = "192.168.1.10") -> httpx.AsyncClient:
         # https: the session cookie is Secure, so the client only sends it back over https.
         transport = httpx.ASGITransport(app=app, client=(peer, 1234))
         return httpx.AsyncClient(transport=transport, base_url="https://admin")
@@ -97,6 +97,7 @@ async def test_login_session_and_logout(admin):
     async with admin() as c:
         assert (await c.get("/admin/session")).json() == {
             "authenticated": False, "csrf": None, "expiresAt": None, "passwordLogin": True,
+            "twitchLogin": False, "user": None,
         }
         assert (await c.get("/admin/kinds")).status_code == 403
 
@@ -135,13 +136,13 @@ async def test_api_key_still_works_and_wrong_key_is_refused(admin):
 
 
 async def test_failed_logins_are_rate_limited_per_address(admin):
-    async with admin("192.0.2.7") as c:
+    async with admin("192.168.1.7") as c:
         for _ in range(5):
             assert (await c.post("/admin/session", json={"password": "nope"})).status_code == 401
         limited = await c.post("/admin/session", json={"password": "correct horse"})
         assert limited.status_code == 429 and limited.json()["error"] is True
         assert 0 < int(limited.headers["Retry-After"]) <= 300
-    async with admin("192.0.2.8") as c:  # someone else is not locked out
+    async with admin("192.168.1.8") as c:  # someone else is not locked out
         assert (await c.post("/admin/session", json={"password": "correct horse"})).status_code == 200
 
 
