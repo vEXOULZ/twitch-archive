@@ -7,7 +7,14 @@ from starlette.requests import Request
 
 from archive_worker import jobs
 from archive_worker.admin import create_admin_app
-from archive_worker.admin_auth import SESSION_COOKIE, AdminAuth, LoginLimiter, client_address, parse_networks
+from archive_worker.admin_auth import (
+    SESSION_COOKIE,
+    AdminAuth,
+    LoginLimiter,
+    client_address,
+    parse_networks,
+    plain_http,
+)
 
 
 class Clock:
@@ -57,9 +64,10 @@ def test_login_limiter_window():
     assert limiter.retry_after("a") is None
 
 
-def _request(peer: str, headers: dict[str, str]) -> Request:
+def _request(peer: str, headers: dict[str, str], scheme: str = "http") -> Request:
     return Request({
         "type": "http",
+        "scheme": scheme,
         "client": (peer, 1234),
         "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
     })
@@ -77,6 +85,20 @@ def test_client_address_trusts_only_configured_proxies():
     assert client_address(_request("10.0.0.1", {}), proxies) == "10.0.0.1"
     with pytest.raises(ValueError):
         parse_networks(["not-an-address"])
+
+
+def test_plain_http_believes_x_forwarded_proto_only_from_proxies():
+    proxies = parse_networks(["10.0.0.1"])
+    https = {"X-Forwarded-Proto": "https"}
+    assert plain_http(_request("9.9.9.9", {}), proxies)
+    assert not plain_http(_request("9.9.9.9", {}, "https"), proxies)
+    # Not a proxy: its claim is ignored.
+    assert plain_http(_request("9.9.9.9", https), proxies)
+    assert not plain_http(_request("9.9.9.9", {"X-Forwarded-Proto": "http"}, "https"), proxies)
+    # A proxy: the value it wrote, the last one.
+    assert not plain_http(_request("10.0.0.1", https), proxies)
+    assert plain_http(_request("10.0.0.1", {"X-Forwarded-Proto": "https, http"}, "https"), proxies)
+    assert plain_http(_request("10.0.0.1", {}), proxies)
 
 
 @pytest.fixture
@@ -127,6 +149,38 @@ async def test_login_session_and_logout(admin):
         assert (await c.get("/admin/session")).json()["authenticated"] is False
         c.cookies.set(SESSION_COOKIE, r.cookies[SESSION_COOKIE])  # the old cookie is dead server-side too
         assert (await c.get("/admin/kinds")).status_code == 403
+
+
+async def test_password_login_over_plain_http_sets_a_cookie_the_browser_keeps(deps):
+    deps.settings.admin_api_key = SecretStr("k")
+    deps.settings.admin_password = SecretStr("correct horse")
+    deps.settings.admin_trusted_proxies = ["192.168.1.2"]
+    app = create_admin_app(deps, jobs.Runner(deps))
+
+    async def login(base_url: str, peer: str, headers: dict[str, str]) -> tuple[str, str]:
+        transport = httpx.ASGITransport(app=app, client=(peer, 1234))
+        async with httpx.AsyncClient(transport=transport, base_url=base_url, headers=headers) as c:
+            r = await c.post("/admin/session", json={"password": "correct horse"})
+            assert r.status_code == 200
+            if base_url.startswith("https") or "secure" not in r.headers["set-cookie"].lower():
+                assert (await c.get("/admin/kinds")).status_code == 200  # the cookie came back
+            out = await c.delete("/admin/session", headers={"X-CSRF-Token": r.json()["csrf"]})
+            return r.headers["set-cookie"].lower(), out.headers["set-cookie"].lower()
+
+    # Straight to the worker over HTTP, or through the proxy from an HTTP listener: no Secure.
+    for base, peer, headers in (("http://admin", "192.168.1.10", {}),
+                                ("http://admin", "192.168.1.2", {"X-Forwarded-For": "192.168.1.10",
+                                                                 "X-Forwarded-Proto": "http"})):
+        cookie, cleared = await login(base, peer, headers)
+        assert "httponly" in cookie and "samesite=strict" in cookie and "secure" not in cookie
+        assert "max-age=0" in cleared and "secure" not in cleared
+    # Through the proxy over HTTPS: Secure, whatever the hop to the worker was.
+    cookie, cleared = await login("http://admin", "192.168.1.2", {"X-Forwarded-For": "192.168.1.10",
+                                                                   "X-Forwarded-Proto": "https"})
+    assert "secure" in cookie and "secure" in cleared
+    # A client that is not the proxy cannot turn Secure off by claiming HTTP.
+    cookie, _ = await login("https://admin", "192.168.1.10", {"X-Forwarded-Proto": "http"})
+    assert "secure" in cookie
 
 
 async def test_api_key_still_works_and_wrong_key_is_refused(admin):
