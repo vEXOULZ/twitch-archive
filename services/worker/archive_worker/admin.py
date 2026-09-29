@@ -42,6 +42,7 @@ from .admin_auth import (
     parse_networks,
     parse_password_networks,
     password_allowed,
+    plain_http,
 )
 from .admin_signin import (
     CHECK_S,
@@ -62,6 +63,9 @@ log = logging.getLogger(__name__)
 
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 SESSION_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite": "strict"}
+# The password login over plain HTTP (a LAN address with no TLS): a browser drops a Secure cookie
+# set over HTTP, so there it goes without. The password only works from the local network anyway.
+LAN_SESSION_COOKIE_ARGS = {**SESSION_COOKIE_ARGS, "secure": False}
 STATE_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite": "lax"}
 AUDITED_PREFIXES = ("/admin/", "/v2/")
 YOUTUBE_CHECK_MAX_AGE = 600  # /admin/health refreshes the YouTube token at most this often
@@ -181,6 +185,9 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     signin = signin or VexoulzAuth.from_settings(settings)
     twitch_ids = {str(i) for i in settings.admin_twitch_ids}
     pending = PendingStates()
+
+    def session_cookie_args(request: Request) -> dict:
+        return LAN_SESSION_COOKIE_ARGS if plain_http(request, trusted_proxies) else SESSION_COOKIE_ARGS
     app.state.admin_sessions = passwords  # for tests
     events = deps.events
     started_at = dt.datetime.now(dt.timezone.utc)
@@ -308,7 +315,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         session = passwords.login()
         request.state.actor = "password"
         response = JSONResponse(session_json(request, session))
-        response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **SESSION_COOKIE_ARGS)
+        response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **session_cookie_args(request))
         return response
 
     # ── Twitch sign-in (through vexoulz-auth) ─────────────────────────────
@@ -374,7 +381,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             passwords.logout(token)
             request.state.actor = session.actor
         response = Response(status_code=204)
-        response.delete_cookie(SESSION_COOKIE, **SESSION_COOKIE_ARGS)
+        response.delete_cookie(SESSION_COOKIE, **session_cookie_args(request))
         return response
 
     def job_action(msg: str, job: Job) -> dict:

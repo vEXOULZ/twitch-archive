@@ -171,3 +171,18 @@ def client_address(request: Request, trusted_proxies) -> str:
         if not _in(hop, trusted_proxies):
             return hop
     return request.headers.get("x-real-ip", "").strip() or peer
+
+
+def plain_http(request: Request, trusted_proxies) -> bool:
+    """Whether the browser reached us over plain HTTP.
+
+    The connection's own scheme, unless it comes from a trusted proxy: then the
+    proxy's ``X-Forwarded-Proto`` (its last value, the one the proxy wrote).
+    """
+    scheme = request.scope.get("scheme", "http")
+    peer = request.client.host if request.client else "unknown"
+    if trusted_proxies and _in(peer, trusted_proxies):
+        forwarded = [p.strip() for p in request.headers.get("x-forwarded-proto", "").split(",") if p.strip()]
+        if forwarded:
+            scheme = forwarded[-1]
+    return scheme.lower() == "http"
