@@ -83,6 +83,20 @@ class Settings(BaseSettings):
     # Addresses (or CIDR ranges) of reverse proxies whose X-Forwarded-For / X-Real-IP is
     # believed when rate-limiting logins. Empty: always use the connecting address.
     admin_trusted_proxies: list[str] = []
+    # Where the admin password is taken from (addresses or CIDR ranges; ["*"] = anywhere). Elsewhere it is
+    # refused, and the dashboard signs in with Twitch instead. Default: this host and the private ranges.
+    admin_password_networks: list[str] = [
+        "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
+    ]
+    # Twitch sign-in through vexoulz-auth: on when admin_auth_url, the client secret, the redirect URL
+    # and at least one Twitch user id are set. Only those users get in.
+    admin_twitch_ids: list[str] = []
+    admin_auth_url: str = ""  # vexoulz-auth as browsers reach it
+    admin_auth_internal_url: str = ""  # as this worker reaches it; empty = admin_auth_url
+    admin_auth_client_id: str = "vods-admin"
+    admin_auth_client_secret: SecretStr = SecretStr("")
+    # This worker's /admin/signin/callback as browsers reach it; registered with vexoulz-auth.
+    admin_auth_redirect_url: str = ""
     # Where /admin/health looks for archive-api; empty = http://127.0.0.1:<api_port>.
     api_internal_url: str = ""
     # GET /admin/vods/{id}/merge-candidates: VODs that started up to this long after one ended.

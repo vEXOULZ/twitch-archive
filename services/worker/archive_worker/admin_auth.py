@@ -3,7 +3,9 @@
 One admin password (``ARCHIVE_ADMIN_PASSWORD``), hashed with scrypt at startup
 and compared in constant time. Sessions live in memory: this is one process, and
 a restart logging the dashboard out is the right default for a LAN tool. Without
-a password, password login is off and only the API key works.
+a password, password login is off and only the API key works. A session can also
+come from Twitch sign-in (see admin_signin); it then carries the Twitch user and
+the vexoulz-auth session id it depends on.
 
 A session is an ``HttpOnly; Secure; SameSite=Strict`` cookie. Requests that
 change state must also send the session's CSRF token in ``X-CSRF-Token``.
@@ -20,6 +22,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from starlette.requests import Request
 
@@ -39,6 +42,10 @@ class Session:
     token: str
     csrf: str
     expires_at: float
+    actor: str = "password"  # what the audit log records: "password" or "twitch:<id>"
+    user: dict[str, Any] | None = None  # the Twitch user, for a Twitch sign-in
+    sid: str | None = None  # the vexoulz-auth session behind it
+    checked_at: float = 0.0  # when sid was last confirmed signed in
 
 
 class AdminAuth:
@@ -62,11 +69,12 @@ class AdminAuth:
         _, digest = hash_password(attempt, self._salt)
         return hmac.compare_digest(digest, self._digest)
 
-    def login(self) -> Session:
+    def login(self, actor: str = "password", user: dict[str, Any] | None = None, sid: str | None = None) -> Session:
         now = self.clock()
         for token in [t for t, s in self._sessions.items() if s.expires_at <= now]:
             del self._sessions[token]
-        session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), now + self.ttl_s)
+        session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), now + self.ttl_s,
+                          actor, user, sid, now)
         self._sessions[session.token] = session
         return session
 
@@ -126,6 +134,18 @@ class LoginLimiter:
 def parse_networks(values: list[str]) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
     """``ARCHIVE_ADMIN_TRUSTED_PROXIES`` entries (addresses or CIDR ranges); ValueError on a typo."""
     return [ipaddress.ip_network(v.strip(), strict=False) for v in values if v.strip()]
+
+
+def parse_password_networks(values: list[str]) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network] | None:
+    """``ARCHIVE_ADMIN_PASSWORD_NETWORKS``: as parse_networks, but ``*`` means anywhere (None)."""
+    if any(v.strip() == "*" for v in values):
+        return None
+    return parse_networks(values)
+
+
+def password_allowed(address: str, networks) -> bool:
+    """Whether the password may be used from ``address`` (see parse_password_networks)."""
+    return networks is None or _in(address, networks)
 
 
 def _in(address: str, networks) -> bool:

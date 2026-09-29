@@ -146,7 +146,13 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_ADMIN_HOST` / `ARCHIVE_ADMIN_PORT` | `0.0.0.0` / `3031` | |
 | `ARCHIVE_ADMIN_API_KEY` | – | **Required** for any admin call from a script |
 | `ARCHIVE_ADMIN_PASSWORD` | – | Password for the web dashboard's login; unset turns password login off. See [Browser access](#browser-access-dashboard) |
-| `ARCHIVE_ADMIN_TRUSTED_PROXIES` | `[]` | Reverse proxies (addresses or CIDR ranges, JSON list) whose `X-Forwarded-For` / `X-Real-IP` is believed when rate-limiting logins |
+| `ARCHIVE_ADMIN_TRUSTED_PROXIES` | `[]` | Reverse proxies (addresses or CIDR ranges, JSON list) whose `X-Forwarded-For` / `X-Real-IP` is believed when rate-limiting logins and checking `ARCHIVE_ADMIN_PASSWORD_NETWORKS` |
+| `ARCHIVE_ADMIN_PASSWORD_NETWORKS` | this host and the private ranges | Where the password is accepted from (JSON list of addresses or CIDR ranges; `["*"]` = anywhere). Elsewhere it gets `403` |
+| `ARCHIVE_ADMIN_TWITCH_IDS` | `[]` | Twitch user ids (JSON list) allowed in through Twitch sign-in |
+| `ARCHIVE_ADMIN_AUTH_URL` | – | [vexoulz-auth](https://github.com/vEXOULZ/vexoulz-auth) as browsers reach it. Twitch sign-in is on when this, the client secret, the redirect URL and at least one Twitch id are set |
+| `ARCHIVE_ADMIN_AUTH_INTERNAL_URL` | `ARCHIVE_ADMIN_AUTH_URL` | vexoulz-auth as the worker reaches it |
+| `ARCHIVE_ADMIN_AUTH_CLIENT_ID` / `ARCHIVE_ADMIN_AUTH_CLIENT_SECRET` | `vods-admin` / – | This worker's client registration in vexoulz-auth |
+| `ARCHIVE_ADMIN_AUTH_REDIRECT_URL` | – | `/admin/signin/callback` as browsers reach it (through the dashboard's proxy); registered with vexoulz-auth |
 | `ARCHIVE_API_INTERNAL_URL` | `http://127.0.0.1:<api port>` | Where `/admin/health` checks archive-api |
 | `ARCHIVE_MERGE_CANDIDATE_MINUTES` | `30` | `merge-candidates` lists VODs that started up to this long after a VOD ended; see [Merging and splitting VODs](#merging-and-splitting-vods) |
 | `ARCHIVE_GOOGLE_CLIENT_ID` / `ARCHIVE_GOOGLE_CLIENT_SECRET` | – | Google OAuth client for YouTube |
@@ -359,15 +365,18 @@ Refused (409, with the reason and the numbers): B started before A, the VODs ove
 
 ### Browser access (dashboard)
 
-A web dashboard logs in with `ARCHIVE_ADMIN_PASSWORD` instead of carrying the API key. The key keeps working for scripts; every `/admin/*` route accepts either.
+A web dashboard logs in instead of carrying the API key: with Twitch through [vexoulz-auth](https://github.com/vEXOULZ/vexoulz-auth) (the sign-in shared by the vexoulz sites), or with `ARCHIVE_ADMIN_PASSWORD` from the local network. The key keeps working for scripts; every `/admin/*` route accepts any of them. The audit log records the actor as `api-key`, `password` or `twitch:<id>`.
 
 | Route | |
 |---|---|
-| `GET /admin/session` | No auth. `{"authenticated", "csrf", "expiresAt", "passwordLogin"}` |
-| `POST /admin/session` `{"password"}` | Logs in: the same shape plus the `archive_admin` cookie. `401` wrong password, `429` + `Retry-After` after 5 failed logins in 5 minutes from one address, `404` when password login is off |
+| `GET /admin/session` | No auth. `{"authenticated", "csrf", "expiresAt", "passwordLogin", "twitchLogin", "user"}`. `passwordLogin`: the password is offered to this address. `user`: the Twitch user, `null` for a password login |
+| `POST /admin/session` `{"password"}` | Logs in: the same shape plus the `archive_admin` cookie. `401` wrong password, `403` from outside `ARCHIVE_ADMIN_PASSWORD_NETWORKS`, `429` + `Retry-After` after 5 failed logins in 5 minutes from one address, `404` when password login is off |
+| `GET /admin/signin?next=/admin/...` | Starts a Twitch sign-in: redirects to vexoulz-auth, which comes back to `/admin/signin/callback`. That sets the same cookie and redirects to `next`, or to `/admin/login?auth_error=<denied\|expired\|twitch\|not_allowed\|unavailable>&next=...`. `404` when Twitch sign-in is off |
 | `DELETE /admin/session` | Logs out (`204`) and clears the cookie |
 
-The cookie is `HttpOnly; Secure; SameSite=Strict` and lasts 8 hours. Sessions live in the worker's memory, so a restart logs everyone out. With the cookie, every request except `GET` must also send the session's `csrf` value as `X-CSRF-Token`, or it gets `403`. `Secure` means browsers only send the cookie over HTTPS (or to `localhost`), so serve the dashboard through something that terminates TLS. If that is a reverse proxy, list its address in `ARCHIVE_ADMIN_TRUSTED_PROXIES` so the login rate limit counts the real client and not the proxy. Forwarded headers from any other address are ignored.
+Only `ARCHIVE_ADMIN_TWITCH_IDS` get in through Twitch. A Twitch session is checked with vexoulz-auth again every minute, so signing out everywhere on any vexoulz site ends it too; if vexoulz-auth can't be reached, the session stands until it can.
+
+The cookie is `HttpOnly; Secure; SameSite=Strict` and lasts 8 hours. Sessions live in the worker's memory, so a restart logs everyone out. With the cookie, every request except `GET` must also send the session's `csrf` value as `X-CSRF-Token`, or it gets `403`. `Secure` means browsers only send the cookie over HTTPS (or to `localhost`), so serve the dashboard through something that terminates TLS. If that is a reverse proxy, list its address in `ARCHIVE_ADMIN_TRUSTED_PROXIES` so the login rate limit and the password networks see the real client and not the proxy (a proxy on this host would otherwise make every request look local). Forwarded headers from any other address are ignored.
 
 What the dashboard reads and edits (all take the key or the cookie):
 
