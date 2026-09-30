@@ -36,6 +36,7 @@ class FakeAuth:
         self.codes: dict[str, SignedIn] = {}
         self.signed_out: set[str] = set()
         self.down = False
+        self.refuse: str | None = None
         self.checks = 0
 
     def authorize_url(self, state: str) -> str:
@@ -49,6 +50,8 @@ class FakeAuth:
     async def redeem(self, code: str) -> SignedIn:
         if self.down:
             raise SignInError("down")
+        if self.refuse:
+            raise SignInError("refused", self.refuse)
         try:
             return self.codes.pop(code)
         except KeyError:
@@ -195,6 +198,10 @@ async def test_errors_from_vexoulz_auth_reach_the_login_page(admin, fake):
         state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
         assert error_of(await c.get("/admin/signin/callback", params={"error": "<odd>", "state": state})) == "twitch"
 
+        fake.refuse = "misconfigured"
+        assert error_of(await sign_in(c, fake)) == "misconfigured"
+        fake.refuse = None
+
         fake.down = True
         assert error_of(await sign_in(c, fake)) == "unavailable"
 
@@ -269,6 +276,35 @@ async def test_client_talks_to_vexoulz_auth():
     assert await client.active("gone") is False
     with pytest.raises(SignInError):
         await client.active("boom")
+
+
+@pytest.mark.parametrize(("status", "body", "reason"), [
+    (401, {"error": "invalid_client"}, "misconfigured"),
+    (400, {"error": "invalid_request"}, "misconfigured"),
+    (400, {"error": "invalid_grant"}, "expired"),
+    (429, {"error": "rate_limited"}, "unavailable"),
+    (502, None, "unavailable"),
+])
+async def test_refusals_say_why(status, body, reason):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=body) if body else httpx.Response(status, text="bad gateway")
+
+    client = VexoulzAuth("https://auth.test", "", "vods-admin", "sec", "https://vods.test/cb",
+                         transport=httpx.MockTransport(handler))
+    with pytest.raises(SignInError) as caught:
+        await client.redeem("c")
+    assert caught.value.reason == reason
+
+
+async def test_unreachable_is_unavailable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route")
+
+    client = VexoulzAuth("https://auth.test", "", "vods-admin", "sec", "https://vods.test/cb",
+                         transport=httpx.MockTransport(handler))
+    with pytest.raises(SignInError) as caught:
+        await client.redeem("c")
+    assert caught.value.reason == "unavailable"
 
 
 def test_pending_states_and_safe_next():

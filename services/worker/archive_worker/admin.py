@@ -347,8 +347,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         try:
             signed_in = await signin.redeem(code)
         except SignInError as exc:
-            log.warning("admin sign-in failed: %s", exc)
-            return signin_failed("unavailable", next_path)
+            log.warning("admin sign-in failed (%s): %s", exc.reason, exc)
+            return signin_failed(exc.reason, next_path)
         user_id = str(signed_in.user.get("id", ""))
         if user_id not in twitch_ids:
             log.warning("admin sign-in refused for twitch:%s (%s)", user_id, signed_in.user.get("login"))
