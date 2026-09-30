@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 import pytest
 import structlog
@@ -34,7 +35,7 @@ def test_setup_adds_job_fields_and_quiets_libraries(capsys, restore_logging):
 def test_console_format(capsys, restore_logging):
     logs.setup("INFO")
     logging.LoggerAdapter(logging.getLogger("archive_worker.job"), {"job": 42}).info("step split")
-    out = capsys.readouterr().out
+    out = re.sub(r"\[[0-9;]*m", "", capsys.readouterr().out)  # colours, when the terminal has them
     assert "step split" in out and "job=42" in out
 
 
