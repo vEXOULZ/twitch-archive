@@ -236,6 +236,144 @@ async def test_vod_editing(vod, app, make_ctx, monkeypatch):
     assert calls == [vod]
 
 
+async def test_vod_fields_and_the_admin_list(vod, app):
+    async with client(app) as c:
+        r = await c.patch(f"/admin/vods/{vod}", headers=KEY, json={
+            "thumbnailUrl": "https://example.com/t.jpg", "duration": "1:30:00", "createdAt": "2026-01-02T03:04:05+02:00",
+        })
+        assert r.status_code == 200, r.text
+        got = r.json()
+        assert (got["thumbnail_url"], got["duration"], got["duration_seconds"], got["hidden"]) == (
+            "https://example.com/t.jpg", "01:30:00", 5400, False)
+        assert got["createdAt"] == "2026-01-02T01:04:05.000Z"
+        r = await c.patch(f"/admin/vods/{vod}", headers=KEY, json={"thumbnailUrl": None})
+        assert r.json()["thumbnail_url"] is None
+
+        for bad in ({"thumbnailUrl": "javascript:alert(1)"}, {"duration": "90:00"}, {"duration": "01:61:00"},
+                    {"createdAt": "2026-01-02T03:04:05"}, {"createdAt": "yesterday"}, {"hidden": "yes"},
+                    {"title": "x", "views": 1}):
+            r = await c.patch(f"/admin/vods/{vod}", headers=KEY, json=bad)
+            assert r.status_code == 400, bad
+
+        await c.put(f"/admin/vods/{vod}/chapters", headers=KEY, json={"chapters": [chapter(0, 5000)], "locked": False})
+        short = await c.patch(f"/admin/vods/{vod}", headers=KEY, json={"duration": "01:00:00"})
+        assert short.status_code == 400 and "chapters run to 5000s" in short.json()["msg"]
+
+        # The list: every VOD, hidden ones too, searchable and paged
+        assert (await c.patch(f"/admin/vods/{vod}", headers=KEY, json={"hidden": True})).json()["hidden"] is True
+        rows = (await c.get("/admin/vods", headers=KEY, params={"q": "OLD TITLE"})).json()
+        assert [v["id"] for v in rows["data"]] == [vod] and rows["next"] is None
+        row = rows["data"][0]
+        assert (row["hidden"], row["duration"], row["merged_into"], row["createdAt"]) == (
+            True, "01:30:00", None, "2026-01-02T01:04:05+00:00")
+        assert [v["id"] for v in (await c.get(f"/admin/vods?q={vod}", headers=KEY)).json()["data"]] == [vod]
+        assert (await c.get("/admin/vods", headers=KEY, params={"q": "old_title"})).json()["data"] == []  # _ is literal
+        shown = (await c.get("/admin/vods?hidden=false&limit=200", headers=KEY)).json()["data"]
+        assert vod not in [v["id"] for v in shown] and not any(v["hidden"] for v in shown)
+        assert all(v["hidden"] for v in (await c.get("/admin/vods?hidden=true", headers=KEY)).json()["data"])
+        first = (await c.get("/admin/vods?limit=1", headers=KEY)).json()
+        if first["next"]:
+            second = (await c.get(f"/admin/vods?limit=1&before={first['next']}", headers=KEY)).json()["data"]
+            assert second and second[0]["id"] != first["data"][0]["id"]
+        assert (await c.get("/admin/vods?before=nope", headers=KEY)).status_code == 400
+
+        # Merged: only hidden can change
+        await execute(update(Vod).where(Vod.id == vod).values(merged_into={"id": "other", "offset": 10}))
+        refused = await c.patch(f"/admin/vods/{vod}", headers=KEY, json={"title": "no"})
+        assert refused.status_code == 409 and "merged into other" in refused.json()["msg"]
+        assert (await c.put(f"/admin/vods/{vod}/games", headers=KEY, json={"games": []})).status_code == 409
+        assert (await c.patch(f"/admin/vods/{vod}", headers=KEY, json={"hidden": False})).json()["hidden"] is False
+
+        audit = (await c.get("/admin/audit?limit=20", headers=KEY)).json()["data"]
+        mine = [e["detail"] for e in audit
+                if e["target"] == f"vod:{vod}" and e["action"] == "PATCH /admin/vods/{vod_id}"]
+        assert mine[0] == {"before": {"hidden": True}, "after": {"hidden": False}}
+        assert mine[-1] == {
+            "before": {"thumbnailUrl": None, "duration": "02:00:00", "createdAt": mine[-1]["before"]["createdAt"]},
+            "after": {"thumbnailUrl": "https://example.com/t.jpg", "duration": "01:30:00",
+                      "createdAt": "2026-01-02T01:04:05+00:00"},
+        }
+
+
+def game(start, end, name="Elden Ring", **extra):
+    return {"start_time": start, "end_time": end, "game_id": "512953", "game_name": name,
+            "video_provider": "youtube", "video_id": f"yt-{start}", **extra}
+
+
+async def test_games_rows(vod, app):
+    async with client(app) as c:
+        assert (await c.get(f"/admin/vods/{vod}/games", headers=KEY)).json() == []
+        r = await c.put(f"/admin/vods/{vod}/games", headers=KEY, json={"games": [
+            game(0, 3600, thumbnail_url="https://i.ytimg.com/vi/a/mqdefault.jpg"), game("3600", 7200.5, "Other")]})
+        assert r.status_code == 200, r.text
+        assert [(g["start_time"], g["end_time"], g["game_name"]) for g in r.json()["games"]] == [
+            ("0", "3600", "Elden Ring"), ("3600", "7200.5", "Other")]
+        rows = (await c.get(f"/admin/vods/{vod}/games", headers=KEY)).json()
+        assert rows[0]["thumbnail_url"] == "https://i.ytimg.com/vi/a/mqdefault.jpg" and rows[1]["title"] is None
+
+        # What GET returns goes straight back (ids and dates ignored)
+        rows[1]["game_name"] = "Renamed"
+        again = await c.put(f"/admin/vods/{vod}/games", headers=KEY, json={"games": rows})
+        assert [g["game_name"] for g in again.json()["games"]] == ["Elden Ring", "Renamed"]
+
+        for bad in ([game(0, 7300)], [game(100, 50)], [game(0, 100), game(50, 200)], [game(100, 200), game(0, 50)],
+                    [game(0, 10, " ")], [{"start_time": 0}], [game(0, 10, thumbnail_url="ftp://x")], {"x": 1}):
+            r = await c.put(f"/admin/vods/{vod}/games", headers=KEY, json={"games": bad})
+            assert r.status_code == 400, bad
+
+        short = await c.patch(f"/admin/vods/{vod}", headers=KEY, json={"duration": "01:00:00"})
+        assert short.status_code == 400 and "games rows run to 7200.5s" in short.json()["msg"]
+
+        assert (await c.put(f"/admin/vods/{vod}/games", headers=KEY, json={"games": []})).json()["games"] == []
+        audit = (await c.get("/admin/audit?limit=5", headers=KEY)).json()["data"][0]
+        assert audit["action"] == "PUT /admin/vods/{vod_id}/games" and audit["detail"]["after"] == []
+        assert [g["game_name"] for g in audit["detail"]["before"]] == ["Elden Ring", "Renamed"]
+
+
+async def test_a_hidden_vod_answers_like_a_missing_one(vod, app, api):
+    chapters = [{**chapter(0, 60), "gameId": "test-hidden-game", "end": 60, "duration": "00:00:00"}]
+    await execute(update(Vod).where(Vod.id == vod).values(chapters=chapters))
+    async with get_sessionmaker()() as s:
+        s.add(Game(vod_id=vod, start_time=0, end_time=60, game_name="Hidden game"))
+        s.add(Emote(vod_id=vod, ffz_emotes=[]))
+        await s.commit()
+
+    seen = []
+
+    async def public() -> dict:
+        seen.append(1)
+        status = (await api.get("/v1/status")).json()
+        return {
+            "get": (await api.get(f"/vods/{vod}")).status_code,
+            "find": (await api.get(f"/vods?id={vod}")).json()["total"],
+            "merged": (await api.get(f"/vods?id={vod}&$merged=true")).json()["total"],
+            "games": (await api.get(f"/games?vodId={vod}")).json()["total"],
+            "emotes": (await api.get(f"/emotes/{vod}")).status_code,
+            # A new offset each time: this app's chat cache isn't dropped (no listener runs here)
+            "chat": (await api.get(f"/v1/vods/{vod}/comments?content_offset_seconds={len(seen)}&source=replay")).status_code,
+            "played": "test-hidden-game" in [g["gameId"] for g in (await api.get("/v1/games-played")).json()],
+            "latest": None if status["live"] else status["vod"]["id"] == vod,  # None: live, not checked
+        }
+
+    conn, heard = await _listen()
+    try:
+        async with api:
+            shown = await public()
+            async with client(app) as c:
+                assert (await c.patch(f"/admin/vods/{vod}", headers=KEY, json={"hidden": True})).status_code == 200
+                assert (await c.get(f"/admin/vods/{vod}", headers=KEY)).json()["hidden"] is True  # admin still sees it
+            hidden = await public()
+        # The trigger's notice, plus one that drops its cached chat and emotes
+        assert {await asyncio.wait_for(heard.get(), 5) for _ in range(2)} == {vod, f"moved:{vod}"}
+    finally:
+        await conn.close()
+    live = shown["latest"] is None
+    assert shown == {"get": 200, "find": 1, "merged": 1, "games": 1, "emotes": 200, "chat": 200, "played": True,
+                     "latest": None if live else True}
+    assert hidden == {"get": 404, "find": 0, "merged": 0, "games": 0, "emotes": 404, "chat": 404, "played": False,
+                      "latest": None if live else False}
+
+
 async def _listen() -> tuple[asyncpg.Connection, asyncio.Queue[str]]:
     conn = await asyncpg.connect(asyncpg_dsn(get_settings().database_url))
     heard: asyncio.Queue[str] = asyncio.Queue()
@@ -338,7 +476,7 @@ async def test_audit_log_records_state_changes_with_actor(vod, app):
                 if e["target"] == f"vod:{vod}"]
         assert [(e["actor"], e["action"], e["detail"]) for e in mine] == [
             ("password", "PUT /admin/vods/{vod_id}/drive", {"drive": []}),
-            ("api-key", "PATCH /admin/vods/{vod_id}", {"title": "by key"}),
+            ("api-key", "PATCH /admin/vods/{vod_id}", {"before": {"title": "old title"}, "after": {"title": "by key"}}),
         ]
         assert mine[0]["at"].endswith("+00:00")
         older = (await c.get(f"/admin/audit?before={mine[0]['id']}&limit=1", headers=KEY)).json()["data"]

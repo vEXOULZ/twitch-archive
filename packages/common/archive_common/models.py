@@ -63,6 +63,8 @@ class Vod(Base):
     merged_into: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     # Alembic 0008: the last bot_chat read, {"fetched_at", "since", "until", "keyed", "rows", "coverage"}; NULL = never run.
     bot_chat: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # Alembic 0010: off the public API (lists, GET, games rows, chat, games-played, status); admin still sees it.
+    hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"), default=False)
     created_at: Mapped[dt.datetime] = _created()
     updated_at: Mapped[dt.datetime] = _updated()
 

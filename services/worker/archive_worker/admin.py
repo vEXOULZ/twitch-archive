@@ -7,7 +7,8 @@ enqueues a job and answers ``{"error": false, "msg": ..., "jobId": ...}``.
 Every /admin route takes either ``Authorization: Bearer <admin_api_key>``
 (scripts) or the dashboard's session cookie (see admin_auth), which comes from
 the password (local network only) or a Twitch sign-in (see admin_signin). Every
-state-changing request that succeeds is written to the audit log.
+state-changing request that succeeds is written to the audit log: its body, or what the
+route put in ``request.state.audit_detail`` (e.g. a VOD edit's before and after).
 """
 
 from __future__ import annotations
@@ -23,12 +24,12 @@ from urllib.parse import urlencode
 
 from fastapi import Body, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
-from sqlalchemy import delete, func, insert, select, text, update
+from sqlalchemy import delete, func, insert, or_, select, text, tuple_, update
 
 from archive_common import http
 from archive_common.db import execute, get_sessionmaker
 from archive_common.models import AdminAudit, Emote, Game, Job, Log, Stream, Vod
-from archive_common.serialize import EMOTES, box_art_template, vod_json
+from archive_common.serialize import EMOTES, GAMES, box_art_template, duration_seconds, vod_json
 from archive_common.timeutil import hhmmss_to_seconds, parse_helix_duration
 
 from . import jobs, splices, vod_edits, youtube
@@ -59,7 +60,7 @@ from .admin_signin import (
 )
 from .context import Deps
 from .events import event_json, iso_utc
-from .vods import splice_reason, upsert_vod
+from .vods import notify_rows_moved, splice_reason, upsert_vod
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ STATE_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite": 
 AUDITED_PREFIXES = ("/admin/", "/v2/")
 YOUTUBE_CHECK_MAX_AGE = 600  # /admin/health refreshes the YouTube token at most this often
 RECENT_JOBS = 20  # jobs shown with a VOD
+VOD_LIST_MAX = 200  # GET /admin/vods?limit=
 # Steps that refetch from Twitch by VOD id; a job with any of them is refused on a merged/split VOD.
 TWITCH_STEPS = {"capture", "fetch_vod", "finalize", "chapters", "chat", "emotes", "bot_chat"}
 
@@ -269,6 +271,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             body = None
         if isinstance(body, dict):
             body = {k: v for k, v in body.items() if k != "password"}
+        detail = getattr(request.state, "audit_detail", None)
         target = None
         if "vod_id" in params:
             target = f"vod:{params['vod_id']}"
@@ -281,7 +284,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             actor_login=actor_login,
             action=f"{request.method} {getattr(route, 'path', request.url.path)}",
             target=target,
-            detail=body,
+            detail=body if detail is None else detail,
         ))
 
     # ── Session (browser login) ───────────────────────────────────────────
@@ -690,11 +693,14 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     # ── VOD editing (dashboard) ───────────────────────────────────────────
 
     async def save_vod(vod_id: str, **values: Any) -> None:
-        """Update a VOD row (a database trigger tells archive-api to drop its cached copies)."""
+        """Update a VOD row (a database trigger tells archive-api to drop its cached copies).
+        Hiding or showing it also drops its cached chat and emotes, which the trigger doesn't cover."""
         async with get_sessionmaker()() as s:
             res = await s.execute(update(Vod).where(Vod.id == vod_id).values(**values))
             if res.rowcount == 0:
                 raise AdminError(404, "No Vod Data")
+            if "hidden" in values:
+                await notify_rows_moved(s, vod_id)
             await s.commit()
 
     async def admin_vod(vod_id: str) -> dict:
@@ -703,14 +709,15 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             vod = await vod_json(await s.connection(), vod_id)
             if vod is None:
                 raise AdminError(404, "No Vod Data")
-            locked, bot_chat = (await s.execute(
-                select(Vod.chapters_locked, Vod.bot_chat).where(Vod.id == vod_id)
+            locked, bot_chat, hidden = (await s.execute(
+                select(Vod.chapters_locked, Vod.bot_chat, Vod.hidden).where(Vod.id == vod_id)
             )).one()
             recent = (await s.execute(
                 select(Job).where(Job.vod_id == vod_id).order_by(Job.id.desc()).limit(RECENT_JOBS)
             )).scalars()
             recent = [_job_json(j) for j in recent]
-        return {**vod, "chaptersLocked": locked, "botChat": bot_chat, "jobs": recent, "splices": await splices.active_splices(vod_id)}
+        return {**vod, "hidden": hidden, "chaptersLocked": locked, "botChat": bot_chat, "jobs": recent,
+                "splices": await splices.active_splices(vod_id)}
 
     def edited(parse, *args) -> Any:
         try:
@@ -718,20 +725,113 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         except ValueError as exc:
             raise AdminError(400, str(exc)) from exc
 
+    def refuse_merged(vod: Vod, what: str) -> None:
+        if vod.merged_into is not None:
+            raise AdminError(409, f"{vod.id} was merged into {vod.merged_into.get('id')}; its {what} are that VOD's "
+                                  "now. Undo the merge first")
+
+    def vod_row_json(vod: Vod) -> dict:
+        """A row of GET /admin/vods, and the fields PATCH changes (named as the public API names them)."""
+        return {
+            "id": vod.id,
+            "title": vod.title,
+            "createdAt": iso_utc(vod.created_at),
+            "duration": vod.duration,
+            "duration_seconds": duration_seconds(vod.duration),
+            "thumbnail_url": vod.thumbnail_url,
+            "stream_id": vod.stream_id,
+            "hidden": vod.hidden,
+            "merged_into": vod.merged_into,
+        }
+
+    def fields_json(vod: Vod, keys) -> dict:
+        row = vod_row_json(vod)
+        return {k: row[{"thumbnailUrl": "thumbnail_url"}.get(k, k)] for k in keys}
+
+    @app.get("/admin/vods", dependencies=auth)
+    async def list_vods(q: str = "", hidden: bool | None = None, limit: int = 50, before: str | None = None) -> dict:
+        """Every VOD, hidden and merged ones too, newest first. ``q`` matches the id exactly or the title
+        (case-insensitive substring); ``hidden`` filters; ``before`` (a VOD id, from ``next``) pages back."""
+        limit = min(max(limit, 1), VOD_LIST_MAX)
+        stmt = select(Vod).order_by(Vod.created_at.desc(), Vod.id.desc()).limit(limit + 1)
+        if q.strip():
+            term = q.strip()
+            like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            stmt = stmt.where(or_(Vod.id == term, Vod.title.ilike(like, escape="\\")))
+        if hidden is not None:
+            stmt = stmt.where(Vod.hidden.is_(hidden))
+        async with get_sessionmaker()() as s:
+            if before:
+                after = await s.get(Vod, before)
+                if after is None:
+                    raise AdminError(400, f"before: no VOD {before}")
+                stmt = stmt.where(tuple_(Vod.created_at, Vod.id) < tuple_(after.created_at, after.id))
+            vods = (await s.execute(stmt)).scalars().all()
+        more = len(vods) > limit
+        vods = vods[:limit]
+        return {"data": [vod_row_json(v) for v in vods], "next": vods[-1].id if more else None}
+
     @app.get("/admin/vods/{vod_id}", dependencies=auth)
     async def get_vod(vod_id: str) -> dict:
         return await admin_vod(vod_id)
 
     @app.patch("/admin/vods/{vod_id}", dependencies=auth)
-    async def patch_vod(vod_id: str, body: dict = Body(...)) -> dict:
-        unknown = sorted(set(body) - {"title"})
-        if unknown:
-            raise AdminError(400, f"Only title can be changed here; unknown: {', '.join(unknown)}")
-        if "title" in body:
-            if not isinstance(body["title"], str) or not body["title"].strip():
-                raise AdminError(400, "title must be a non-empty string")
-            await save_vod(vod_id, title=body["title"].strip())
-        return await admin_vod(vod_id)
+    async def patch_vod(vod_id: str, request: Request, body: dict = Body(...)) -> dict:
+        """Any of ``title``, ``hidden``, ``thumbnailUrl`` (null: the default), ``duration`` (HH:MM:SS) and
+        ``createdAt`` (ISO). A merged VOD takes only ``hidden``. Audited with the fields before and after."""
+        values = edited(vod_edits.vod_fields, body)
+        vod = await require_vod(vod_id)
+        if set(body) - vod_edits.MERGED_EDITABLE:
+            refuse_merged(vod, "contents")
+        if "duration" in values:
+            await check_fits(vod, hhmmss_to_seconds(values["duration"]))
+        before = fields_json(vod, body)
+        if values:
+            await save_vod(vod.id, **values)
+        after = await admin_vod(vod.id)
+        request.state.audit_detail = {"before": before, "after": fields_json(await require_vod(vod.id), body)}
+        return after
+
+    async def check_fits(vod: Vod, seconds: float) -> None:
+        """A new duration must still hold the VOD's chapters and games rows."""
+        async with get_sessionmaker()() as s:
+            games_end = (await s.execute(select(func.max(Game.end_time)).where(Game.vod_id == vod.id))).scalar()
+        for what, end in (("chapters", vod_edits.content_end(vod.chapters)), ("games rows", float(games_end or 0))):
+            if end > seconds + vod_edits.DURATION_SLACK:
+                raise AdminError(400, f"The {what} run to {end:g}s, past the new duration ({seconds:g}s); "
+                                      f"shorten them first")
+
+    async def games_json(vod_id: str) -> list[dict]:
+        async with get_sessionmaker()() as s:
+            rows = await s.execute(select(*GAMES.columns()).where(GAMES.table.c.vod_id == vod_id)
+                                   .order_by(GAMES.table.c.start_time, GAMES.table.c.id))
+        return [GAMES.to_json(r) for r in rows.mappings()]
+
+    def game_fields(rows: list[dict]) -> list[dict]:
+        """The editable part of each games row (for the audit)."""
+        keep = ("start_time", "end_time", *vod_edits.GAME_TEXT, *vod_edits.GAME_URLS)
+        return [{k: r.get(k) for k in keep} for r in rows]
+
+    @app.get("/admin/vods/{vod_id}/games", dependencies=auth)
+    async def get_games(vod_id: str) -> list[dict]:
+        """The VOD's games rows as GET /games renders them, by start."""
+        await require_vod(vod_id)
+        return await games_json(vod_id)
+
+    @app.put("/admin/vods/{vod_id}/games", dependencies=auth)
+    async def put_games(vod_id: str, request: Request, body: dict = Body(...)) -> dict:
+        """Replace the games rows: ``{"games": [...]}`` in the shape GET returns (ids and dates ignored)."""
+        vod = await require_vod(vod_id)
+        refuse_merged(vod, "games rows")
+        rows = edited(vod_edits.games, body.get("games"), hhmmss_to_seconds(vod.duration))
+        before = await games_json(vod.id)
+        async with get_sessionmaker()() as s:
+            await s.execute(delete(Game).where(Game.vod_id == vod.id))
+            if rows:
+                await s.execute(insert(Game), [{"vod_id": vod.id, **r} for r in rows])
+            await s.commit()
+        request.state.audit_detail = {"before": game_fields(before), "after": game_fields(await games_json(vod.id))}
+        return await admin_vod(vod.id)
 
     @app.put("/admin/vods/{vod_id}/chapters", dependencies=auth)
     async def put_chapters(vod_id: str, body: dict = Body(...)) -> dict:
