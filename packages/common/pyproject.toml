@@ -13,7 +13,7 @@ dependencies = [
   "tzdata>=2024.1",  # zoneinfo data for slim images / Windows
   # Shared jobs, API and audit conventions with doomtp-bot. The release tarball, not git+: the slim
   # Docker images have no git.
-  "vex-platform[sqlalchemy] @ https://github.com/vEXOULZ/vex-platform/archive/refs/tags/v0.1.0.tar.gz",
+  "vex-platform[sqlalchemy] @ https://github.com/vEXOULZ/vex-platform/archive/36307bdb2405fb8ac0213769ebb6bb7b1896cc14.tar.gz",
 ]
 
 [build-system]
