@@ -10,8 +10,9 @@ import datetime as dt
 import httpx
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 
+from archive_common.audit import AUDIT_LOG, actor_of
 from archive_common.db import get_sessionmaker
 from archive_common.models import Job, Vod
 from archive_worker import jobs, legacy_jobs
@@ -23,6 +24,10 @@ VOD = "test-job-control-vod"
 
 async def _reset():
     async with get_sessionmaker()() as s:
+        ids = select(RUNS.c.id).where(RUNS.c.subject == subject_of(VOD)).union_all(
+            select(Job.id).where(Job.vod_id == VOD))
+        await s.execute(delete(AUDIT_LOG).where(AUDIT_LOG.c.target.in_(select(text("'job:' || id")).select_from(
+            ids.subquery()))))
         await s.execute(delete(Job).where(Job.vod_id == VOD))
         await s.execute(delete(RUNS).where(RUNS.c.subject == subject_of(VOD)))
         # A retry waiting out its backoff would hold the VOD's lock for the next test.
@@ -286,3 +291,37 @@ async def test_admin_job_routes_404_and_409(vod, steps, deps, make_service, wait
             await s.commit()
         r = await c.post(f"/admin/jobs/{legacy.id}/pause", headers=headers)
         assert (r.status_code, r.json()["msg"]) == (409, "Job is done; only queued or running jobs can be paused")
+
+
+# ── Audit ─────────────────────────────────────────────────────────────────
+
+
+async def _audited(job_id: int) -> list[tuple]:
+    async with get_sessionmaker()() as s:
+        rows = (await s.execute(
+            select(AUDIT_LOG).where(AUDIT_LOG.c.target == f"job:{job_id}").order_by(AUDIT_LOG.c.id)
+        )).all()
+    return [(r.action, r.actor_kind, r.via, r.before, r.after) for r in rows]
+
+
+async def test_admin_job_actions_are_audited_once_with_the_caller(vod, steps, deps, make_service):
+    deps.settings.admin_api_key = SecretStr("k")
+    service = await make_service(start=False)
+    app = create_admin_app(deps, service)
+    headers = {"Authorization": "Bearer k"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://admin") as c:
+        r = await c.post("/admin/jobs", headers=headers, json={"kind": "test", "vodId": vod, "paused": True})
+        job_id = r.json()["jobId"]
+        assert (await c.post(f"/admin/jobs/{job_id}/cancel", headers=headers)).status_code == 200
+    # The runtime's rows, in the transaction of each change; none from the request as well.
+    assert await _audited(job_id) == [
+        ("job.enqueue", "api_key", "api", None, {"kind": "test", "step": "a", "state": "paused", "subject": f"vod:{vod}"}),
+        ("job.cancel", "api_key", "api", {"state": "paused"}, None),
+    ]
+
+
+async def test_legacy_job_actions_are_audited_by_the_service(vod, steps, deps, make_service):
+    service = await make_service(start=False)
+    job = await _legacy_job("test")
+    await service.pause(job.id, actor=actor_of("twitch:100", "alice"))
+    assert await _audited(job.id) == [("job.pause", "user", "web", {"state": "queued"}, {"state": "paused"})]

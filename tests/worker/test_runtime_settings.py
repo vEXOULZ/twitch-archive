@@ -6,7 +6,8 @@ from pydantic import SecretStr
 from sqlalchemy import delete, func, insert, select
 
 from archive_common.db import get_sessionmaker
-from archive_common.models import AdminAudit, RuntimeSetting
+from archive_common.audit import AUDIT_LOG
+from archive_common.models import RuntimeSetting
 from archive_worker import jobs, legacy_jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.context import JobContext
@@ -91,11 +92,11 @@ async def _clear():
 async def clean(db):
     await _clear()
     async with get_sessionmaker()() as s:
-        audit_after = (await s.execute(select(func.max(AdminAudit.id)))).scalar() or 0
+        audit_after = (await s.execute(select(func.max(AUDIT_LOG.c.id)))).scalar() or 0
     yield audit_after
     await _clear()
     async with get_sessionmaker()() as s:
-        await s.execute(delete(AdminAudit).where(AdminAudit.id > audit_after))
+        await s.execute(delete(AUDIT_LOG).where(AUDIT_LOG.c.id > audit_after))
         await s.commit()
 
 
@@ -145,9 +146,13 @@ def client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app[0]), base_url="https://admin")
 
 
-async def _audit(after: int) -> list[AdminAudit]:
+async def _audit(after: int) -> list:
+    """The settings rows audited since ``after``."""
+    c = AUDIT_LOG.c
     async with get_sessionmaker()() as s:
-        return (await s.execute(select(AdminAudit).where(AdminAudit.id > after).order_by(AdminAudit.id))).scalars().all()
+        return (await s.execute(
+            select(AUDIT_LOG).where(c.id > after, c.action.like("setting.%")).order_by(c.id)
+        )).all()
 
 
 async def test_settings_routes(app, clean, deps):
@@ -179,8 +184,8 @@ async def test_settings_routes(app, clean, deps):
         assert (await c.delete("/admin/settings/data_dir", headers=KEY)).status_code == 404
 
     patch, reset = await _audit(clean)
-    assert (patch.action, patch.target) == ("PATCH /admin/settings", None)
-    assert patch.detail == {"before": {"runner_concurrency": 3, "manual_steps": {}},
-                            "after": {"runner_concurrency": 6, "manual_steps": {"archive": ["upload"]}}}
-    assert (reset.action, reset.target) == ("DELETE /admin/settings/{key}", "setting:runner_concurrency")
-    assert reset.detail == {"before": {"runner_concurrency": 6}, "after": {"runner_concurrency": 3}}
+    assert (patch.action, patch.target, patch.actor_kind) == ("setting.update", None, "api_key")
+    assert (patch.before, patch.after) == ({"runner_concurrency": 3, "manual_steps": {}},
+                                           {"runner_concurrency": 6, "manual_steps": {"archive": ["upload"]}})
+    assert (reset.action, reset.target) == ("setting.reset", "setting:runner_concurrency")
+    assert (reset.before, reset.after) == ({"runner_concurrency": 6}, {"runner_concurrency": 3})

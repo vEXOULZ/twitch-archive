@@ -17,9 +17,9 @@ from sqlalchemy import delete, func, or_, select, text
 from archive_api.invalidation import asyncpg_dsn
 from archive_common.config import get_settings
 from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_sessionmaker
-from archive_common.models import AdminAudit, BotLog, Emote, Game, Job, Log, Vod, VodSplice
+from archive_common.audit import AUDIT_LOG
+from archive_common.models import BotLog, Emote, Game, Job, Log, Vod, VodSplice
 from archive_common.timeutil import hhmmss_to_seconds
-from archive_worker import jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.context import StepRefused
 from archive_worker.job_rows import RUNS, subject_of
@@ -72,7 +72,7 @@ async def _clean():
 async def vods(db):
     await _clean()
     async with get_sessionmaker()() as s:
-        audit_after = (await s.execute(select(func.max(AdminAudit.id)))).scalar() or 0
+        audit_after = (await s.execute(select(func.max(AUDIT_LOG.c.id)))).scalar() or 0
         s.add_all([
             Vod(id=A, title="big stream", created_at=START, duration="02:00:00", stream_id="1001",
                 chapters=[_ch(0, 3600), _ch(3600, 3600, "Minecraft")],
@@ -91,7 +91,7 @@ async def vods(db):
     yield
     await _clean()
     async with get_sessionmaker()() as s:
-        await s.execute(delete(AdminAudit).where(AdminAudit.id > audit_after))
+        await s.execute(delete(AUDIT_LOG).where(AUDIT_LOG.c.id > audit_after))
         await s.commit()
 
 
@@ -182,8 +182,9 @@ async def test_merge_keeps_chat_and_video_in_sync(vods, admin, api):
         emotes = await s.get(Emote, A)
         assert emotes.ffz_emotes == [{"id": 1, "code": "a"}, {"id": 2, "code": "b"}]
         assert emotes.seventv_emotes == [{"id": "x", "code": "EZ"}]
-        audit = (await s.execute(select(AdminAudit).order_by(AdminAudit.id.desc()).limit(1))).scalar_one()
-        assert (audit.action, audit.target, audit.detail) == ("POST /admin/vods/{vod_id}/merge", f"vod:{A}",
+        audit = (await s.execute(select(AUDIT_LOG).where(AUDIT_LOG.c.action == "vod.merge")
+                                 .order_by(AUDIT_LOG.c.id.desc()).limit(1))).one()
+        assert (audit.action, audit.target, audit.detail) == ("vod.merge", f"vod:{A}",
                                                                {"source": B})
 
     # What the site sees
