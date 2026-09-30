@@ -408,6 +408,22 @@ async def test_any_vod_or_game_write_notifies_the_api(vod):
         await conn.close()
 
 
+async def test_save_duration_from_helix(vod, app, monkeypatch):
+    deps = app[1].deps
+    deps.settings.twitch_client_id, deps.settings.twitch_client_secret = "cid", SecretStr("secret")
+
+    async def get_video(vod_id):
+        assert vod_id == vod
+        return {"id": vod, "user_id": deps.settings.twitch_id, "duration": "3h2m1s"}
+
+    monkeypatch.setattr(deps.helix, "get_video", get_video)
+    async with client(app) as c:
+        r = await c.post("/admin/duration", headers=KEY, json={"vodId": vod})
+    assert r.status_code == 200 and r.json()["duration"] == "03:02:01"
+    async with get_sessionmaker()() as s:
+        assert (await s.get(Vod, vod)).duration == "03:02:01"
+
+
 @respx.mock
 async def test_twitch_game_search(app, respx_mock):
     settings = app[1].deps.settings
