@@ -175,6 +175,7 @@ async def test_vod_editing(vod, app, make_ctx, monkeypatch):
         got = (await c.get(f"/admin/vods/{vod}", headers=KEY)).json()
         assert (got["id"], got["title"], got["chaptersLocked"], got["games"]) == (vod, "old title", False, [])
         assert got["duration_seconds"] == 7200  # the public API's own fields
+        assert got["botChat"] is None  # not read from doomtp-bot yet
         assert [j["kind"] for j in got["jobs"]] == ["emotes"]
         assert (await c.get("/admin/vods/nope", headers=KEY)).status_code == 404
 
