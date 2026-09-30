@@ -30,6 +30,8 @@ ADDED_CHAPTER_FIELDS = {"imageTemplate", "length"}
 ADDED_EMOTE_FIELDS = {"global_emotes", "global_emotes_source", "global_emotes_at"}
 # Which table a chat comment came from (comments are the dicts with "content_offset_seconds").
 ADDED_COMMENT_FIELDS = {"source"}
+# The chat rows each source has, on offset pages of comments (the dicts with "comments").
+ADDED_PAGE_FIELDS = {"sources"}
 
 
 def _without_additions(node):
@@ -42,6 +44,8 @@ def _without_additions(node):
         added = ADDED_EMOTE_FIELDS
     elif "content_offset_seconds" in node:
         added = ADDED_COMMENT_FIELDS
+    elif "comments" in node:
+        added = ADDED_PAGE_FIELDS
     else:
         added = ADDED_VOD_FIELDS
     out = {k: _without_additions(v) for k, v in node.items() if k not in added}
