@@ -15,7 +15,9 @@ removals…) and the Twitch VOD replay (``logs``). ``?source=auto`` (the default
 the bot's when the VOD has it (about as many rows as the replay, so a partial bot log
 never hides a full replay); ``replay`` or ``bot`` force one. A bot page's cursor carries
 ``"src": "bot"``, and a cursor's source wins, so paging never switches source halfway.
-Every row says which it came from in ``source``.
+Every row says which it came from in ``source``. An offset page also carries
+``sources: {"replay": n, "bot": n}``, the chat rows each has for the VOD, so a site can
+offer only the ones that exist.
 
 A VOD merged into another has no rows of its own any more (they were re-keyed to
 that VOD), so it answers every request with an empty page.
@@ -70,6 +72,11 @@ class _Source:
 REPLAY = _Source("replay", LOGS, _lt.c["_id"], _lt.c.createdAt)
 BOT = _Source("bot", BOT_LOGS, _bt.c.seq, _bt.c.at, (_bt.c.kind.in_(("message", "notice")),))
 SOURCES = {s.name: s for s in (REPLAY, BOT)}
+
+
+def _auto(counts: dict[str, int]) -> _Source:
+    bot, replay = counts[BOT.name], counts[REPLAY.name]
+    return BOT if bot and bot >= BOT_SHARE * replay else REPLAY
 
 
 def _js_to_fixed1(value: float) -> str:
@@ -144,7 +151,8 @@ class Comments:
             fixed = _js_to_fixed1(offset)
 
             seconds = int(float(fixed))  # all the search uses
-            src = await self._source(engine, vod_id, source)
+            counts = await self._counts(engine, vod_id)
+            src = SOURCES[source] if source != "auto" else _auto(counts)
 
             async def by_offset() -> dict:
                 # Only pages of existing vods are cached, so a hit skips the vod lookup.
@@ -157,7 +165,7 @@ class Comments:
                     result = await self._offset_search(conn, src, vod_id, seconds, vod.createdAt)
                 if result is None:
                     raise LegacyError(500, f"Failed to retrieve comments from offset {fixed}")
-                return result
+                return {**result, "sources": counts}
 
             return await self.cache.get_or_render(f"offset:{vod_id}:{seconds}{src.key}", by_offset)
 
@@ -177,9 +185,8 @@ class Comments:
         # The cursor names its source, so the key needs nothing else.
         return await self.long_cache.get_or_render(f"cursor:{vod_id}:{cursor}", by_cursor)
 
-    async def _source(self, engine: AsyncEngine, vod_id: str, source: str) -> _Source:
-        if source != "auto":
-            return SOURCES[source]
+    async def _counts(self, engine: AsyncEngine, vod_id: str) -> dict[str, int]:
+        """The chat rows each source has for ``vod_id``."""
         key = f"source:{vod_id}"
         cached = self.cache.get(key)
         if cached is not None:
@@ -189,9 +196,9 @@ class Comments:
                 select(func.count()).select_from(_bt).where(_bt.c.vod_id == vod_id, *BOT.where).scalar_subquery(),
                 select(func.count()).select_from(_lt).where(_lt.c.vod_id == vod_id).scalar_subquery(),
             ))).one()
-        src = BOT if bot and bot >= BOT_SHARE * replay else REPLAY
-        self.cache.set(key, src)
-        return src
+        counts = {REPLAY.name: replay, BOT.name: bot}
+        self.cache.set(key, counts)
+        return counts
 
     async def _vod(self, conn: AsyncConnection, vod_id: str) -> Row | None:
         return (await conn.execute(select(_vt.c.createdAt, _vt.c.merged_into).where(_vt.c.id == vod_id))).first()

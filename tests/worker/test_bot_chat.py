@@ -257,6 +257,7 @@ async def test_api_prefers_the_bot_unless_it_is_partial(vod, api):
     async with api:
         page = (await api.get(f"/v1/vods/{VOD}/comments?content_offset_seconds=0")).json()
         assert {c["source"] for c in page["comments"]} == {"replay"} and len(page["comments"]) == 10
+        assert page["sources"] == {"replay": 10, "bot": 5}  # moderation rows aren't chat
         page = (await api.get(f"/v1/vods/{VOD}/comments?content_offset_seconds=0&source=bot")).json()
         assert [c["id"] for c in page["comments"]] == [f"b{i}" for i in range(5)]  # no moderation rows
         first = page["comments"][0]
@@ -281,6 +282,7 @@ async def test_api_pages_bot_chat_by_cursor(vod, api):
 
         page = (await api.get(f"/v1/vods/{VOD}/comments?content_offset_seconds=0&source=replay")).json()
         assert "src" not in json.loads(base64.b64decode(page["cursor"]))
+        assert page["sources"] == {"replay": 400, "bot": 450}
         page = (await api.get(f"/v1/vods/{VOD}/comments?content_offset_seconds=300")).json()
         assert "bot 300" in [c["message"][0]["text"] for c in page["comments"]]
 
