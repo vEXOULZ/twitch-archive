@@ -282,6 +282,19 @@ curl -s "${H[@]}" -X DELETE "$A/admin/settings/keep_hls"   # back to the env val
 - **`applies`:** `now` settings are read on every use: the monitor's next check (`vod_download`, `live_record`, `monitor_interval_seconds`), the runner's next pick (`runner_concurrency`, `max_attempts`), the next step boundary (`manual_steps`) and the next token refresh (`youtube_keepalive_hours`). `next job` settings are read when a job starts or resumes, so a running job finishes with what it started with.
 - Both changes are audited with `{before, after}`. Secrets, keys, URLs, paths, the channel and the database are never editable here.
 
+### Storage
+
+Every job works in one folder of the data directory: `vods/<vodId>`, or `live/<streamId>` for a live recording. Files are normally deleted after upload; what is left is what `ARCHIVE_KEEP_HLS`/`KEEP_MP4` keep, jobs still in progress, and leftovers of failed jobs or deleted VODs.
+
+```bash
+curl -s "${H[@]}" "$A/admin/storage"                    # the disk, and each folder; ?refresh=true to scan again now
+curl -s "${H[@]}" -X DELETE "$A/admin/storage/vods/123" # delete a folder's files
+```
+
+- `GET` answers `{disk: {total, used, free}, folders: [{area, name, path, bytes, files, modifiedAt, vod, jobs: {active, last}, stale}], cacheSeconds}`. `vod` is the VOD the folder belongs to (`{id, title, hidden}`, or `null`); `jobs` are the jobs working in it. Sizes are cached for 30 seconds (and dropped after a delete).
+- A folder is **stale** when no job for it is queued, running or paused, and either no VOD belongs to it or its last job failed or was cancelled.
+- `DELETE` answers `{path, bytes, files}` (what was freed) and is audited with it. It is refused (`409`) while a job for the folder is queued, running or paused, and only takes a folder name directly under `vods/` or `live/` (no symlinks). Paths are always relative to the data directory.
+
 ### Recipes
 
 **Backfill a VOD the monitor missed** (the VOD must still be on Twitch):
@@ -442,7 +455,7 @@ curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 - **VOD fields** (`PATCH /admin/vods/{id}`): any of `title`, `hidden`, `thumbnailUrl` (an http(s) URL, or `null` for the site's default), `duration` (`HH:MM:SS`; it must still hold the chapters and games rows) and `createdAt` (ISO with an offset). A merged VOD takes only `hidden`. **Hidden** takes the VOD off the public API as if it were missing (see [§6](#6-public-api-reference)); the dashboard still has it, and unhiding brings it back.
 - **Games rows** (`PUT /admin/vods/{id}/games`) replace the VOD's rows. Send them in the shape `GET` returns (`id`, `vodId` and the dates are ignored): `start_time` and `end_time` in seconds, sorted, not overlapping and inside the VOD, a `game_name`, and optionally `game_id`, `title`, `video_provider`, `video_id`, and `thumbnail_url` and `chapter_image` (http(s) URLs). Refused on a merged VOD.
 - **Edits show up on the public API at once:** the worker sends a Postgres `NOTIFY`, and archive-api drops its cached responses for that VOD and for the lists that include it.
-- **Audit log:** every state-changing admin request that succeeds is stored as `{at, actor, actorLogin, action, target, detail}`. `actor` is `password`, `api-key` or `twitch:<id>`, `actorLogin` is the Twitch login behind a `twitch:<id>` (otherwise `null`), `action` is the method and route, `target` is `vod:<id>`, `job:<id>` or `setting:<key>` when there is one, and `detail` is the request body. A VOD edit (`PATCH /admin/vods/{id}`, `PUT …/games`) and a settings change store `{before, after}` instead: the fields or settings it changed, or the rows. A login password is never stored.
+- **Audit log:** every state-changing admin request that succeeds is stored as `{at, actor, actorLogin, action, target, detail}`. `actor` is `password`, `api-key` or `twitch:<id>`, `actorLogin` is the Twitch login behind a `twitch:<id>` (otherwise `null`), `action` is the method and route, `target` is `vod:<id>`, `job:<id>`, `setting:<key>` or `storage:<area>/<name>` when there is one, and `detail` is the request body. A VOD edit (`PATCH /admin/vods/{id}`, `PUT …/games`) and a settings change store `{before, after}` instead: the fields or settings it changed, or the rows. A login password is never stored.
 
 ---
 

@@ -61,6 +61,7 @@ from .admin_signin import (
 from .context import Deps
 from .events import event_json, iso_utc
 from .runtime_settings import RuntimeSettings
+from .storage import Storage, StorageError
 from .vods import notify_rows_moved, splice_reason, upsert_vod
 
 log = logging.getLogger(__name__)
@@ -167,6 +168,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     ``runtime``: the dashboard's setting overrides, already loaded; by default a fresh one over ``deps.settings``."""
     settings = deps.settings
     runtime = runtime or RuntimeSettings(settings)
+    storage = Storage(settings.data_dir)
     helix = deps.helix
     app = FastAPI(title="archive-worker admin", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -177,6 +179,10 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     @app.exception_handler(splices.SpliceError)
     async def _splice_error(req: Request, exc: splices.SpliceError) -> JSONResponse:
         return await _admin_error(req, AdminError(exc.status, exc.msg, extra=exc.extra))
+
+    @app.exception_handler(StorageError)
+    async def _storage_error(req: Request, exc: StorageError) -> JSONResponse:
+        return await _admin_error(req, AdminError(exc.status, exc.msg))
 
     @app.exception_handler(jobs.JobNotFound)
     async def _job_not_found(req: Request, _exc: jobs.JobNotFound) -> JSONResponse:
@@ -282,6 +288,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             target = f"job:{params['job_id']}"
         elif "key" in params:
             target = f"setting:{params['key']}"
+        elif "area" in params:
+            target = f"storage:{params['area']}/{params.get('name')}"
         elif isinstance(body, dict) and body.get("vodId") not in (None, ""):
             target = f"vod:{body['vodId']}"
         await execute(insert(AdminAudit).values(
@@ -582,6 +590,21 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         request.state.audit_detail = {"before": before, "after": after}
         runner.poke()
         return settings_json()
+
+    # ── Storage ───────────────────────────────────────────────────────────
+
+    @app.get("/admin/storage", dependencies=auth)
+    async def get_storage(refresh: bool = False) -> dict:
+        """The disk, and each job folder (vods/<id>, live/<stream id>) with its size, VOD, jobs and whether
+        it is stale. Sizes are cached for a short while; ``refresh=true`` scans again."""
+        return await storage.view(refresh)
+
+    @app.delete("/admin/storage/{area}/{name}", dependencies=auth)
+    async def delete_storage(area: str, name: str, request: Request) -> dict:
+        """Delete a folder's files; refused while a job for it is queued, running or paused."""
+        freed = await storage.delete(area, name)
+        request.state.audit_detail = freed
+        return freed
 
     @app.get("/admin/jobs", dependencies=auth)
     async def list_jobs(state: str | None = None, vodId: str | None = None, kind: str | None = None,
