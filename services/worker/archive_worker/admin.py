@@ -71,7 +71,7 @@ AUDITED_PREFIXES = ("/admin/", "/v2/")
 YOUTUBE_CHECK_MAX_AGE = 600  # /admin/health refreshes the YouTube token at most this often
 RECENT_JOBS = 20  # jobs shown with a VOD
 # Steps that refetch from Twitch by VOD id; a job with any of them is refused on a merged/split VOD.
-TWITCH_STEPS = {"capture", "fetch_vod", "finalize", "chapters", "chat", "emotes"}
+TWITCH_STEPS = {"capture", "fetch_vod", "finalize", "chapters", "chat", "emotes", "bot_chat"}
 
 
 class AdminError(Exception):
@@ -911,16 +911,39 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         job = await enqueue("emotes", str(body["vodId"]), {"force": True} if force else None)
         return _ok("Saving emotes (overwriting).." if force else "Saving emotes..", job)
 
-    @app.post("/admin/emotes/backfill", dependencies=auth)
-    async def emotes_backfill(body: dict | None = Body(None)) -> dict:
-        """Current global sets onto every emotes row that has none (optionally only ``vodIds``)."""
+    async def backfill(kind: str, what: str, body: dict | None) -> dict:
+        """One ``kind`` job over every VOD it applies to, or only ``body["vodIds"]``."""
         vod_ids = (body or {}).get("vodIds")
         if vod_ids is not None and not (isinstance(vod_ids, list) and vod_ids):
             raise AdminError(400, "vodIds must be a non-empty list")
-        if await jobs.find_active("global_emotes_backfill"):
-            raise AdminError(409, "A global emotes backfill is already running")
-        job = await enqueue("global_emotes_backfill", None, {"vod_ids": [str(v) for v in vod_ids]} if vod_ids else None)
-        return _ok("Backfilling global emotes..", job)
+        if await jobs.find_active(kind):
+            raise AdminError(409, f"A {what} backfill is already running")
+        job = await enqueue(kind, None, {"vod_ids": [str(v) for v in vod_ids]} if vod_ids else None)
+        return _ok(f"Backfilling {what}..", job)
+
+    @app.post("/admin/emotes/backfill", dependencies=auth)
+    async def emotes_backfill(body: dict | None = Body(None)) -> dict:
+        """Current global sets onto every emotes row that has none (optionally only ``vodIds``)."""
+        return await backfill("global_emotes_backfill", "global emotes", body)
+
+    @app.post("/admin/bot-chat", dependencies=auth)
+    async def bot_chat(body: dict = Body(...)) -> dict:
+        """Read the VOD's chat from doomtp-bot into bot_logs (adds or updates rows only)."""
+        _require(body, "vodId")
+        if not settings.doomtp_url:
+            raise AdminError(500, "ARCHIVE_DOOMTP_URL is not set")
+        vod = await require_vod(body["vodId"])
+        if await jobs.find_active("bot_chat", vod_id=vod.id):
+            raise AdminError(409, f"A bot chat job for {vod.id} is already running")
+        job = await enqueue("bot_chat", vod.id)
+        return _ok(f"Reading bot chat for {vod.id}..", job)
+
+    @app.post("/admin/bot-chat/backfill", dependencies=auth)
+    async def bot_chat_backfill(body: dict | None = Body(None)) -> dict:
+        """Bot chat for every VOD without it (optionally only ``vodIds``); merged or split VODs are skipped."""
+        if not settings.doomtp_url:
+            raise AdminError(500, "ARCHIVE_DOOMTP_URL is not set")
+        return await backfill("bot_chat_backfill", "bot chat", body)
 
     @app.post("/admin/youtube/parts", dependencies=auth)
     @app.post("/admin/youtube/chapters", dependencies=auth)

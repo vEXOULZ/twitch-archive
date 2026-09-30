@@ -1,0 +1,264 @@
+"""Chat from doomtp-bot's log API into ``bot_logs``, next to the replay crawl's ``logs``.
+
+The bot records chat live on its own, so like the replay's ``chat`` step this reads a
+VOD once, after its stream ends: the monitor starts a ``bot_chat`` job then, separate
+from the ``archive`` job. Each row keeps the bot's entry in ``data`` and gets
+``message``/``user_badges``/``user_color`` in the replay's shape, so the comments API can
+serve either table to the same frontends. Only ever adds or updates ``bot_logs`` rows.
+"""
+
+from __future__ import annotations
+
+import base64
+import datetime as dt
+import math
+from typing import Any
+
+import httpx
+from sqlalchemy import func, literal_column, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
+
+from archive_common.db import get_sessionmaker
+from archive_common.models import BotLog, Vod
+
+from ..context import JobContext, StepError
+from ..events import iso_utc
+from ..vods import notify_rows_moved, resequence_bot_logs, splice_reason
+from .metadata import CHAT_BATCH, DEFAULT_COLOR, vod_duration
+
+REDEMPTION_MATCH_S = 10  # a redeem's message and its redemption notice, this close together
+
+
+def _ms(value: dt.datetime) -> int:
+    return int(value.timestamp() * 1000)
+
+
+def _from_ms(ms: int | float | None) -> dt.datetime | None:
+    return None if ms is None else dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc)
+
+
+# ── Bot entry -> replay shape ─────────────────────────────────────────────
+
+
+def replay_fragments(fragments: list[dict] | None, fallback_text: str = "") -> list[dict]:
+    """Bot fragments as the replay stores them: text, or text plus an embedded emote.
+    Mentions and cheermotes are plain text there (their details stay in ``data``)."""
+    out: list[dict] = []
+    pos = 0
+    for frag in fragments or [{"type": "text", "text": fallback_text}]:
+        frag_text = frag.get("text") or ""
+        emote = None
+        if frag.get("type") == "emote" and frag.get("emote_id"):
+            emote_id = frag["emote_id"]
+            emote = {"id": f"{emote_id};{pos};{pos + len(frag_text) - 1}", "from": pos, "emoteID": emote_id,
+                     "__typename": "EmbeddedEmote"}
+        out.append({"text": frag_text, "emote": emote, "__typename": "VideoCommentMessageFragment"})
+        pos += len(frag_text)
+    return out
+
+
+def replay_badges(badges: list[dict] | None) -> list[dict]:
+    out = []
+    for b in badges or []:
+        set_id, version = str(b.get("set_id") or ""), str(b.get("id") or "")
+        if not set_id:
+            continue
+        badge_id = base64.b64encode(f"{set_id};{version};".encode()).decode("ascii")
+        out.append({"id": badge_id, "setID": set_id, "version": version, "__typename": "Badge"})
+    return out
+
+
+def notice_text(payload: dict | None, kind: str) -> str:
+    payload = payload or {}
+    system, extra = payload.get("system_message") or "", payload.get("text") or ""
+    return " ".join(p for p in (system or kind, extra) if p)
+
+
+def offset_seconds(at_ms: int, vod_start: dt.datetime) -> int:
+    return max(0, math.floor((at_ms - _ms(vod_start)) / 1000))
+
+
+def to_row(entry: dict, vod_id: str, vod_start: dt.datetime, looks: dict[str, tuple[list, str]]) -> dict | None:
+    """A ``bot_logs`` row for one bot entry, or None for a kind this does not keep.
+
+    ``looks`` maps a user id to the badges and color of their latest message, for
+    notices (the bot has neither on them); messages update it.
+    """
+    kind = entry.get("kind")
+    at_ms = entry.get("at")
+    if kind not in ("message", "notification", "moderation") or at_ms is None or entry.get("id") is None:
+        return None
+    user = entry.get("user") or {}
+    row: dict[str, Any] = {
+        "id": str(entry["id"]),
+        "vod_id": vod_id,
+        "at": _from_ms(at_ms),
+        "content_offset_seconds": offset_seconds(at_ms, vod_start),
+        "user_id": user.get("id"),
+        "user_login": user.get("login"),
+        "display_name": user.get("display_name") or user.get("login"),
+        "message_type": None,
+        "deleted_at": None,
+        "cleared_at": None,
+        "data": entry,
+    }
+    if kind == "message":
+        badges, color = replay_badges(entry.get("badges")), entry.get("color") or DEFAULT_COLOR
+        if user.get("id"):
+            looks[user["id"]] = (badges, color)
+        row.update(kind="message", message=replay_fragments(entry.get("fragments"), entry.get("text") or ""),
+                   user_badges=badges, user_color=color, message_type=entry.get("message_type"),
+                   deleted_at=_from_ms(entry.get("deleted_at")), cleared_at=_from_ms(entry.get("cleared_at")))
+    elif kind == "notification":
+        badges, color = looks.get(user.get("id") or "", ([], DEFAULT_COLOR))
+        row.update(kind="notice", user_badges=badges, user_color=color,
+                   message=replay_fragments(None, notice_text(entry.get("payload"), entry.get("type") or "")))
+    else:
+        target = entry.get("target") or {}
+        row.update(id=f"mod:{entry['id']}", kind="moderation", message=[], user_badges=[], user_color=DEFAULT_COLOR,
+                   user_id=target.get("id"), user_login=target.get("login"),
+                   display_name=target.get("display_name") or target.get("login"))
+    return row
+
+
+# ── Storing ───────────────────────────────────────────────────────────────
+
+
+def annotate(rows: list[dict]) -> None:
+    """Fold notices and moderation into the messages they concern (rows in time order).
+
+    A redeem's message has only the reward id; its redemption notice has the title and
+    cost. A moderation action (only keyed reads have these) flags what it removed.
+    """
+    messages = [r for r in rows if r["kind"] == "message"]
+    by_id = {r["id"]: r for r in messages}
+    by_user: dict[str, list[dict]] = {}
+    for r in messages:
+        by_user.setdefault(r["user_id"] or "", []).append(r)
+    slack = dt.timedelta(seconds=REDEMPTION_MATCH_S)
+    for r in rows:
+        e = r["data"]
+        if r["kind"] == "notice" and e.get("type") == "redemption":
+            payload = e.get("payload") or {}
+            reward = payload.get("reward") or {}
+            user_id = (payload.get("user") or e.get("user") or {}).get("id")
+            info = {k: v for k, v in {**reward, "input": payload.get("input"), "status": payload.get("status")}.items()
+                    if v is not None}
+            for m in by_user.get(user_id or "", []) if reward.get("id") else []:
+                if m["data"].get("reward_id") == reward["id"] and abs(m["at"] - r["at"]) <= slack:
+                    m["data"] = {**m["data"], "reward": info}
+        elif r["kind"] == "moderation":
+            typ, at = e.get("type"), r["at"]
+            if typ == "delete":
+                targets = [by_id[mid]] if (mid := str(e.get("message_id"))) in by_id else []
+            elif typ == "chat_clear":
+                targets = [m for m in messages if m["at"] <= at and m["cleared_at"] is None]
+            elif typ in ("timeout", "ban", "user_clear") and r["user_id"]:
+                targets = [m for m in by_user.get(str(r["user_id"]), []) if m["at"] <= at and m["cleared_at"] is None]
+            else:
+                continue
+            removal = {k: e[k] for k in ("type", "moderator", "reason", "duration_s", "at") if e.get(k) is not None}
+            for m in targets:
+                if typ == "delete":
+                    m["deleted_at"] = m["deleted_at"] or at
+                else:
+                    m["cleared_at"] = at
+                m["data"] = {**m["data"], "removal": removal}
+
+
+def _upsert(rows: list[dict]):
+    stmt = insert(BotLog).values(rows)
+    ex = stmt.excluded
+    # A later read adds what the bot has learned since (a message deleted since, a filled-in
+    # field); nothing is cleared. Unchanged rows are left alone.
+    values = {
+        "deleted_at": func.coalesce(ex.deleted_at, BotLog.deleted_at),
+        "cleared_at": func.coalesce(ex.cleared_at, BotLog.cleared_at),
+        "message_type": func.coalesce(ex.message_type, BotLog.message_type),
+        "data": BotLog.data.op("||")(ex.data),
+    }
+    current = {"deleted_at": BotLog.deleted_at, "cleared_at": BotLog.cleared_at,
+               "message_type": BotLog.message_type, "data": BotLog.data}
+    changed = or_(*(current[k].is_distinct_from(v) for k, v in values.items()))
+    return stmt.on_conflict_do_update(index_elements=[BotLog.id], set_={**values, "updatedAt": func.now()},
+                                      where=changed).returning(literal_column("xmax = 0"))  # true: inserted
+
+
+async def read_vod(ctx: JobContext, vod: Vod) -> None:
+    """Store the bot's entries for the whole VOD, [start, start + duration), and record the read."""
+    doomtp = ctx.deps.doomtp
+    duration = await vod_duration(ctx, vod)
+    since = vod.created_at
+    until = since + dt.timedelta(seconds=duration) if duration > 0 else dt.datetime.now(dt.timezone.utc)
+    looks: dict[str, tuple[list, str]] = {}
+    rows = [row async for entry in doomtp.log(_ms(since), _ms(until))
+            if (row := to_row(entry, vod.id, vod.created_at, looks)) is not None]
+    annotate(rows)
+
+    info: dict[str, Any] = {"fetched_at": iso_utc(dt.datetime.now(dt.timezone.utc)), "since": since.isoformat(),
+                            "until": until.isoformat(), "keyed": doomtp.keyed}
+    try:
+        info["coverage"] = await doomtp.coverage(_ms(since), _ms(until))
+    except httpx.HTTPError as exc:
+        ctx.log.warning("could not read the bot's coverage: %s", exc)
+    for gap in (info.get("coverage") or {}).get("gaps") or []:
+        ctx.log.warning("bot log gap %s -> %s (%s)", _from_ms(gap.get("from")), _from_ms(gap.get("to")),
+                        gap.get("reason"))
+
+    inserted = changed = 0
+    async with get_sessionmaker()() as s:
+        for i in range(0, len(rows), CHAT_BATCH):
+            written = (await s.execute(_upsert(rows[i : i + CHAT_BATCH]))).scalars().all()
+            changed += len(written)
+            inserted += sum(written)
+        if changed:
+            await resequence_bot_logs(s, vod.id)
+            await notify_rows_moved(s, vod.id)
+        info["rows"] = (await s.execute(select(func.count()).select_from(BotLog).where(BotLog.vod_id == vod.id))
+                        ).scalar_one()
+        await s.execute(update(Vod).where(Vod.id == vod.id).values(bot_chat=info))
+        await s.commit()
+    ctx.log.info("bot chat for %s: %d entries read, %d new, %d updated", vod.id, len(rows), inserted,
+                 changed - inserted)
+
+
+async def bot_chat(ctx: JobContext) -> None:
+    """Read the VOD's chat from doomtp-bot (``payload.duration``: the stream's final length)."""
+    if not ctx.deps.doomtp.configured:
+        ctx.log.info("doomtp-bot chat disabled (ARCHIVE_DOOMTP_URL unset)")
+        return
+    await ctx.refuse_if_spliced()  # offsets are from this VOD's start; a spliced VOD has moved them
+    await read_vod(ctx, await ctx.get_vod())
+
+
+async def bot_chat_backfill(ctx: JobContext) -> None:
+    """One-shot bot chat for VODs that never had it (``payload.vod_ids``: only those), newest first.
+
+    One job for all of them, so a long backfill never holds up the live jobs. Only adds
+    ``bot_logs`` rows; the replay chat is not touched. Merged or split VODs are skipped.
+    """
+    if not ctx.deps.doomtp.configured:
+        raise StepError("ARCHIVE_DOOMTP_URL is not set")
+    stmt = select(Vod).where(Vod.merged_into.is_(None)).order_by(Vod.created_at.desc())
+    if ctx.payload.get("vod_ids"):
+        stmt = stmt.where(Vod.id.in_([str(v) for v in ctx.payload["vod_ids"]]))
+    else:
+        stmt = stmt.where(Vod.bot_chat.is_(None))
+    async with get_sessionmaker()() as s:
+        vods = list((await s.execute(stmt)).scalars())
+    done = failed = 0
+    for i, vod in enumerate(vods):
+        ctx.progress(100 * i / len(vods), 100, "percent", f"bot chat backfill: {vod.id} ({i + 1}/{len(vods)})")
+        reason = await splice_reason(vod.id)
+        if reason:
+            ctx.log.info("skipping %s: %s", vod.id, reason)
+            continue
+        try:
+            await read_vod(ctx, vod)
+        except (httpx.HTTPError, ValueError) as exc:
+            failed += 1
+            ctx.log.warning("bot chat for %s failed: %s", vod.id, exc)
+            continue
+        done += 1
+    ctx.progress(100, 100, "percent", "bot chat backfill done")
+    ctx.log.info("bot chat backfill: %d VOD(s) read, %d failed", done, failed)

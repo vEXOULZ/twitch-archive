@@ -61,6 +61,8 @@ class Vod(Base):
                                                   default=False)
     # Alembic 0007: {"id": <vod id>, "offset": <seconds>} once merged into that VOD; NULL otherwise.
     merged_into: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # Alembic 0008: the last bot_chat read, {"fetched_at", "since", "until", "keyed", "rows", "coverage"}; NULL = never run.
+    bot_chat: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     created_at: Mapped[dt.datetime] = _created()
     updated_at: Mapped[dt.datetime] = _updated()
 
@@ -116,6 +118,36 @@ class Log(Base):
     message: Mapped[Any] = mapped_column(JSONB, nullable=False)
     user_badges: Mapped[Any] = mapped_column(JSONB, nullable=False)
     user_color: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[dt.datetime] = _created()
+    updated_at: Mapped[dt.datetime] = _updated()
+
+
+class BotLog(Base):
+    """One entry of doomtp-bot's chat log (Alembic 0008), next to the replay's ``logs``.
+
+    ``message``, ``user_badges`` and ``user_color`` are in the replay's shape so the
+    comments API serves either table the same way; ``data`` is the bot's entry as fetched.
+    """
+
+    __tablename__ = "bot_logs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)  # the bot's id; moderation: "mod:<n>"
+    # Paging order within a VOD, like logs._id; the bot_chat step keeps it rising with the offset.
+    seq: Mapped[int] = mapped_column(BigInteger, server_default=FetchedValue(), nullable=False)
+    vod_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # message | notice | moderation
+    at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    content_offset_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(Text)
+    user_login: Mapped[str | None] = mapped_column(Text)
+    display_name: Mapped[str | None] = mapped_column(Text)
+    message: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    user_badges: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    user_color: Mapped[str] = mapped_column(Text, nullable=False)
+    message_type: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    cleared_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    data: Mapped[Any] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[dt.datetime] = _created()
     updated_at: Mapped[dt.datetime] = _updated()
 
@@ -212,6 +244,17 @@ class VodSpliceLog(Base):
         BigInteger, ForeignKey("vod_splices.id", ondelete="CASCADE"), primary_key=True
     )
     log_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+
+
+class VodSpliceBotLog(Base):
+    """The bot chat rows a merge moved (Alembic 0008), like ``VodSpliceLog``."""
+
+    __tablename__ = "vod_splice_bot_logs"
+
+    splice_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("vod_splices.id", ondelete="CASCADE"), primary_key=True
+    )
+    bot_log_id: Mapped[str] = mapped_column(Text, primary_key=True)
 
 
 class AdminAudit(Base):

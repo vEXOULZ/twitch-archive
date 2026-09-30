@@ -15,6 +15,7 @@ from archive_common.models import Job, Vod
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
 
+from .doomtp import Doomtp
 from .events import JOB_LOGGER, UNITS, JobEvents
 from .vods import splice_reason
 from .youtube import YouTube
@@ -27,6 +28,10 @@ class Deps:
     gql: Gql
     youtube: YouTube
     events: JobEvents = field(default_factory=JobEvents)  # the job event log (GET /admin/jobs/{id}/events)
+    doomtp: Doomtp = field(init=False)  # doomtp-bot's chat log
+
+    def __post_init__(self) -> None:
+        self.doomtp = Doomtp(self.settings)
 
 
 class StepError(RuntimeError):

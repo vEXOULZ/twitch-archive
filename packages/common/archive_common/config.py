@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     keep_mp4: bool = False
     dry_run: bool = False
 
+    # Chat from doomtp-bot's /log API into bot_logs (the bot_chat job); empty URL = off.
+    doomtp_url: str = ""  # the bot's base URL, e.g. https://bot.example.net
+    doomtp_login: str = ""  # channel login on the bot; empty = twitch_username
+    # A read-scope key: adds moderation entries and removed messages. Empty = the public log.
+    doomtp_api_key: SecretStr = SecretStr("")
+
     monitor_interval_seconds: int = 30
     hls_poll_interval_seconds: int = 60
     hls_no_change_threshold: int = 10

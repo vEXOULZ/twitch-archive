@@ -15,10 +15,9 @@ from pydantic import SecretStr
 from sqlalchemy import delete, func, or_, select
 
 from archive_api.invalidation import asyncpg_dsn
-from archive_api.main import create_app
 from archive_common.config import get_settings
 from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_sessionmaker
-from archive_common.models import AdminAudit, Emote, Game, Job, Log, Vod, VodSplice
+from archive_common.models import AdminAudit, BotLog, Emote, Game, Job, Log, Vod, VodSplice
 from archive_common.timeutil import hhmmss_to_seconds
 from archive_worker import jobs
 from archive_worker.admin import create_admin_app
@@ -48,11 +47,17 @@ def _log(vod_id, offset, name="viewer"):
                created_at=START + dt.timedelta(seconds=offset + (OFFSET if vod_id == B else 0)))
 
 
+def _bot_log(vod_id, offset, kind="message"):
+    at = START + dt.timedelta(seconds=offset + (OFFSET if vod_id == B else 0))
+    return BotLog(id=f"{vod_id}-bot-{offset}", vod_id=vod_id, kind=kind, at=at, content_offset_seconds=offset,
+                  message=[{"text": f"bot {vod_id} at {offset}"}], user_badges=[], user_color="#fff", data={})
+
+
 async def _clean():
     async with get_sessionmaker()() as s:
         await s.execute(delete(Job).where(Job.vod_id.in_(IDS)))
         await s.execute(delete(VodSplice).where(or_(VodSplice.vod_id.in_(IDS), VodSplice.other_id.in_(IDS))))
-        for model in (Log, Emote, Game):
+        for model in (Log, BotLog, Emote, Game):
             await s.execute(delete(model).where(model.vod_id.in_(IDS)))
         await s.execute(delete(Vod).where(Vod.id.in_(IDS)))
         await s.commit()
@@ -72,6 +77,7 @@ async def vods(db):
         ])
         await s.flush()
         s.add_all([_log(A, 0), _log(A, 3604), _log(A, 4000), _log(A, 7199), _log(B, 0, "b-viewer"), _log(B, 42, "b-viewer"), _log(B, 3599, "b-viewer")])
+        s.add_all([_bot_log(A, 0), _bot_log(A, 4000), _bot_log(B, 42), _bot_log(B, 50, "notice")])
         s.add_all([Game(vod_id=B, start_time=100, end_time=200, game_name="Minecraft", video_id="g1"),
                    Emote(vod_id=A, ffz_emotes=[{"id": 1, "code": "a"}], bttv_emotes=[], seventv_emotes=[]),
                    Emote(vod_id=B, ffz_emotes=[{"id": 1, "code": "a"}, {"id": 2, "code": "b"}], bttv_emotes=[],
@@ -90,14 +96,6 @@ def admin(deps):
     runner = jobs.Runner(deps)
     app = create_admin_app(deps, runner)
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://admin"), runner
-
-
-@pytest.fixture
-def api():
-    from archive_common.config import Settings
-
-    app = create_app(Settings(rate_limit_points=1_000_000, cache_ttl_seconds=0))
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://api")
 
 
 def site_delay(vod: dict, typ: str = "vod") -> float:
@@ -123,11 +121,13 @@ async def _state() -> dict:
                 for v in (await s.execute(select(Vod).where(Vod.id.in_(IDS)))).scalars()}
         logs = sorted((str(r.id), r.vod_id, r.content_offset_seconds, r.seq) for r in
                       (await s.execute(select(Log).where(Log.vod_id.in_(IDS)))).scalars())
+        bot_logs = sorted((r.id, r.vod_id, r.content_offset_seconds, r.seq) for r in
+                          (await s.execute(select(BotLog).where(BotLog.vod_id.in_(IDS)))).scalars())
         games = sorted((g.id, g.vod_id, g.start_time, g.end_time) for g in
                        (await s.execute(select(Game).where(Game.vod_id.in_(IDS)))).scalars())
         emotes = {e.vod_id: (e.ffz_emotes, e.bttv_emotes, e.seventv_emotes, e.global_emotes) for e in
                   (await s.execute(select(Emote).where(Emote.vod_id.in_(IDS)))).scalars()}
-    return {"vods": vods, "logs": logs, "games": games, "emotes": emotes}
+    return {"vods": vods, "logs": logs, "bot_logs": bot_logs, "games": games, "emotes": emotes}
 
 
 async def _comments(vod_id: str) -> dict[str, int]:
@@ -149,6 +149,7 @@ async def test_merge_keeps_chat_and_video_in_sync(vods, admin, api):
     splice, vod = body["splice"], body["vod"]
     assert (splice["kind"], splice["offset"], splice["gap"]) == ("merge", OFFSET, 300)
     assert splice["detail"]["gapOverridden"] is False and splice["detail"]["movedComments"] == 3
+    assert splice["detail"]["movedBotComments"] == 2
     assert body["warnings"] == []
 
     # A comment at B's x is now at A's offset + x ...
@@ -187,8 +188,13 @@ async def test_merge_keeps_chat_and_video_in_sync(vods, admin, api):
         assert (await api.get(f"/vods?id[$in][]={A}&id[$in][]={B}")).json()["total"] == 1
         assert (await api.get(f"/vods?id={B}&$merged=true")).json()["total"] == 1
         assert (await api.get(f"/v1/vods/{B}/comments?content_offset_seconds=0")).json() == {"comments": []}
-        page = (await api.get(f"/v1/vods/{A}/comments?content_offset_seconds={OFFSET + 42}")).json()
+        page = (await api.get(f"/v1/vods/{A}/comments?content_offset_seconds={OFFSET + 42}&source=replay")).json()
         assert "b-viewer at 42" in [cm["message"][0]["text"] for cm in page["comments"]]
+        page = (await api.get(f"/v1/vods/{A}/comments?content_offset_seconds=0&source=bot")).json()
+        assert [(cm["message"][0]["text"], cm["content_offset_seconds"]) for cm in page["comments"]] == [
+            (f"bot {A} at 0", 0), (f"bot {A} at 4000", 4000), (f"bot {B} at 42", OFFSET + 42),
+            (f"bot {B} at 50", OFFSET + 50)]
+        assert [cm["_id"] for cm in page["comments"]] == sorted(cm["_id"] for cm in page["comments"])
         emotes = (await api.get(f"/emotes?vod_id={A}")).json()["data"][0]
         assert [e["id"] for e in emotes["ffz_emotes"]] == [1, 2]
         played = {g["gameId"]: g for g in (await api.get("/v1/games-played")).json()}
@@ -334,6 +340,9 @@ async def test_split_at_a_part_boundary_and_unsplit(vods, admin):
         # The comment at A's 4000 s was at upload time 3995 (part 2, 395 s in); it still is.
         assert (await _comments(A2))["viewer at 4000"] == 395 and site_vod_time(second, 395) == 395
         assert (await _comments(A))["viewer at 3604"] == 3604
+        async with get_sessionmaker()() as s:
+            moved = (await s.execute(select(BotLog.id, BotLog.content_offset_seconds).where(BotLog.vod_id == A2))).all()
+            assert [tuple(m) for m in moved] == [(f"{A}-bot-4000", 395)]
         assert [sp["kind"] for sp in second["splices"]] == ["split"]
         async with get_sessionmaker()() as s:
             assert (await s.get(Emote, A2)).ffz_emotes == [{"id": 1, "code": "a"}]

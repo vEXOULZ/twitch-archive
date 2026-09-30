@@ -2,7 +2,8 @@
 
 Every ``monitor_interval_seconds``: look up the channel's live stream, keep the
 ``streams`` row current, and enqueue one ``live`` job (live_record) and one
-``archive`` job (vod_download) per stream.
+``archive`` job (vod_download) per stream. When a stream ends, enqueue one ``bot_chat``
+job (doomtp_url) for its VOD: the bot records the chat live, so it is read once, at the end.
 """
 
 from __future__ import annotations
@@ -10,11 +11,11 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from archive_common.timeutil import parse_ts
+from archive_common.timeutil import parse_helix_duration, parse_ts
 from archive_common.twitch.helix import Helix
 
 from . import jobs
-from .vods import set_live_stream, upsert_vod
+from .vods import live_stream_ids, set_live_stream, upsert_vod
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,10 @@ class Monitor:
     async def tick(self) -> None:
         s = self.settings
         stream = await self.helix.get_stream(s.twitch_id)
+        # Before they are marked offline, so a failed enqueue is retried on the next tick.
+        for ended in await live_stream_ids() if s.doomtp_url else ():
+            if not stream or ended != str(stream["id"]):
+                await self.stream_ended(ended)
         if not stream:
             await set_live_stream(None)
             return
@@ -58,3 +63,18 @@ class Monitor:
             await upsert_vod(video)
             log.info("stream %s -> vod %s; starting archive job", stream_id, video["id"])
             await self.runner.enqueue("archive", video["id"], {"type": "vod", "stream_id": stream_id})
+
+    async def stream_ended(self, stream_id: str) -> None:
+        s = self.settings
+        if await jobs.exists_any("bot_chat", stream_id=stream_id):
+            return
+        video = await self.helix.video_for_stream(s.twitch_id, stream_id)
+        if video is None:
+            log.info("stream %s ended without a VOD; no bot chat", stream_id)
+            return
+        await upsert_vod(video)
+        payload: dict = {"stream_id": stream_id}
+        if duration := parse_helix_duration(video.get("duration", "")):
+            payload["duration"] = duration  # final now; the vods row may still hold the live one
+        log.info("stream %s -> vod %s ended; starting bot chat job", stream_id, video["id"])
+        await self.runner.enqueue("bot_chat", video["id"], payload)

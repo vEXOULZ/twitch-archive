@@ -23,7 +23,7 @@ from typing import Any
 from sqlalchemy import Column, Table, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from archive_common.models import Emote, Game, Log, Stream, Vod
+from archive_common.models import BotLog, Emote, Game, Log, Stream, Vod
 from archive_common.timeutil import hhmmss_to_seconds
 
 
@@ -138,7 +138,7 @@ def _t(model) -> Table:
     return model.__table__
 
 
-_vt, _gt, _et, _lt, _st = _t(Vod), _t(Game), _t(Emote), _t(Log), _t(Stream)
+_vt, _gt, _et, _lt, _st, _bt = _t(Vod), _t(Game), _t(Emote), _t(Log), _t(Stream), _t(BotLog)
 
 VODS = Resource(
     _vt,
@@ -223,6 +223,35 @@ LOGS = Resource(
     ),
     "id",
     {},
+    lambda row: row.update(source="replay"),  # the Twitch VOD replay (the fallback)
+)
+
+# doomtp-bot's chat: the LOGS fields (createdAt is when it was sent, like the replay's),
+# then what only the bot has; ``bot`` is its entry as fetched.
+BOT_LOGS = Resource(
+    _bt,
+    (
+        Field("id", _bt.c.id),
+        Field("_id", _bt.c.seq),
+        Field("vod_id", _bt.c.vod_id),
+        Field("display_name", _bt.c.display_name),
+        Field("content_offset_seconds", _bt.c.content_offset_seconds),
+        Field("message", _bt.c.message),
+        Field("user_badges", _bt.c.user_badges),
+        Field("user_color", _bt.c.user_color),
+        Field("createdAt", _bt.c.at, js_iso),
+        Field("updatedAt", _bt.c.updatedAt, js_iso),
+        Field("kind", _bt.c.kind),
+        Field("user_id", _bt.c.user_id),
+        Field("user_login", _bt.c.user_login),
+        Field("message_type", _bt.c.message_type),
+        Field("deleted_at", _bt.c.deleted_at, js_iso),
+        Field("cleared_at", _bt.c.cleared_at, js_iso),
+        Field("bot", _bt.c.data),
+    ),
+    "id",
+    {},
+    lambda row: row.update(source="bot"),
 )
 
 STREAMS = Resource(

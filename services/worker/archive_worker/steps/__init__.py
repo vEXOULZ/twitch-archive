@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from ..context import JobContext
-from . import capture
+from . import bot_chat, capture
 from .media import cleanup, dmca_edit, ensure_source, fetch_vod, finalize, resolve_vod, split
 from .metadata import chapters, chat, emotes, global_emotes_backfill, logs_manual, seventv_flags_backfill
 from .publish import describe, upload
@@ -22,6 +22,8 @@ STEPS: dict[str, Step] = {
     "chapters": chapters,
     "chat": chat,
     "emotes": emotes,
+    "bot_chat": bot_chat.bot_chat,
+    "bot_chat_backfill": bot_chat.bot_chat_backfill,
     "global_emotes_backfill": global_emotes_backfill,
     "seventv_flags_backfill": seventv_flags_backfill,
     "logs_manual": logs_manual,
