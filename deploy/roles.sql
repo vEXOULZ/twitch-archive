@@ -32,4 +32,5 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON vods, games, emotes, logs, bot_logs, str
     vod_splices, vod_splice_logs, vod_splice_bot_logs TO archive_worker;
 -- The audit log is append-only for the worker.
 GRANT SELECT, INSERT ON admin_audit TO archive_worker;
+GRANT SELECT, INSERT, UPDATE, DELETE ON admin_sessions TO archive_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO archive_worker;

@@ -14,6 +14,7 @@ from archive_worker.admin_signin import (
     SignInError,
     VexoulzAuth,
     safe_next,
+    with_admin,
 )
 from pydantic import SecretStr
 
@@ -206,6 +207,36 @@ async def test_errors_from_vexoulz_auth_reach_the_login_page(admin, fake):
         assert error_of(await sign_in(c, fake)) == "unavailable"
 
 
+async def quiet(c: httpx.AsyncClient, next: str = "/vods/1?t=5", **callback) -> httpx.Response:
+    start = await c.get("/admin/signin", params={"next": next, "quiet": "1"})
+    assert start.status_code == 302
+    state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+    return await c.get("/admin/signin/callback", params={"state": state, **callback})
+
+
+async def test_quiet_sign_in_answers_admin_1_or_0_and_never_the_login_page(admin, fake):
+    async with admin() as c:
+        ok = await quiet(c, code=fake.approve(ALICE))
+        assert ok.status_code == 302 and ok.headers["location"] == "/vods/1?t=5&admin=1"
+        session = (await c.get("/admin/session")).json()
+        assert session["authenticated"] and session["user"]["login"] == "alice"
+        assert (await c.patch("/admin/jobs/1", json={"pauseNext": True})).status_code == 403  # CSRF still applies
+
+    for callback in ({"code": fake.approve(MALLORY)}, {"error": "denied"}, {"error": "<odd>"}):
+        async with admin() as c:
+            r = await quiet(c, **callback)
+            assert r.headers["location"] == "/vods/1?t=5&admin=0"
+            assert STATE_COOKIE in r.headers["set-cookie"]  # the state cookie is cleared
+            assert (await c.get("/admin/session")).json()["authenticated"] is False
+
+    for trouble in ("down", "refuse"):
+        async with admin() as c:
+            fake.down, fake.refuse = trouble == "down", "misconfigured" if trouble == "refuse" else None
+            r = await quiet(c, code=fake.approve(ALICE))
+            assert r.headers["location"] == "/vods/1?t=5&admin=0"
+    fake.down, fake.refuse = False, None
+
+
 async def test_sign_out_everywhere_is_noticed_after_check_interval(deps, fake):
     from archive_worker.admin_signin import CHECK_S
 
@@ -311,12 +342,17 @@ def test_pending_states_and_safe_next():
     now = [0.0]
     states = PendingStates(ttl_s=10, limit=2, clock=lambda: now[0])
     a = states.start("/admin/a")
-    assert states.finish(a) == "/admin/a" and states.finish(a) is None
+    done = states.finish(a)
+    assert done is not None and done.next == "/admin/a" and not done.quiet and states.finish(a) is None
     b = states.start("/admin/b")
     now[0] = 10
     assert states.finish(b) is None
-    first, second, third = states.start("/1"), states.start("/2"), states.start("/3")
-    assert states.finish(first) is None and states.finish(third) == "/3" and states.finish(second) == "/2"
+    first, second, third = states.start("/1"), states.start("/2", quiet=True), states.start("/3")
+    assert states.finish(first) is None and states.finish(third).next == "/3"
+    assert states.finish(second)[:2] == ("/2", True)
+
+    assert with_admin("/vods/1", True) == "/vods/1?admin=1"
+    assert with_admin("/vods/1?t=90&admin=1#chat", False) == "/vods/1?t=90&admin=0#chat"
 
     assert safe_next("/admin/vods/1?x=1") == "/admin/vods/1?x=1"
     for bad in (None, "", "https://evil.test", "//evil.test", "/\\evil.test", "admin"):

@@ -34,18 +34,20 @@ def test_password_is_hashed_and_checked():
     assert not AdminAuth(None).check_password("")
 
 
-def test_sessions_expire_and_log_out():
+async def test_sessions_expire_and_log_out():
     clock = Clock()
     auth = AdminAuth("pw", ttl_s=60, clock=clock)
-    session = auth.login()
-    assert auth.session(session.token) is session
-    assert auth.valid_csrf(session, session.csrf)
-    assert not auth.valid_csrf(session, "nope") and not auth.valid_csrf(session, None)
+    session = await auth.login()
+    found = await auth.session(session.token)
+    assert found == session
+    assert auth.valid_csrf(found, session.csrf)
+    assert not auth.valid_csrf(found, "nope") and not auth.valid_csrf(found, None)
+    assert await auth.session("made-up") is None
     clock.now += 60
-    assert auth.session(session.token) is None
-    other = auth.login()
-    auth.logout(other.token)
-    assert auth.session(other.token) is None
+    assert await auth.session(session.token) is None
+    other = await auth.login()
+    await auth.logout(other.token)
+    assert await auth.session(other.token) is None
 
 
 def test_login_limiter_window():

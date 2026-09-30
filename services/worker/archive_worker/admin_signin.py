@@ -5,6 +5,11 @@ The browser goes to vexoulz-auth's ``/authorize`` with a one-time ``state``. It 
 Twitch user and a vexoulz-auth session id. Only ``ARCHIVE_ADMIN_TWITCH_IDS`` get a dashboard session.
 The session id is checked again every ``CHECK_S`` seconds, so "sign out everywhere" on any site
 ends the dashboard session too.
+
+A *quiet* sign-in (``/admin/signin?quiet=1``) is the site checking whether someone already signed in
+to the site is an admin: vexoulz-auth answers at once for a signed-in browser, and the callback always
+goes back to ``next`` with ``admin=1`` (a dashboard session was made) or ``admin=0`` (anything else),
+never to the login page.
 """
 
 from __future__ import annotations
@@ -13,8 +18,8 @@ import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
-from urllib.parse import urlencode
+from typing import Any, NamedTuple, Protocol
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 from archive_common.config import Settings
@@ -109,6 +114,12 @@ class VexoulzAuth:
         return bool(r.json().get("active"))
 
 
+class Pending(NamedTuple):
+    next: str
+    quiet: bool
+    expires: float
+
+
 @dataclass
 class PendingStates:
     """Sign-ins on their way through vexoulz-auth: state → where to go afterwards. One use each."""
@@ -116,24 +127,32 @@ class PendingStates:
     ttl_s: float = STATE_TTL_S
     limit: int = 1000
     clock: Callable[[], float] = time.monotonic
-    _pending: dict[str, tuple[str, float]] = field(default_factory=dict, repr=False)
+    _pending: dict[str, Pending] = field(default_factory=dict, repr=False)
 
-    def start(self, next_path: str) -> str:
+    def start(self, next_path: str, quiet: bool = False) -> str:
         now = self.clock()
-        for state in [s for s, (_, exp) in self._pending.items() if exp <= now]:
+        for state in [s for s, p in self._pending.items() if p.expires <= now]:
             del self._pending[state]
         while len(self._pending) >= self.limit:  # oldest first: dicts keep insertion order
             del self._pending[next(iter(self._pending))]
         state = secrets.token_urlsafe(32)
-        self._pending[state] = (next_path, now + self.ttl_s)
+        self._pending[state] = Pending(next_path, quiet, now + self.ttl_s)
         return state
 
-    def finish(self, state: str | None) -> str | None:
-        """The ``next`` path of a live state, which is used up; None if unknown or expired."""
+    def finish(self, state: str | None) -> Pending | None:
+        """A live state's sign-in, which is used up; None if unknown or expired."""
         entry = self._pending.pop(state or "", None)
-        if entry is None or entry[1] <= self.clock():
+        if entry is None or entry.expires <= self.clock():
             return None
-        return entry[0]
+        return entry
+
+
+def with_admin(path: str, ok: bool) -> str:
+    """``path`` with ``admin=1`` or ``admin=0`` added: a quiet sign-in's answer."""
+    parts = urlsplit(path)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "admin"]
+    query.append(("admin", "1" if ok else "0"))
+    return urlunsplit(("", "", parts.path, urlencode(query), parts.fragment))
 
 
 def safe_next(value: str | None) -> str:
