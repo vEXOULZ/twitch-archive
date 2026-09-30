@@ -384,7 +384,7 @@ A web dashboard logs in instead of carrying the API key: with Twitch through [ve
 |---|---|
 | `GET /admin/session` | No auth. `{"authenticated", "csrf", "expiresAt", "passwordLogin", "twitchLogin", "user"}`. `passwordLogin`: the password is offered to this address. `user`: the Twitch user, `null` for a password login |
 | `POST /admin/session` `{"password"}` | Logs in: the same shape plus the `archive_admin` cookie. `401` wrong password, `403` from outside `ARCHIVE_ADMIN_PASSWORD_NETWORKS`, `429` + `Retry-After` after 5 failed logins in 5 minutes from one address, `404` when password login is off |
-| `GET /admin/signin?next=/admin/...` | Starts a Twitch sign-in: redirects to vexoulz-auth, which comes back to `/admin/signin/callback`. That sets the same cookie and redirects to `next`, or to `/admin/login?auth_error=<denied\|expired\|twitch\|not_allowed\|unavailable>&next=...`. `404` when Twitch sign-in is off |
+| `GET /admin/signin?next=/admin/...` | Starts a Twitch sign-in: redirects to vexoulz-auth, which comes back to `/admin/signin/callback`. That sets the same cookie and redirects to `next`, or to `/admin/login?auth_error=<denied\|expired\|twitch\|not_allowed\|unavailable\|misconfigured>&next=...`. `404` when Twitch sign-in is off |
 | `DELETE /admin/session` | Logs out (`204`) and clears the cookie |
 
 Only `ARCHIVE_ADMIN_TWITCH_IDS` get in through Twitch. A Twitch session is checked with vexoulz-auth again every minute, so signing out everywhere on any vexoulz site ends it too; if vexoulz-auth can't be reached, the session stands until it can.

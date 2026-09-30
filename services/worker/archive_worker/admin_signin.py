@@ -23,11 +23,31 @@ STATE_TTL_S = 600
 STATE_COOKIE = "archive_signin"
 CHECK_S = 60
 #: The ``auth_error`` values the login page knows how to explain.
-ERRORS = ("denied", "expired", "twitch", "not_allowed", "unavailable")
+#: ``misconfigured``: vexoulz-auth refused this worker itself (wrong client secret, unknown client).
+ERRORS = ("denied", "expired", "twitch", "not_allowed", "unavailable", "misconfigured")
 
 
 class SignInError(Exception):
-    """vexoulz-auth refused the code or could not be reached."""
+    """vexoulz-auth refused the code or could not be reached. ``reason`` is the ``auth_error`` to show."""
+
+    def __init__(self, msg: str, reason: str = "unavailable") -> None:
+        super().__init__(msg)
+        self.reason = reason
+
+
+def _refusal(r: httpx.Response) -> SignInError:
+    """Why vexoulz-auth turned down a code: the worker's setup, the code itself, or a passing problem."""
+    try:
+        code = r.json().get("error")
+    except ValueError:
+        code = None
+    msg = f"vexoulz-auth refused the code ({r.status_code} {code or 'no error code'})"
+    if r.status_code == 400 and code == "invalid_grant":
+        return SignInError(msg, "expired")  # used, expired, or the vexoulz-auth session ended meanwhile
+    if r.status_code == 429 or r.status_code >= 500:
+        return SignInError(msg, "unavailable")
+    # 401 invalid_client: ARCHIVE_ADMIN_AUTH_CLIENT_ID/SECRET don't match vexoulz-auth's client list.
+    return SignInError(msg, "misconfigured")
 
 
 @dataclass(frozen=True)
@@ -73,7 +93,7 @@ class VexoulzAuth:
         except httpx.HTTPError as exc:
             raise SignInError(f"vexoulz-auth unreachable: {exc}") from exc
         if r.status_code != 200:
-            raise SignInError(f"vexoulz-auth refused the code ({r.status_code})")
+            raise _refusal(r)
         body = r.json()
         return SignedIn(body["user"], body["sid"])
 
