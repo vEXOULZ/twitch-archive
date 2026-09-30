@@ -60,7 +60,6 @@ KINDS: dict[str, list[str]] = {
     "bot_chat_backfill": ["bot_chat_backfill"],
 }
 
-MAX_ATTEMPTS = 3
 ACTIVE = ("queued", "running", "paused")
 STATES = ("queued", "running", "paused", "done", "failed", "cancelled")
 
@@ -217,9 +216,9 @@ def _exclusive_key(job: Job) -> str:
 
 
 class Runner:
-    def __init__(self, deps: Deps, concurrency: int = 3) -> None:
+    def __init__(self, deps: Deps, concurrency: int | None = None) -> None:
         self.deps = deps
-        self.concurrency = concurrency
+        self._concurrency = concurrency  # None: Settings.runner_concurrency, read on every pick
         self.running: dict[int, asyncio.Task] = {}
         self.running_keys: dict[int, str] = {}
         self.cancelling: set[int] = set()
@@ -270,6 +269,10 @@ class Runner:
             await s.commit()
             if res.rowcount:
                 log.info("re-queued %d interrupted job(s)", res.rowcount)
+
+    @property
+    def concurrency(self) -> int:
+        return self._concurrency or self.deps.settings.runner_concurrency
 
     def poke(self) -> None:
         self.wakeup.set()
@@ -377,13 +380,14 @@ class Runner:
             raise
         except Exception as exc:
             # A refused step would be refused again: no retries.
-            attempts = MAX_ATTEMPTS if isinstance(exc, StepRefused) else job.attempts + 1
+            max_attempts = self.deps.settings.max_attempts
+            attempts = max_attempts if isinstance(exc, StepRefused) else job.attempts + 1
             if isinstance(exc, StepError):
                 err = str(exc)
             else:
                 err = "".join(traceback.format_exception(exc))[-4000:]
             not_before = None
-            if attempts >= MAX_ATTEMPTS:
+            if attempts >= max_attempts:
                 state = "failed"
                 ctx.log.error("job failed permanently: %s", exc)
             else:

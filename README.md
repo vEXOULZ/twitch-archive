@@ -82,6 +82,8 @@ To point the frontend at your local API, run `Archive-React-Vex` with `REACT_APP
 
 All settings are environment variables with the `ARCHIVE_` prefix. They can also be put in a `.env` file in the working directory. Lists are JSON, e.g. `ARCHIVE_RESTRICTED_GAMES='["Artifact"]'`. The source of truth is `packages/common/archive_common/config.py`.
 
+Settings marked **†** in the archive-worker table can also be changed from the admin dashboard while the worker runs ([Runtime settings](#runtime-settings)); the env value is then the default.
+
 In production, non-secret settings go in `.env` (see `.env.example`). Secrets go in `secrets/api.env` and `secrets/worker.env` (see `deploy/secrets.example/`), so each container only receives the secrets it needs.
 
 ### Shared
@@ -124,23 +126,25 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | Variable | Default | Notes |
 |---|---|---|
 | `ARCHIVE_DATA_DIR` | `/data` | VODs go in `vods/<vodId>/`, live recordings in `live/<streamId>/` |
-| `ARCHIVE_VOD_DOWNLOAD` | `true` | Archive every stream's Twitch VOD |
-| `ARCHIVE_CHAT_DOWNLOAD` | `true` | Save the chat replay into `logs` |
+| `ARCHIVE_VOD_DOWNLOAD` † | `true` | Archive every stream's Twitch VOD |
+| `ARCHIVE_CHAT_DOWNLOAD` † | `true` | Save the chat replay into `logs` |
 | `ARCHIVE_DOOMTP_URL` | empty | doomtp-bot's base URL. Set: each stream, once it ends, gets a `bot_chat` job that saves the bot's chat log (redeems, sub/raid notices, replies, removals) into `bot_logs`. Empty: off |
 | `ARCHIVE_DOOMTP_LOGIN` | `ARCHIVE_TWITCH_USERNAME` | The channel's login on the bot |
 | `ARCHIVE_DOOMTP_API_KEY` | empty | A read-scope key for the bot's log. With it, moderation entries and removed messages are saved too (flagged `deleted_at`/`cleared_at`); without it, the public log |
-| `ARCHIVE_LIVE_RECORD` | `false` | Record the live stream itself; see [§5](#5-live-recordings-and-multitrack) |
-| `ARCHIVE_MULTI_TRACK` | `false` | Upload both the VOD copy and the live copy |
-| `ARCHIVE_YOUTUBE_UPLOAD` | `true` | |
-| `ARCHIVE_YOUTUBE_PUBLIC` | `false` | Public instead of unlisted (for the main copy; see §5) |
-| `ARCHIVE_YOUTUBE_DESCRIPTION` | `VOD` | Last line of every description |
-| `ARCHIVE_YOUTUBE_KEEPALIVE_HOURS` | `24` | How often the worker refreshes the YouTube token; see [§3](#3-youtube-oauth-setup) |
-| `ARCHIVE_RESTRICTED_GAMES` | `[]` | Chapters of these games are left out of uploads |
-| `ARCHIVE_MANUAL_STEPS` | `{}` | Steps a job pauses before until you resume it, per job kind, e.g. `{"archive":["upload"]}`; see [Manual steps](#manual-steps) |
-| `ARCHIVE_SPLIT_DURATION` | `10800` | Maximum YouTube part length in seconds |
-| `ARCHIVE_KEEP_HLS` / `ARCHIVE_KEEP_MP4` | `false` | Keep files after upload |
+| `ARCHIVE_LIVE_RECORD` † | `false` | Record the live stream itself; see [§5](#5-live-recordings-and-multitrack) |
+| `ARCHIVE_MULTI_TRACK` † | `false` | Upload both the VOD copy and the live copy |
+| `ARCHIVE_YOUTUBE_UPLOAD` † | `true` | |
+| `ARCHIVE_YOUTUBE_PUBLIC` † | `false` | Public instead of unlisted (for the main copy; see §5) |
+| `ARCHIVE_YOUTUBE_DESCRIPTION` † | `VOD` | Last line of every description |
+| `ARCHIVE_YOUTUBE_KEEPALIVE_HOURS` † | `24` | How often the worker refreshes the YouTube token; see [§3](#3-youtube-oauth-setup) |
+| `ARCHIVE_RESTRICTED_GAMES` † | `[]` | Chapters of these games are left out of uploads |
+| `ARCHIVE_MANUAL_STEPS` † | `{}` | Steps a job pauses before until you resume it, per job kind, e.g. `{"archive":["upload"]}`; see [Manual steps](#manual-steps) |
+| `ARCHIVE_SPLIT_DURATION` † | `10800` | Maximum YouTube part length in seconds |
+| `ARCHIVE_KEEP_HLS` / `ARCHIVE_KEEP_MP4` † | `false` | Keep files after upload |
 | `ARCHIVE_DRY_RUN` | `false` | Same as `run --dry-run` |
-| `ARCHIVE_MONITOR_INTERVAL_SECONDS` | `30` | How often Helix is checked for a live stream |
+| `ARCHIVE_RUNNER_CONCURRENCY` † | `3` | Jobs run at once |
+| `ARCHIVE_MAX_ATTEMPTS` † | `3` | Tries of a failing step before its job is marked `failed` |
+| `ARCHIVE_MONITOR_INTERVAL_SECONDS` † | `30` | How often Helix is checked for a live stream |
 | `ARCHIVE_HLS_POLL_INTERVAL_SECONDS` | `60` | VOD playlist polling while the stream is live |
 | `ARCHIVE_HLS_NO_CHANGE_THRESHOLD` | `10` | Unchanged polls before the capture is considered complete |
 | `ARCHIVE_LIVE_POLL_INTERVAL_SECONDS` | `2` | Live playlist polling |
@@ -198,7 +202,7 @@ The worker refreshes the access token on its own before every upload, but the **
 - **Testing mode.** While the OAuth consent screen is in "Testing", refresh tokens expire after 7 days. Set the app to "In production" (a personal app with the `youtube` scope works unverified; you just click through the "unverified app" warning once).
 - **Revoked by hand**, a Google password change, or more than 100 refresh tokens issued for the same client and account.
 
-To handle the first case and detect the others early, the worker has a keep-alive task. It runs when `ARCHIVE_YOUTUBE_UPLOAD` is on and a Google client is configured. It refreshes the token at startup and then every `ARCHIVE_YOUTUBE_KEEPALIVE_HOURS` (default 24). Each run logs one line:
+To handle the first case and detect the others early, the worker has a keep-alive task. It runs while `ARCHIVE_YOUTUBE_UPLOAD` is on and a Google client is configured. It refreshes the token at startup and then every `ARCHIVE_YOUTUBE_KEEPALIVE_HOURS` (default 24). Each run logs one line:
 
 - `YouTube token refreshed (keep-alive)`: all good.
 - `ERROR ... YouTube token is not usable (RefreshError: invalid_grant ...)`: run Option B again before the next stream ends.
@@ -235,7 +239,7 @@ curl -s "${H[@]}" -X POST "$A/admin/jobs/42/retry"      # re-queue a failed job 
 curl -s "${H[@]}" -X POST "$A/admin/jobs/42/cancel"     # queued/paused: now; running: stops mid-step
 ```
 
-Job states are `queued`, `running`, `paused`, `done`, `failed` and `cancelled`. The `state` filter also takes groups: `waiting` (`queued`, including jobs waiting out a retry backoff), `stopped` (`paused`, `failed`, `cancelled`: they need you), `active` (`queued`, `running`, `paused`) and `finished` (`done`, `failed`, `cancelled`). A job whose step fails is retried after 2 minutes, then again after 4 minutes. On its third failure it is marked `failed` and keeps its files, so `retry` picks up from the same step. Cancelling a running job stops it immediately; the step's partial files stay on disk.
+Job states are `queued`, `running`, `paused`, `done`, `failed` and `cancelled`. The `state` filter also takes groups: `waiting` (`queued`, including jobs waiting out a retry backoff), `stopped` (`paused`, `failed`, `cancelled`: they need you), `active` (`queued`, `running`, `paused`) and `finished` (`done`, `failed`, `cancelled`). A job whose step fails is retried after 2 minutes, then again after 4 minutes, and so on. On its third failure (`ARCHIVE_MAX_ATTEMPTS`) it is marked `failed` and keeps its files, so `retry` picks up from the same step. Cancelling a running job stops it immediately; the step's partial files stay on disk.
 
 `POST /admin/jobs` starts any kind directly. Body fields: `kind` (required), `vodId`, `payload` (the same keys the specific routes put there, e.g. `type`, `stream_id`, `path`, `start_part`), `fromStep` (skip the steps before it), `pauseBefore` (this job's manual steps, see below) and `paused` (create it paused).
 
@@ -262,6 +266,21 @@ Job kinds and their steps:
 | `bot_chat_backfill` | one step | `/admin/bot-chat/backfill` |
 
 `ensure_source` uses `path` if one was given, otherwise the MP4 already on disk. With neither, `fetch_vod` downloads the whole VOD from Twitch again (only while Twitch still has it) and `finalize` converts it; both do nothing when there is a source already.
+
+### Runtime settings
+
+The settings marked † in [§2](#archive-worker) can be changed without a restart. An override is kept in the database (`settings` table) and wins over the env value; resetting it goes back to the env value.
+
+```bash
+curl -s "${H[@]}" "$A/admin/settings"                   # each one: value, default (env), overridden, type, group, applies
+curl -s "${H[@]}" -X PATCH "$A/admin/settings" -d '{"keep_hls":true,"runner_concurrency":2}'   # all or none
+curl -s "${H[@]}" -X DELETE "$A/admin/settings/keep_hls"   # back to the env value
+```
+
+- Keys are the setting names without `ARCHIVE_`, in lower case. `GET` answers `{data: [{key, value, default, overridden, type, group, applies, help, min, max, updatedAt, updatedBy}]}`; `manual_steps` also carries `choices` (every kind's steps). `PATCH` and `DELETE` answer the same.
+- **Types:** `bool`, `int` and `float` (within `min`–`max`), `text`, `list` (names) and `steps` (`{kind: [step, ...]}`, checked like `ARCHIVE_MANUAL_STEPS`). A `PATCH` with any refused value changes nothing (400).
+- **`applies`:** `now` settings are read on every use: the monitor's next check (`vod_download`, `live_record`, `monitor_interval_seconds`), the runner's next pick (`runner_concurrency`, `max_attempts`), the next step boundary (`manual_steps`) and the next token refresh (`youtube_keepalive_hours`). `next job` settings are read when a job starts or resumes, so a running job finishes with what it started with.
+- Both changes are audited with `{before, after}`. Secrets, keys, URLs, paths, the channel and the database are never editable here.
 
 ### Recipes
 
@@ -423,7 +442,7 @@ curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 - **VOD fields** (`PATCH /admin/vods/{id}`): any of `title`, `hidden`, `thumbnailUrl` (an http(s) URL, or `null` for the site's default), `duration` (`HH:MM:SS`; it must still hold the chapters and games rows) and `createdAt` (ISO with an offset). A merged VOD takes only `hidden`. **Hidden** takes the VOD off the public API as if it were missing (see [§6](#6-public-api-reference)); the dashboard still has it, and unhiding brings it back.
 - **Games rows** (`PUT /admin/vods/{id}/games`) replace the VOD's rows. Send them in the shape `GET` returns (`id`, `vodId` and the dates are ignored): `start_time` and `end_time` in seconds, sorted, not overlapping and inside the VOD, a `game_name`, and optionally `game_id`, `title`, `video_provider`, `video_id`, and `thumbnail_url` and `chapter_image` (http(s) URLs). Refused on a merged VOD.
 - **Edits show up on the public API at once:** the worker sends a Postgres `NOTIFY`, and archive-api drops its cached responses for that VOD and for the lists that include it.
-- **Audit log:** every state-changing admin request that succeeds is stored as `{at, actor, actorLogin, action, target, detail}`. `actor` is `password`, `api-key` or `twitch:<id>`, `actorLogin` is the Twitch login behind a `twitch:<id>` (otherwise `null`), `action` is the method and route, and `detail` is the request body. A VOD edit (`PATCH /admin/vods/{id}`, `PUT …/games`) stores `{before, after}` instead: the fields it changed, or the rows. A login password is never stored.
+- **Audit log:** every state-changing admin request that succeeds is stored as `{at, actor, actorLogin, action, target, detail}`. `actor` is `password`, `api-key` or `twitch:<id>`, `actorLogin` is the Twitch login behind a `twitch:<id>` (otherwise `null`), `action` is the method and route, `target` is `vod:<id>`, `job:<id>` or `setting:<key>` when there is one, and `detail` is the request body. A VOD edit (`PATCH /admin/vods/{id}`, `PUT …/games`) and a settings change store `{before, after}` instead: the fields or settings it changed, or the rows. A login password is never stored.
 
 ---
 
@@ -594,7 +613,7 @@ Pushes and pull requests run CI (`.github/workflows/tests.yml`): the unit tests 
 packages/common/archive_common/   settings, DB models, Twitch Helix/GQL clients, http helper
 services/api/archive_api/         FastAPI app, Feathers query parser, serializers, comments port
 services/worker/archive_worker/   monitor, job runner, steps/, hls, ffmpeg, youtube, admin API
-migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before, 0003 manual step control, … 0007 VOD merges and splits, 0008 bot chat, 0009 admin sessions, 0010 hidden VODs)
+migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before, 0003 manual step control, … 0007 VOD merges and splits, 0008 bot chat, 0009 admin sessions, 0010 hidden VODs, 0011 runtime settings)
 tests/api_contract/               golden responses from the legacy API + replay tests
 tests/worker/                     HLS parsing, planning, capture (respx), ffmpeg, DB-backed steps/runner
 deploy/                           roles.sql, example secrets
