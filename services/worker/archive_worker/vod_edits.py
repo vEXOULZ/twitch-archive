@@ -1,4 +1,5 @@
-"""Validation for hand edits of a VOD's chapters, YouTube and Drive lists (admin API).
+"""Validation for hand edits of a VOD (admin API): its fields (title, hidden, thumbnail,
+duration, date), chapters, YouTube and Drive lists, and games rows.
 
 Pure functions: each takes the request's list and returns what to store, or
 raises ValueError with a message fit for the response.
@@ -6,10 +7,15 @@ raises ValueError with a message fit for the response.
 
 from __future__ import annotations
 
+import datetime as dt
 import math
+import re
+from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 
 from archive_common.serialize import box_art_image
+from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds
 
 from . import planning
 
@@ -143,4 +149,123 @@ def drive(items: Any) -> list[dict[str, str]]:
             raise ValueError(f"{where}: file {file_id} is listed twice")
         seen.add(file_id)
         out.append({"id": file_id, "type": typ})
+    return out
+
+
+# ── VOD fields (PATCH /admin/vods/{id}) ──────────────────────────────────
+
+# Request key -> vods column. A merged VOD takes only MERGED_EDITABLE (its content is the other VOD's now).
+FIELDS = {"title": "title", "hidden": "hidden", "thumbnailUrl": "thumbnail_url", "duration": "duration",
+          "createdAt": "created_at"}
+MERGED_EDITABLE = {"hidden"}
+_HHMMSS = re.compile(r"^(\d{1,3}):([0-5]\d):([0-5]\d)$")
+
+
+def http_url(value: Any, where: str) -> str | None:
+    """An http(s) URL, or None for null / empty."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{where} must be a URL or null")
+    parts = urlsplit(value.strip())
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError(f"{where} must be an http(s) URL or null")
+    return value.strip()
+
+
+def duration(value: Any) -> str:
+    """``HH:MM:SS`` (hours may run past 99), stored zero-padded."""
+    match = _HHMMSS.match(value) if isinstance(value, str) else None
+    if match is None:
+        raise ValueError("duration must be HH:MM:SS")
+    return format_hhmmss(hhmmss_to_seconds(value))
+
+
+def created_at(value: Any) -> dt.datetime:
+    """An ISO 8601 date and time with its offset (``Z`` or ``+hh:mm``)."""
+    try:
+        when = dt.datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        when = None
+    if when is None or when.tzinfo is None:
+        raise ValueError("createdAt must be an ISO date and time with an offset, e.g. 2026-09-30T18:00:00Z")
+    return when.astimezone(dt.timezone.utc)
+
+
+def vod_fields(body: dict) -> dict[str, Any]:
+    """PATCH body -> the vods columns to set. Unknown keys are refused."""
+    unknown = sorted(set(body) - FIELDS.keys())
+    if unknown:
+        raise ValueError(f"unknown field(s) {', '.join(unknown)}; these can be changed: {', '.join(FIELDS)}")
+    out: dict[str, Any] = {}
+    if "title" in body:
+        if not isinstance(body["title"], str) or not body["title"].strip():
+            raise ValueError("title must be a non-empty string")
+        out["title"] = body["title"].strip()
+    if "hidden" in body:
+        if not isinstance(body["hidden"], bool):
+            raise ValueError("hidden must be true or false")
+        out["hidden"] = body["hidden"]
+    if "thumbnailUrl" in body:
+        out["thumbnail_url"] = http_url(body["thumbnailUrl"], "thumbnailUrl")
+    if "duration" in body:
+        out["duration"] = duration(body["duration"])
+    if "createdAt" in body:
+        out["created_at"] = created_at(body["createdAt"])
+    return out
+
+
+def content_end(chapters: Any) -> float:
+    """Where the last chapter ends, in seconds (``end`` holds each chapter's length)."""
+    ends = [c["start"] + c["end"] for c in chapters or []
+            if isinstance(c, dict) and is_number(c.get("start")) and is_number(c.get("end"))]
+    return max(ends, default=0)
+
+
+# ── Games rows (PUT /admin/vods/{id}/games) ──────────────────────────────
+
+GAME_TEXT = ("game_id", "game_name", "title", "video_provider", "video_id")
+GAME_URLS = ("thumbnail_url", "chapter_image")
+GAME_READ_ONLY = {"id", "vodId", "createdAt", "updatedAt"}  # as GET returns them; ignored
+
+
+def _seconds(value: Any, where: str) -> float:
+    """A number of seconds; the numeric strings GET returns are taken too."""
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            pass
+    if not is_number(value) or value < 0:
+        raise ValueError(f"{where} must be a number of seconds >= 0")
+    return value
+
+
+def games(items: Any, vod_duration: float) -> list[dict[str, Any]]:
+    """Admin games rows (the shape GET /games renders) -> column values, sorted by start, no
+    overlaps, each inside ``vod_duration`` seconds (unchecked when that is 0/unknown)."""
+    out: list[dict[str, Any]] = []
+    prev_start = prev_end = None
+    for i, item in enumerate(_list(items, "games")):
+        where = f"games[{i}]"
+        row = _object(item, where, {"start_time", "end_time", "game_name"},
+                      {*GAME_TEXT, *GAME_URLS} | GAME_READ_ONLY)
+        start, end = _seconds(row["start_time"], f"{where}.start_time"), _seconds(row["end_time"], f"{where}.end_time")
+        if end <= start:
+            raise ValueError(f"{where} must end after it starts")
+        if prev_start is not None and start < prev_start:
+            raise ValueError(f"{where} starts before games[{i - 1}]; sort games by start_time")
+        if prev_end is not None and start < prev_end - OVERLAP_SLACK:
+            raise ValueError(f"{where} starts at {start:g}s, inside games[{i - 1}] (which ends at {prev_end:g}s)")
+        if vod_duration > 0 and end > vod_duration + DURATION_SLACK:
+            raise ValueError(f"{where} ends at {end:g}s, after the end of the VOD ({vod_duration:g}s)")
+        if not (_optional_str(row, "game_name", where) or "").strip():
+            raise ValueError(f"{where}.game_name must be a non-empty string")
+        prev_start, prev_end = start, end
+        out.append({
+            "start_time": Decimal(str(planning.num_seconds(start))),
+            "end_time": Decimal(str(planning.num_seconds(end))),
+            **{k: _optional_str(row, k, where) for k in GAME_TEXT},
+            **{k: http_url(row.get(k), f"{where}.{k}") for k in GAME_URLS},
+        })
     return out

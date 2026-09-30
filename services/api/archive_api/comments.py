@@ -49,6 +49,7 @@ PAGE = 200
 EMPTY: dict[str, Any] = {"comments": []}
 BOT_SHARE = 0.9  # ``auto`` serves the bot's chat once it has this share of the replay's rows
 _lt, _bt, _vt = Log.__table__, BotLog.__table__, Vod.__table__
+HIDDEN = "Vod not found"  # a hidden VOD's chat answers like a missing page
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,8 @@ class Comments:
                     vod = await self._vod(conn, vod_id)
                     if vod is None:
                         raise LegacyError(500, f"Failed to retrieve vod {vod_id}")
+                    if vod.hidden:
+                        raise LegacyError(404, HIDDEN)
                     if vod.merged_into is not None:
                         return EMPTY
                     result = await self._offset_search(conn, src, vod_id, seconds, vod.createdAt)
@@ -179,8 +182,11 @@ class Comments:
                 raise LegacyError(500, "Failed to parse cursor")
             src = SOURCES.get(cursor_json.get("src"), REPLAY)
             async with engine.connect() as conn:
+                vod = await self._vod(conn, vod_id)
+                if vod is not None and vod.hidden:
+                    raise LegacyError(404, HIDDEN)
                 result = await self._cursor_search(conn, src, vod_id, cursor_json)
-                if result is None and (vod := await self._vod(conn, vod_id)) and vod.merged_into is not None:
+                if result is None and vod is not None and vod.merged_into is not None:
                     return EMPTY
             if result is None:
                 raise LegacyError(500, f"Failed to retrieve comments from cursor {cursor}")
@@ -205,7 +211,9 @@ class Comments:
         return counts
 
     async def _vod(self, conn: AsyncConnection, vod_id: str) -> Row | None:
-        return (await conn.execute(select(_vt.c.createdAt, _vt.c.merged_into).where(_vt.c.id == vod_id))).first()
+        return (await conn.execute(
+            select(_vt.c.createdAt, _vt.c.merged_into, _vt.c.hidden).where(_vt.c.id == vod_id)
+        )).first()
 
     async def _rows(self, conn: AsyncConnection, src: _Source, *where) -> list[dict]:
         stmt = (

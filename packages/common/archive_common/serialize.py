@@ -20,7 +20,7 @@ from functools import cached_property
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Column, Table, select
+from sqlalchemy import Column, Table, exists, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.models import BotLog, Emote, Game, Log, Stream, Vod
@@ -166,6 +166,16 @@ VODS = Resource(
 def not_merged_away() -> Any:
     """VODs that were not merged into another one (lists and search leave those out)."""
     return _vt.c.merged_into.is_(None)
+
+
+def not_hidden() -> Any:
+    """VODs the public API shows at all: a hidden one answers like a missing one."""
+    return _vt.c.hidden.is_(False)
+
+
+def of_shown_vod(vod_id: Any) -> Any:
+    """Rows (games, emotes) whose ``vod_id`` is not a hidden VOD's."""
+    return ~exists().where(_vt.c.id == vod_id, _vt.c.hidden.is_(True))
 
 
 GAMES = Resource(

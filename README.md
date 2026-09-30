@@ -399,13 +399,18 @@ curl -s "${H[@]}" "$A/admin/health"                     # worker, api, youtube t
 curl -s "${H[@]}" "$A/admin/jobs?before=120&limit=50"   # older jobs: ids below 120
 curl -s "${H[@]}" -X PATCH "$A/admin/jobs/42" -d '{"pauseBefore":["upload"],"pauseNext":false}'
 curl -s "${H[@]}" "$A/admin/jobs/42/events?after=0&limit=200"   # log lines, step changes, progress; poll with after=<next>
-curl -s "${H[@]}" "$A/admin/vods/123"                   # as GET /vods/123, plus chaptersLocked, botChat, recent jobs, splices
-curl -s "${H[@]}" -X PATCH "$A/admin/vods/123" -d '{"title":"..."}'
+curl -s "${H[@]}" "$A/admin/vods?q=title&hidden=true&limit=50"   # every VOD (hidden, merged too); page with before=<next>
+curl -s "${H[@]}" "$A/admin/vods/123"                   # as GET /vods/123, plus hidden, chaptersLocked, botChat, recent jobs, splices
+curl -s "${H[@]}" -X PATCH "$A/admin/vods/123" -d '{"title":"...","hidden":true}'
+curl -s "${H[@]}" -X PATCH "$A/admin/vods/123" -d '{"thumbnailUrl":null,"duration":"05:12:00","createdAt":"2026-09-30T18:00:00Z"}'
 curl -s "${H[@]}" -X PUT "$A/admin/vods/123/chapters" \
   -d '{"locked":true,"chapters":[{"name":"Just Chatting","gameId":"509658","imageTemplate":"https://.../509658-{width}x{height}.jpg","start":0,"length":3600,"restricted":false}]}'
 curl -s "${H[@]}" -X PUT "$A/admin/vods/123/youtube" -d '{"youtube":[{"id":"abc","type":"vod","part":1}]}'
 curl -s "${H[@]}" -X PUT "$A/admin/vods/123/drive" -d '{"drive":[{"id":"...","type":"live"}]}'
 curl -s "${H[@]}" "$A/admin/vods/123/emotes"            # the saved emotes row, or null
+curl -s "${H[@]}" "$A/admin/vods/123/games"             # the games rows, as GET /games renders them
+curl -s "${H[@]}" -X PUT "$A/admin/vods/123/games" \
+  -d '{"games":[{"start_time":0,"end_time":3600,"game_id":"512953","game_name":"Elden Ring","video_provider":"youtube","video_id":"abc"}]}'
 curl -s "${H[@]}" "$A/admin/twitch/games?query=chat"    # Twitch categories: gameId, name, imageTemplate
 curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 ```
@@ -414,8 +419,11 @@ curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 - **Job events** keep about the last 1000 entries per job. `capture`, `split` and `upload` add `progress` (`{"done", "total", "unit"}`, unit `parts`, `bytes` or `percent`).
 - **Chapters** must be sorted, must not overlap, must have `length > 0` and must end inside the VOD. They are stored in the legacy shape, with `image` filled in at 40x53 for older readers. `"locked": true` makes the automatic `chapters` step skip the VOD. `POST /admin/chapters` with `{"force": true}` (or a job payload with `"force": true`) overrides the lock.
 - **YouTube entries** keep their stored thumbnail, and keep their duration unless you send a new one.
+- **The VOD list** (`GET /admin/vods`) has every VOD, hidden and merged ones included, newest first: `{data, next}`, each row `{id, title, createdAt, duration, duration_seconds, thumbnail_url, stream_id, hidden, merged_into}`. `q` matches the id exactly or the title (case-insensitive substring), `hidden=true|false` filters, `limit` is at most 200, and `before=<next>` pages back.
+- **VOD fields** (`PATCH /admin/vods/{id}`): any of `title`, `hidden`, `thumbnailUrl` (an http(s) URL, or `null` for the site's default), `duration` (`HH:MM:SS`; it must still hold the chapters and games rows) and `createdAt` (ISO with an offset). A merged VOD takes only `hidden`. **Hidden** takes the VOD off the public API as if it were missing (see [§6](#6-public-api-reference)); the dashboard still has it, and unhiding brings it back.
+- **Games rows** (`PUT /admin/vods/{id}/games`) replace the VOD's rows. Send them in the shape `GET` returns (`id`, `vodId` and the dates are ignored): `start_time` and `end_time` in seconds, sorted, not overlapping and inside the VOD, a `game_name`, and optionally `game_id`, `title`, `video_provider`, `video_id`, and `thumbnail_url` and `chapter_image` (http(s) URLs). Refused on a merged VOD.
 - **Edits show up on the public API at once:** the worker sends a Postgres `NOTIFY`, and archive-api drops its cached responses for that VOD and for the lists that include it.
-- **Audit log:** every state-changing admin request that succeeds is stored as `{at, actor, actorLogin, action, target, detail}`. `actor` is `password`, `api-key` or `twitch:<id>`, `actorLogin` is the Twitch login behind a `twitch:<id>` (otherwise `null`), `action` is the method and route, and `detail` is the request body. A login password is never stored.
+- **Audit log:** every state-changing admin request that succeeds is stored as `{at, actor, actorLogin, action, target, detail}`. `actor` is `password`, `api-key` or `twitch:<id>`, `actorLogin` is the Twitch login behind a `twitch:<id>` (otherwise `null`), `action` is the method and route, and `detail` is the request body. A VOD edit (`PATCH /admin/vods/{id}`, `PUT …/games`) stores `{before, after}` instead: the fields it changed, or the rows. A login password is never stored.
 
 ---
 
@@ -481,6 +489,7 @@ This is what the frontend uses. The output is compatible with the old Feathers A
 | `chapters[].kind` | `"gap"` on the cut a merge puts between two VODs of one broadcast (named `Technical difficulties`, `restricted: true`); absent on every other chapter. `/v1/games-played` leaves gap chapters out. |
 | `/v1/vods/:id/comments?source=` | `auto` (the default): doomtp-bot's chat (`bot_logs`) when the VOD has it, at least 90% as many rows as the replay, otherwise the Twitch replay (`logs`). `replay` or `bot` force one. A bot page's `cursor` stays on the bot's chat. Every comment has `source` (`"bot"` or `"replay"`). Bot comments also have `kind` (`message` or `notice`: subs, gifts, raids, redemptions…), `user_id`, `user_login`, `message_type`, `deleted_at` and `cleared_at` (removed by a moderator; only with a bot key), and `bot`, the bot's entry (reward, bits, reply parent, mentions, notice details). `message`, `user_badges` and `user_color` have the replay's shape. An offset page (`?content_offset_seconds=`) also has `sources: {"replay": n, "bot": n}`, the chat rows each has for the VOD, so a site can offer only the ones that exist. Asked for by name, a chat the VOD has no rows of answers an empty page (with `sources`) instead of the error. ||
 | `merged_into` | `{id, offset}` on a VOD merged into another one; absent otherwise. Send old links to `/vods/<id>?t=<offset + t>`. `/vods` lists and search leave these VODs out unless the query has `$merged=true`; `GET /vods/:id` still answers. Their `/v1/vods/:id/comments` is an empty page (`{"comments": []}`): the rows are the other VOD's now. `/v1/games-played` and `/v1/status` leave them out too. |
+| hidden VODs | A VOD hidden from the admin dashboard answers like a missing one: `/vods` and `/games` lists leave it and its rows out (even with `$merged=true`), `GET /vods/:id`, `/games/:id` and `/emotes/:id` are 404, its `/v1/vods/:id/comments` is a 404, and `/v1/games-played` and `/v1/status` leave it out. |
 
 **Query syntax (Feathers):** `$limit`, `$skip`, `$sort[field]=1|-1` and `$select[]=field`. Field filters accept `$ne`, `$in`, `$nin`, `$lt`, `$lte`, `$gt`, `$gte`, `$like`, `$notLike`, `$iLike` and `$notILike`, and can be combined with `$or`/`$and`. `chapters[name]=text` does a case-insensitive substring match on chapter names. `chapters[name][$eq]=text` matches a chapter name exactly (case-sensitive), `chapters[gameId]=id` matches a chapter's gameId exactly, and `chapters[gameId]=null` finds VODs with an uncategorised chapter (the `No category` entry of `/v1/games-played`). Each matches when any chapter matches; several combine with AND. Unknown fields and filters on JSON columns return 400. POST, PUT, PATCH and DELETE return 405.
 
@@ -585,7 +594,7 @@ Pushes and pull requests run CI (`.github/workflows/tests.yml`): the unit tests 
 packages/common/archive_common/   settings, DB models, Twitch Helix/GQL clients, http helper
 services/api/archive_api/         FastAPI app, Feathers query parser, serializers, comments port
 services/worker/archive_worker/   monitor, job runner, steps/, hls, ffmpeg, youtube, admin API
-migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before, 0003 manual step control, … 0007 VOD merges and splits)
+migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before, 0003 manual step control, … 0007 VOD merges and splits, 0008 bot chat, 0009 admin sessions, 0010 hidden VODs)
 tests/api_contract/               golden responses from the legacy API + replay tests
 tests/worker/                     HLS parsing, planning, capture (respx), ffmpeg, DB-backed steps/runner
 deploy/                           roles.sql, example secrets
