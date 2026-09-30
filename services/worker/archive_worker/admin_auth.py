@@ -1,11 +1,13 @@
 """Browser login for the admin API (same approach as doomtp-bot's web UI).
 
 One admin password (``ARCHIVE_ADMIN_PASSWORD``), hashed with scrypt at startup
-and compared in constant time. Sessions live in memory: this is one process, and
-a restart logging the dashboard out is the right default for a LAN tool. Without
-a password, password login is off and only the API key works. A session can also
-come from Twitch sign-in (see admin_signin); it then carries the Twitch user and
-the vexoulz-auth session id it depends on.
+and compared in constant time. Without a password, password login is off and only
+the API key works. A session can also come from Twitch sign-in (see admin_signin);
+it then carries the Twitch user and the vexoulz-auth session id it depends on.
+
+Sessions are kept in a ``SessionStore``: the ``admin_sessions`` table in the worker
+(``DbSessionStore``, so a restart doesn't sign the dashboard out), or memory in tests.
+Only the sha256 of a session's token is stored; the token itself is only in the cookie.
 
 A session is an ``HttpOnly; Secure; SameSite=Strict`` cookie. Requests that
 change state must also send the session's CSRF token in ``X-CSRF-Token``.
@@ -13,6 +15,7 @@ change state must also send the session's CSRF token in ``X-CSRF-Token``.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import hmac
 import ipaddress
@@ -21,9 +24,12 @@ import secrets
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Protocol
 
+from archive_common.db import get_sessionmaker
+from archive_common.models import AdminSession
+from sqlalchemy import delete, update
 from starlette.requests import Request
 
 SESSION_COOKIE = "archive_admin"
@@ -48,16 +54,99 @@ class Session:
     checked_at: float = 0.0  # when sid was last confirmed signed in
 
 
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+class SessionStore(Protocol):
+    """Where sessions are kept, by token hash. ``get`` returns the session with an empty ``token``."""
+
+    async def add(self, key: str, session: Session) -> None: ...
+
+    async def get(self, key: str) -> Session | None: ...
+
+    async def remove(self, key: str) -> None: ...
+
+    async def checked(self, key: str, at: float) -> None: ...
+
+    async def sweep(self, now: float) -> None:
+        """Drop the sessions that have expired by ``now``."""
+        ...
+
+
+class MemorySessionStore:
+    """Sessions in this process only (tests; a restart signs everyone out)."""
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, Session] = {}
+
+    async def add(self, key: str, session: Session) -> None:
+        self._sessions[key] = replace(session, token="")
+
+    async def get(self, key: str) -> Session | None:
+        session = self._sessions.get(key)
+        return replace(session) if session else None
+
+    async def remove(self, key: str) -> None:
+        self._sessions.pop(key, None)
+
+    async def checked(self, key: str, at: float) -> None:
+        if key in self._sessions:
+            self._sessions[key].checked_at = at
+
+    async def sweep(self, now: float) -> None:
+        for key in [k for k, s in self._sessions.items() if s.expires_at <= now]:
+            del self._sessions[key]
+
+
+def _utc(ts: float) -> dt.datetime:
+    return dt.datetime.fromtimestamp(ts, dt.timezone.utc)
+
+
+class DbSessionStore:
+    """Sessions in ``admin_sessions`` (Alembic 0009), so they outlast a restart."""
+
+    async def add(self, key: str, session: Session) -> None:
+        async with get_sessionmaker()() as s:
+            s.add(AdminSession(token_hash=key, csrf=session.csrf, actor=session.actor, twitch_user=session.user,
+                               sid=session.sid, expires_at=_utc(session.expires_at),
+                               checked_at=_utc(session.checked_at)))
+            await s.commit()
+
+    async def get(self, key: str) -> Session | None:
+        async with get_sessionmaker()() as s:
+            row = await s.get(AdminSession, key)
+        if row is None:
+            return None
+        return Session("", row.csrf, row.expires_at.timestamp(), row.actor, row.twitch_user, row.sid,
+                       row.checked_at.timestamp())
+
+    async def remove(self, key: str) -> None:
+        async with get_sessionmaker()() as s:
+            await s.execute(delete(AdminSession).where(AdminSession.token_hash == key))
+            await s.commit()
+
+    async def checked(self, key: str, at: float) -> None:
+        async with get_sessionmaker()() as s:
+            await s.execute(update(AdminSession).where(AdminSession.token_hash == key).values(checked_at=_utc(at)))
+            await s.commit()
+
+    async def sweep(self, now: float) -> None:
+        async with get_sessionmaker()() as s:
+            await s.execute(delete(AdminSession).where(AdminSession.expires_at <= _utc(now)))
+            await s.commit()
+
+
 class AdminAuth:
     """Password check plus session bookkeeping. ``enabled`` is False when no password is configured.
-    Only the scrypt hash of the password is kept."""
+    Only the scrypt hash of the password is kept. Sessions go to ``store`` (memory by default)."""
 
     def __init__(self, password: str | None = None, ttl_s: float = SESSION_TTL_S,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, store: SessionStore | None = None) -> None:
         self.ttl_s = ttl_s
         self.clock = clock
         self._salt, self._digest = hash_password(password) if password else (b"", b"")
-        self._sessions: dict[str, Session] = {}
+        self.store: SessionStore = store or MemorySessionStore()
 
     @property
     def enabled(self) -> bool:
@@ -69,29 +158,36 @@ class AdminAuth:
         _, digest = hash_password(attempt, self._salt)
         return hmac.compare_digest(digest, self._digest)
 
-    def login(self, actor: str = "password", user: dict[str, Any] | None = None, sid: str | None = None) -> Session:
+    async def login(self, actor: str = "password", user: dict[str, Any] | None = None,
+                    sid: str | None = None) -> Session:
         now = self.clock()
-        for token in [t for t, s in self._sessions.items() if s.expires_at <= now]:
-            del self._sessions[token]
+        await self.store.sweep(now)
         session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), now + self.ttl_s,
                           actor, user, sid, now)
-        self._sessions[session.token] = session
+        await self.store.add(token_hash(session.token), session)
         return session
 
-    def session(self, token: str | None) -> Session | None:
+    async def session(self, token: str | None) -> Session | None:
         if not token:
             return None
-        session = self._sessions.get(token)
+        key = token_hash(token)
+        session = await self.store.get(key)
         if session is None:
             return None
         if self.clock() >= session.expires_at:
-            self._sessions.pop(token, None)
+            await self.store.remove(key)
             return None
+        session.token = token
         return session
 
-    def logout(self, token: str | None) -> None:
+    async def checked(self, session: Session, at: float) -> None:
+        """Note that the session's vexoulz-auth sign-in was confirmed at ``at``."""
+        session.checked_at = at
+        await self.store.checked(token_hash(session.token), at)
+
+    async def logout(self, token: str | None) -> None:
         if token:
-            self._sessions.pop(token, None)
+            await self.store.remove(token_hash(token))
 
     @staticmethod
     def valid_csrf(session: Session, csrf: str | None) -> bool:

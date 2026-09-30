@@ -38,6 +38,7 @@ from .admin_auth import (
     AdminAuth,
     LoginLimiter,
     Session,
+    SessionStore,
     client_address,
     parse_networks,
     parse_password_networks,
@@ -54,6 +55,7 @@ from .admin_signin import (
     SignInError,
     VexoulzAuth,
     safe_next,
+    with_admin,
 )
 from .context import Deps
 from .events import event_json, iso_utc
@@ -126,9 +128,14 @@ def _states(value: str) -> list[str]:
     return out
 
 
+def login_of(session: Session) -> str | None:
+    """The Twitch login behind a session, for the audit log (None for the password)."""
+    return (session.user or {}).get("login") or None
+
+
 def _audit_json(row: AdminAudit) -> dict:
-    return {"id": row.id, "at": iso_utc(row.at), "actor": row.actor, "action": row.action,
-            "target": row.target, "detail": row.detail}
+    return {"id": row.id, "at": iso_utc(row.at), "actor": row.actor, "actorLogin": row.actor_login,
+            "action": row.action, "target": row.target, "detail": row.detail}
 
 
 def _job_json(job: Job) -> dict:
@@ -150,8 +157,10 @@ def _job_json(job: Job) -> dict:
     }
 
 
-def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None = None) -> FastAPI:
-    """``signin``: the vexoulz-auth client; by default built from the settings (None when not configured)."""
+def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None = None,
+                     sessions: SessionStore | None = None) -> FastAPI:
+    """``signin``: the vexoulz-auth client; by default built from the settings (None when not configured).
+    ``sessions``: where dashboard sessions are kept; the worker passes the database's, tests leave memory."""
     settings = deps.settings
     helix = deps.helix
     app = FastAPI(title="archive-worker admin", docs_url=None, redoc_url=None, openapi_url=None)
@@ -178,7 +187,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
 
     # ── Auth: API key or session cookie ───────────────────────────────────
 
-    passwords = AdminAuth(settings.admin_password.get_secret_value() or None)
+    passwords = AdminAuth(settings.admin_password.get_secret_value() or None, store=sessions)
     login_limiter = LoginLimiter()
     trusted_proxies = parse_networks(settings.admin_trusted_proxies)
     password_networks = parse_password_networks(settings.admin_password_networks)
@@ -195,7 +204,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     async def live_session(token: str | None) -> Session | None:
         """The cookie's session, unless it has expired or its vexoulz-auth session was signed out.
         If vexoulz-auth can't be reached, the session stands and is checked again next time."""
-        session = passwords.session(token)
+        session = await passwords.session(token)
         if session is None or session.sid is None or signin is None:
             return session
         now = passwords.clock()
@@ -207,9 +216,9 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             log.warning("could not check the admin sign-in: %s", exc)
             return session
         if not active:
-            passwords.logout(token)
+            await passwords.logout(token)
             return None
-        session.checked_at = now
+        await passwords.checked(session, now)
         return session
 
     async def verify(request: Request) -> None:
@@ -231,6 +240,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         if request.method not in SAFE_METHODS and not passwords.valid_csrf(session, request.headers.get(CSRF_HEADER)):
             raise AdminError(403, "Missing or wrong X-CSRF-Token")
         request.state.actor = session.actor
+        request.state.actor_login = login_of(session)
 
     auth = [Depends(verify)]
 
@@ -245,12 +255,12 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         actor = getattr(request.state, "actor", None)  # set once the request is authenticated
         if actor and response.status_code < 400:
             try:
-                await audit(request, actor, body)
+                await audit(request, actor, body, getattr(request.state, "actor_login", None))
             except Exception:
                 log.exception("could not write the audit log for %s %s", request.method, request.url.path)
         return response
 
-    async def audit(request: Request, actor: str, raw: bytes) -> None:
+    async def audit(request: Request, actor: str, raw: bytes, actor_login: str | None = None) -> None:
         route = request.scope.get("route")
         params = request.scope.get("path_params") or {}
         try:
@@ -268,6 +278,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             target = f"vod:{body['vodId']}"
         await execute(insert(AdminAudit).values(
             actor=actor,
+            actor_login=actor_login,
             action=f"{request.method} {getattr(route, 'path', request.url.path)}",
             target=target,
             detail=body,
@@ -311,8 +322,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             log.warning("failed admin login from %s", address)
             raise AdminError(401, "Wrong password")
         login_limiter.reset(address)
-        passwords.logout(request.cookies.get(SESSION_COOKIE))
-        session = passwords.login()
+        await passwords.logout(request.cookies.get(SESSION_COOKIE))
+        session = await passwords.login()
         request.state.actor = "password"
         response = JSONResponse(session_json(request, session))
         response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **session_cookie_args(request))
@@ -324,10 +335,10 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     # it is set here and only read by the dashboard's own requests.
 
     @app.get("/admin/signin")
-    async def signin_start(next: str | None = None) -> Response:
+    async def signin_start(next: str | None = None, quiet: bool = False) -> Response:
         if signin is None:
             raise AdminError(404, "Twitch sign-in is off (see ARCHIVE_ADMIN_AUTH_* in the README)")
-        state = pending.start(safe_next(next))
+        state = pending.start(safe_next(next), quiet)
         response = RedirectResponse(signin.authorize_url(state), status_code=302)
         response.set_cookie(STATE_COOKIE, state, max_age=STATE_TTL_S, **STATE_COOKIE_ARGS)
         return response
@@ -338,48 +349,56 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         if signin is None:
             raise AdminError(404, "Twitch sign-in is off (see ARCHIVE_ADMIN_AUTH_* in the README)")
         cookie = request.cookies.get(STATE_COOKIE) or ""
-        next_path = pending.finish(state)
+        started = pending.finish(state)
         # The state must be one this worker handed out, to this browser.
-        if next_path is None or not secrets.compare_digest(cookie.encode(), (state or "").encode()):
+        if started is None or not secrets.compare_digest(cookie.encode(), (state or "").encode()):
             return signin_failed("expired", "/admin")
+        next_path, quiet = started.next, started.quiet
         if error or not code:
-            return signin_failed(error if error in ERRORS else "twitch", next_path)
+            return signin_failed(error if error in ERRORS else "twitch", next_path, quiet)
         try:
             signed_in = await signin.redeem(code)
         except SignInError as exc:
             log.warning("admin sign-in failed (%s): %s", exc.reason, exc)
-            return signin_failed(exc.reason, next_path)
+            return signin_failed(exc.reason, next_path, quiet)
         user_id = str(signed_in.user.get("id", ""))
         if user_id not in twitch_ids:
-            log.warning("admin sign-in refused for twitch:%s (%s)", user_id, signed_in.user.get("login"))
-            return signin_failed("not_allowed", next_path)
-        passwords.logout(request.cookies.get(SESSION_COOKIE))
-        session = passwords.login(f"twitch:{user_id}", signed_in.user, signed_in.sid)
+            # A quiet check is every signed-in viewer's first visit: not worth a warning.
+            (log.info if quiet else log.warning)(
+                "admin sign-in refused for twitch:%s (%s)", user_id, signed_in.user.get("login"))
+            return signin_failed("not_allowed", next_path, quiet)
+        await passwords.logout(request.cookies.get(SESSION_COOKIE))
+        session = await passwords.login(f"twitch:{user_id}", signed_in.user, signed_in.sid)
         try:
-            await audit(request, session.actor, b"")
+            await audit(request, session.actor, b"", login_of(session))
         except Exception:
             log.exception("could not write the audit log for a sign-in")
-        response = RedirectResponse(next_path, status_code=302)
+        response = RedirectResponse(with_admin(next_path, True) if quiet else next_path, status_code=302)
         response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **SESSION_COOKIE_ARGS)
         response.delete_cookie(STATE_COOKIE, **STATE_COOKIE_ARGS)
         return response
 
-    def signin_failed(reason: str, next_path: str) -> Response:
-        """Back to the dashboard's login page, which explains ``auth_error``."""
-        query = urlencode({"auth_error": reason, "next": next_path})
-        response = RedirectResponse(f"/admin/login?{query}", status_code=302)
+    def signin_failed(reason: str, next_path: str, quiet: bool = False) -> Response:
+        """Back to the dashboard's login page, which explains ``auth_error``; a quiet sign-in goes back to
+        ``next`` with ``admin=0`` instead."""
+        if quiet:
+            target = with_admin(next_path, False)
+        else:
+            target = f"/admin/login?{urlencode({'auth_error': reason, 'next': next_path})}"
+        response = RedirectResponse(target, status_code=302)
         response.delete_cookie(STATE_COOKIE, **STATE_COOKIE_ARGS)
         return response
 
     @app.delete("/admin/session", status_code=204)
     async def logout(request: Request) -> Response:
         token = request.cookies.get(SESSION_COOKIE)
-        session = passwords.session(token)
+        session = await passwords.session(token)
         if session is not None:
             if not passwords.valid_csrf(session, request.headers.get(CSRF_HEADER)):
                 raise AdminError(403, "Missing or wrong X-CSRF-Token")
-            passwords.logout(token)
+            await passwords.logout(token)
             request.state.actor = session.actor
+            request.state.actor_login = login_of(session)
         response = Response(status_code=204)
         response.delete_cookie(SESSION_COOKIE, **session_cookie_args(request))
         return response

@@ -264,7 +264,23 @@ class AdminAudit(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
-    actor: Mapped[str] = mapped_column(Text, nullable=False)  # password | api-key
+    actor: Mapped[str] = mapped_column(Text, nullable=False)  # password | api-key | twitch:<id>
+    actor_login: Mapped[str | None] = mapped_column(Text)  # the Twitch login behind twitch:<id> (Alembic 0009)
     action: Mapped[str] = mapped_column(Text, nullable=False)  # "<METHOD> <route>"
     target: Mapped[str | None] = mapped_column(Text)  # "vod:<id>" | "job:<id>"
     detail: Mapped[Any] = mapped_column(JSONB(none_as_null=True))
+
+
+class AdminSession(Base):
+    """A signed-in dashboard browser (Alembic 0009). Keyed by the sha256 of the cookie's token."""
+
+    __tablename__ = "admin_sessions"
+
+    token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    csrf: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)  # password | twitch:<id>
+    twitch_user: Mapped[Any] = mapped_column(JSONB(none_as_null=True))
+    sid: Mapped[str | None] = mapped_column(Text)  # the vexoulz-auth session behind a Twitch sign-in
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    checked_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

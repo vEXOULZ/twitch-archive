@@ -23,6 +23,7 @@ from archive_common.twitch.helix import Helix
 
 from . import jobs, youtube
 from .admin import create_admin_app
+from .admin_auth import DbSessionStore
 from .context import Deps
 from .events import JobEvents
 from .monitor import Monitor
@@ -41,7 +42,7 @@ async def serve(dry_run: bool = False) -> None:
     monitor = Monitor(deps.helix, runner)
     admin = uvicorn.Server(
         uvicorn.Config(
-            create_admin_app(deps, runner),
+            create_admin_app(deps, runner, sessions=DbSessionStore()),
             host=settings.admin_host,
             port=settings.admin_port,
             log_level=settings.log_level.lower(),
