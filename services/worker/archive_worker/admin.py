@@ -684,12 +684,14 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             vod = await vod_json(await s.connection(), vod_id)
             if vod is None:
                 raise AdminError(404, "No Vod Data")
-            locked = (await s.execute(select(Vod.chapters_locked).where(Vod.id == vod_id))).scalar_one()
+            locked, bot_chat = (await s.execute(
+                select(Vod.chapters_locked, Vod.bot_chat).where(Vod.id == vod_id)
+            )).one()
             recent = (await s.execute(
                 select(Job).where(Job.vod_id == vod_id).order_by(Job.id.desc()).limit(RECENT_JOBS)
             )).scalars()
             recent = [_job_json(j) for j in recent]
-        return {**vod, "chaptersLocked": locked, "jobs": recent, "splices": await splices.active_splices(vod_id)}
+        return {**vod, "chaptersLocked": locked, "botChat": bot_chat, "jobs": recent, "splices": await splices.active_splices(vod_id)}
 
     def edited(parse, *args) -> Any:
         try:
