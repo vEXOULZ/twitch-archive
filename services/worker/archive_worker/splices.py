@@ -2,8 +2,8 @@
 
 Each operation is one transaction with the VOD rows locked, and moves rows rather than
 fetching anything again: chapters, uploads and drive entries (see ``timeline`` for the
-numbers), ``games`` rows, emotes, and chat rows re-keyed with their offsets shifted by a
-whole number of seconds, so every comment keeps its place against the video.
+numbers), ``games`` rows, emotes, and chat rows (``logs`` and ``bot_logs``) re-keyed with
+their offsets shifted by a whole number of seconds, so every comment keeps its place against the video.
 
 A ``vod_splices`` row records what it did and what the rows were before, so it can be
 undone; only the latest splice touching either VOD can be (undo them in reverse order).
@@ -21,7 +21,7 @@ from sqlalchemy import delete, func, insert, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from archive_common.db import get_sessionmaker
-from archive_common.models import Emote, Game, Job, Log, Vod, VodSplice, VodSpliceLog
+from archive_common.models import BotLog, Emote, Game, Job, Log, Vod, VodSplice, VodSpliceBotLog, VodSpliceLog
 from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds
 
 from . import timeline
@@ -29,10 +29,12 @@ from .events import iso_utc
 from .jobs import ACTIVE
 from .timeline import Plan, PlanError, Side
 from .vods import active_splices as _active_query
-from .vods import notify_rows_moved
+from .vods import notify_rows_moved, resequence_bot_logs
 
 # Rows of a VOD that a splice replaces, and restores on undo.
 FIELDS = ("title", "duration", "chapters", "youtube", "drive", "chapters_locked", "thumbnail_url")
+# Chat tables (replay, bot), each with the table recording which of its rows a merge moved.
+CHAT = ((Log, VodSpliceLog, VodSpliceLog.log_id), (BotLog, VodSpliceBotLog, VodSpliceBotLog.bot_log_id))
 # Fields an undo checks for edits made since (the rest only the splice writes).
 EDITABLE = ("title", "duration", "chapters", "youtube", "drive")
 EMOTE_COLUMNS = (*timeline.EMOTE_SETS, "global_emotes", "global_emotes_source", "global_emotes_at")
@@ -184,6 +186,17 @@ async def _set_emotes(s: AsyncSession, vod_id: str, row: Emote | None, values: d
             setattr(row, k, v)
 
 
+async def _move_chat(s: AsyncSession, to_id: str, by: int, where) -> list[int]:
+    """Re-key the chat rows ``where(model, member, member_id)`` selects to ``to_id``, their
+    offsets shifted by ``by``. Returns how many moved, per ``CHAT`` table."""
+    moved = []
+    for model, member, member_id in CHAT:
+        moved.append((await s.execute(update(model).where(*where(model, member, member_id)).values(
+            vod_id=to_id, content_offset_seconds=model.content_offset_seconds + by))).rowcount)
+    await resequence_bot_logs(s, to_id)
+    return moved
+
+
 async def _repoint(s: AsyncSession, from_id: str, to_id: str, by: float, *, at_least: float | None = None
                    ) -> dict[str, Any]:
     """VODs merged into ``from_id`` (at an offset >= ``at_least``) now point at ``to_id``, their
@@ -245,10 +258,10 @@ async def merge(target_id: str, source_id: str, gap: Any = None) -> dict[str, An
         splice = VodSplice(kind="merge", vod_id=a.id, other_id=b.id, offset_s=offset, detail={}, snapshot={})
         s.add(splice)
         await s.flush()
-        await s.execute(insert(VodSpliceLog).from_select(
-            ["splice_id", "log_id"], select(literal(splice.id), Log.id).where(Log.vod_id == b.id)))
-        comments = (await s.execute(update(Log).where(Log.vod_id == b.id).values(
-            vod_id=a.id, content_offset_seconds=Log.content_offset_seconds + offset))).rowcount
+        for model, member, member_id in CHAT:
+            await s.execute(insert(member).from_select(
+                ["splice_id", member_id.key], select(literal(splice.id), model.id).where(model.vod_id == b.id)))
+        comments, bot_comments = await _move_chat(s, a.id, offset, lambda m, *_: [m.vod_id == b.id])
         repointed = await _repoint(s, b.id, a.id, offset)
 
         _apply(a, plan)
@@ -261,6 +274,7 @@ async def merge(target_id: str, source_id: str, gap: Any = None) -> dict[str, An
             "computedGap": computed - side_a.duration,
             "gapOverridden": gap_override is not None,
             "movedComments": comments,
+            "movedBotComments": bot_comments,
             "movedGames": games,
             "repointed": sorted(repointed),
         }
@@ -299,9 +313,10 @@ async def _undo(s: AsyncSession, splice: VodSplice, force: bool) -> dict[str, An
 async def _unmerge_rows(s: AsyncSession, splice: VodSplice, a: Vod, b: Vod) -> None:
     offset = int(splice.offset_s)
     snap = splice.snapshot
-    await s.execute(update(Log).where(Log.id == VodSpliceLog.log_id, VodSpliceLog.splice_id == splice.id).values(
-        vod_id=b.id, content_offset_seconds=Log.content_offset_seconds - offset))
-    await s.execute(delete(VodSpliceLog).where(VodSpliceLog.splice_id == splice.id))
+    await _move_chat(s, b.id, -offset, lambda m, member, member_id: [m.id == member_id,
+                                                                     member.splice_id == splice.id])
+    for _, member, _ in CHAT:
+        await s.execute(delete(member).where(member.splice_id == splice.id))
     if snap["games"]:
         await s.execute(update(Game).where(Game.id.in_(snap["games"])).values(
             vod_id=b.id, start_time=Game.start_time - offset, end_time=Game.end_time - offset))
@@ -312,8 +327,7 @@ async def _unmerge_rows(s: AsyncSession, splice: VodSplice, a: Vod, b: Vod) -> N
 
 async def _unsplit_rows(s: AsyncSession, splice: VodSplice, a: Vod, new: Vod) -> None:
     cut = int(splice.offset_s)
-    await s.execute(update(Log).where(Log.vod_id == new.id).values(
-        vod_id=a.id, content_offset_seconds=Log.content_offset_seconds + cut))
+    await _move_chat(s, a.id, cut, lambda m, *_: [m.vod_id == new.id])
     await s.execute(update(Game).where(Game.vod_id == new.id).values(
         vod_id=a.id, start_time=Game.start_time + cut, end_time=Game.end_time + cut))
     await _set_emotes(s, new.id, await _emotes(s, new.id), None)
@@ -384,14 +398,15 @@ async def split(vod_id: str, at: Any, force: bool = False) -> dict[str, Any]:
         games = sorted((await s.execute(update(Game).where(Game.vod_id == a.id, Game.start_time >= cut).values(
             vod_id=new_id, start_time=Game.start_time - cut, end_time=Game.end_time - cut,
         ).returning(Game.id))).scalars())
-        comments = (await s.execute(update(Log).where(Log.vod_id == a.id, Log.content_offset_seconds >= cut).values(
-            vod_id=new_id, content_offset_seconds=Log.content_offset_seconds - cut))).rowcount
+        comments, bot_comments = await _move_chat(
+            s, new_id, -cut, lambda m, *_: [m.vod_id == a.id, m.content_offset_seconds >= cut])
         repointed = await _repoint(s, a.id, new_id, -cut, at_least=cut)
 
         _apply(a, first)
 
         splice = VodSplice(kind="split", vod_id=a.id, other_id=new_id, offset_s=cut, detail={
-            **first.detail, "movedComments": comments, "movedGames": games, "repointed": sorted(repointed),
+            **first.detail, "movedComments": comments, "movedBotComments": bot_comments, "movedGames": games,
+            "repointed": sorted(repointed),
         }, snapshot={"target": before, "games": games, "repointed": repointed,
                      "result": {a.id: _fields(a), new_id: _fields(new)}})
         s.add(splice)

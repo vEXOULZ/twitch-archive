@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import Select, func, or_, select, update
+from sqlalchemy import Select, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,6 +61,11 @@ async def vod_id_for_stream(stream_id: str) -> str | None:
         return (await s.execute(select(Vod.id).where(Vod.stream_id == stream_id).limit(1))).scalar_one_or_none()
 
 
+async def live_stream_ids() -> list[str]:
+    async with get_sessionmaker()() as s:
+        return [str(i) for i in (await s.execute(select(Stream.id).where(Stream.is_live.is_(True)))).scalars()]
+
+
 async def set_live_stream(stream_id: str | None, started_at: dt.datetime | None = None) -> None:
     """Mark ``stream_id`` (upserted) as the only live stream, or none when None."""
     async with get_sessionmaker()() as s:
@@ -71,6 +76,37 @@ async def set_live_stream(stream_id: str | None, started_at: dt.datetime | None 
             offline = offline.where(Stream.id != int(stream_id))
         await s.execute(offline.values(is_live=False))
         await s.commit()
+
+
+_BOT_LOGS_OUT_OF_ORDER = text("""
+    SELECT count(*) FROM (
+        SELECT seq, lag(seq) OVER (ORDER BY content_offset_seconds, at, id) AS prev
+        FROM bot_logs WHERE vod_id = :vod_id
+    ) x WHERE seq < prev
+""")
+# Fresh sequence values, handed out in (offset, at, id) order: nothing else can take them,
+# so a concurrent insert never collides with one, and the gaps left behind are harmless.
+_BOT_LOGS_RESEQUENCE = text("""
+    WITH o AS (
+        SELECT id, row_number() OVER (ORDER BY content_offset_seconds, at, id) AS rn
+        FROM bot_logs WHERE vod_id = :vod_id
+    ), n AS (
+        SELECT v, row_number() OVER (ORDER BY v) AS rn
+        FROM (SELECT nextval('bot_logs_seq_seq') AS v FROM generate_series(1, (SELECT count(*) FROM o))) s
+    )
+    UPDATE bot_logs b SET seq = n.v FROM o JOIN n USING (rn) WHERE b.id = o.id
+""")
+
+
+async def resequence_bot_logs(s: AsyncSession, *vod_ids: str) -> list[str]:
+    """Make ``bot_logs.seq`` rise with the offset again for these VODs (the comments API
+    pages by it, like ``logs._id``). Returns the VODs it had to renumber."""
+    changed = []
+    for vod_id in vod_ids:
+        if (await s.execute(_BOT_LOGS_OUT_OF_ORDER, {"vod_id": vod_id})).scalar_one():
+            await s.execute(_BOT_LOGS_RESEQUENCE, {"vod_id": vod_id})
+            changed.append(vod_id)
+    return changed
 
 
 async def notify_rows_moved(s: AsyncSession, *vod_ids: str) -> None:

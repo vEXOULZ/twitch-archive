@@ -126,6 +126,9 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_DATA_DIR` | `/data` | VODs go in `vods/<vodId>/`, live recordings in `live/<streamId>/` |
 | `ARCHIVE_VOD_DOWNLOAD` | `true` | Archive every stream's Twitch VOD |
 | `ARCHIVE_CHAT_DOWNLOAD` | `true` | Save the chat replay into `logs` |
+| `ARCHIVE_DOOMTP_URL` | empty | doomtp-bot's base URL. Set: each stream, once it ends, gets a `bot_chat` job that saves the bot's chat log (redeems, sub/raid notices, replies, removals) into `bot_logs`. Empty: off |
+| `ARCHIVE_DOOMTP_LOGIN` | `ARCHIVE_TWITCH_USERNAME` | The channel's login on the bot |
+| `ARCHIVE_DOOMTP_API_KEY` | empty | A read-scope key for the bot's log. With it, moderation entries and removed messages are saved too (flagged `deleted_at`/`cleared_at`); without it, the public log |
 | `ARCHIVE_LIVE_RECORD` | `false` | Record the live stream itself; see [§5](#5-live-recordings-and-multitrack) |
 | `ARCHIVE_MULTI_TRACK` | `false` | Upload both the VOD copy and the live copy |
 | `ARCHIVE_YOUTUBE_UPLOAD` | `true` | |
@@ -255,6 +258,8 @@ Job kinds and their steps:
 | `part_dmca` | ensure_source → fetch_vod → finalize → split → dmca_edit → upload → describe → cleanup | `/admin/part/dmca` |
 | `chat`, `logs_manual`, `chapters`, `emotes`, `describe` | one step each | the matching admin routes |
 | `global_emotes_backfill` | one step | `/admin/emotes/backfill` |
+| `bot_chat` | one step | monitor (stream ended, `DOOMTP_URL` set; separate from `archive`), `/admin/bot-chat` |
+| `bot_chat_backfill` | one step | `/admin/bot-chat/backfill` |
 
 `ensure_source` uses `path` if one was given, otherwise the MP4 already on disk. With neither, `fetch_vod` downloads the whole VOD from Twitch again (only while Twitch still has it) and `finalize` converts it; both do nothing when there is a source already.
 
@@ -324,6 +329,14 @@ curl -s "${H[@]}" -X POST "$A/admin/youtube/parts" -d '{"vodId":"...","type":"vo
 ```bash
 curl -s "${H[@]}" -X POST "$A/admin/emotes/backfill"
 curl -s "${H[@]}" -X POST "$A/admin/emotes/backfill" -d '{"vodIds":["2375792832"]}'   # only these VODs
+```
+
+**Bot chat** comes from doomtp-bot's log API into its own table, `bot_logs`, next to the replay chat in `logs`, which is never touched. The bot records the chat live, so like the replay chat it is read once, when the stream ends: the monitor then starts a `bot_chat` job with the VOD's final length from Twitch. Reading again (from the admin API) only adds rows or updates them (a message removed since). Gaps in the bot's coverage are logged as warnings on the job, and `vods.bot_chat` records the last read. Merged or split VODs are refused, like the other steps that fetch by VOD id. To read one VOD, or every VOD that has no bot chat yet (newest first, skipping merged or split ones):
+
+```bash
+curl -s "${H[@]}" -X POST "$A/admin/bot-chat" -d '{"vodId":"2703890458"}'
+curl -s "${H[@]}" -X POST "$A/admin/bot-chat/backfill"
+curl -s "${H[@]}" -X POST "$A/admin/bot-chat/backfill" -d '{"vodIds":["2703890458"]}'   # only these VODs
 ```
 
 `/admin/youtube/chapters` does the same as `/admin/youtube/parts`. Both rewrite every part's description from scratch: links to the other parts, the chat replay link, and the chapters inside that part.
@@ -465,6 +478,7 @@ This is what the frontend uses. The output is compatible with the old Feathers A
 | `chapters[].length` | Same value as `end`, which holds the chapter's length in seconds, not its end time. |
 | `duration_seconds` | On each VOD next to `duration` (`"HH:MM:SS"`), as a number. Only present when `duration` is. |
 | `chapters[].kind` | `"gap"` on the cut a merge puts between two VODs of one broadcast (named `Technical difficulties`, `restricted: true`); absent on every other chapter. `/v1/games-played` leaves gap chapters out. |
+| `/v1/vods/:id/comments?source=` | `auto` (the default): doomtp-bot's chat (`bot_logs`) when the VOD has it, at least 90% as many rows as the replay, otherwise the Twitch replay (`logs`). `replay` or `bot` force one. A bot page's `cursor` stays on the bot's chat. Every comment has `source` (`"bot"` or `"replay"`). Bot comments also have `kind` (`message` or `notice`: subs, gifts, raids, redemptions…), `user_id`, `user_login`, `message_type`, `deleted_at` and `cleared_at` (removed by a moderator; only with a bot key), and `bot`, the bot's entry (reward, bits, reply parent, mentions, notice details). `message`, `user_badges` and `user_color` have the replay's shape. |
 | `merged_into` | `{id, offset}` on a VOD merged into another one; absent otherwise. Send old links to `/vods/<id>?t=<offset + t>`. `/vods` lists and search leave these VODs out unless the query has `$merged=true`; `GET /vods/:id` still answers. Their `/v1/vods/:id/comments` is an empty page (`{"comments": []}`): the rows are the other VOD's now. `/v1/games-played` and `/v1/status` leave them out too. |
 
 **Query syntax (Feathers):** `$limit`, `$skip`, `$sort[field]=1|-1` and `$select[]=field`. Field filters accept `$ne`, `$in`, `$nin`, `$lt`, `$lte`, `$gt`, `$gte`, `$like`, `$notLike`, `$iLike` and `$notILike`, and can be combined with `$or`/`$and`. `chapters[name]=text` does a case-insensitive substring match on chapter names. `chapters[name][$eq]=text` matches a chapter name exactly (case-sensitive), `chapters[gameId]=id` matches a chapter's gameId exactly, and `chapters[gameId]=null` finds VODs with an uncategorised chapter (the `No category` entry of `/v1/games-played`). Each matches when any chapter matches; several combine with AND. Unknown fields and filters on JSON columns return 400. POST, PUT, PATCH and DELETE return 405.

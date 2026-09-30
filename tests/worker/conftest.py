@@ -29,6 +29,17 @@ def deps(settings) -> Deps:
 
 
 @pytest.fixture
+def api():
+    """The public archive API, rate limit and service cache off."""
+    import httpx
+
+    from archive_api.main import create_app
+
+    app = create_app(Settings(rate_limit_points=1_000_000, cache_ttl_seconds=0))
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://api")
+
+
+@pytest.fixture
 def make_ctx(deps):
     def make(kind: str = "archive", vod_id: str | None = "100", payload: dict | None = None, job_id: int = 0):
         return JobContext(job_id, kind, vod_id, dict(payload or {}), deps)

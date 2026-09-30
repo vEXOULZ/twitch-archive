@@ -54,6 +54,10 @@ KINDS: dict[str, list[str]] = {
     # One-off: add 7TV's zero-width flags to channel sets saved before flags were kept.
     "seventv_flags_backfill": ["seventv_flags_backfill"],
     "describe": ["describe"],
+    # Chat from doomtp-bot into bot_logs, beside the archive job of the same VOD.
+    "bot_chat": ["bot_chat"],
+    # One job for all VODs without bot chat (or the given ones), newest first.
+    "bot_chat_backfill": ["bot_chat_backfill"],
 }
 
 MAX_ATTEMPTS = 3
@@ -207,8 +211,8 @@ async def set_control(job_id: int, **values: Any) -> Job:
 
 def _exclusive_key(job: Job) -> str:
     # One job per (vod, video type) at a time; the live recording and the VOD
-    # capture of the same stream run side by side.
-    typ = (job.payload or {}).get("type", "vod")
+    # capture of the same stream run side by side, and bot chat beside the archive steps.
+    typ = "bot_chat" if job.kind == "bot_chat" else (job.payload or {}).get("type", "vod")
     return f"{job.vod_id}:{typ}" if job.vod_id else f"job:{job.id}"
 
 

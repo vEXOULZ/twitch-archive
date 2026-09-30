@@ -28,6 +28,8 @@ ADDED_VOD_FIELDS = {"duration_seconds", "merged_into"}  # merged_into: only on m
 ADDED_CHAPTER_FIELDS = {"imageTemplate", "length"}
 # Global emote sets saved with each VOD (emotes rows are the dicts with "7tv_emotes").
 ADDED_EMOTE_FIELDS = {"global_emotes", "global_emotes_source", "global_emotes_at"}
+# Which table a chat comment came from (comments are the dicts with "content_offset_seconds").
+ADDED_COMMENT_FIELDS = {"source"}
 
 
 def _without_additions(node):
@@ -36,7 +38,12 @@ def _without_additions(node):
         return [_without_additions(v) for v in node]
     if not isinstance(node, dict):
         return node
-    added = ADDED_EMOTE_FIELDS if "7tv_emotes" in node else ADDED_VOD_FIELDS
+    if "7tv_emotes" in node:
+        added = ADDED_EMOTE_FIELDS
+    elif "content_offset_seconds" in node:
+        added = ADDED_COMMENT_FIELDS
+    else:
+        added = ADDED_VOD_FIELDS
     out = {k: _without_additions(v) for k, v in node.items() if k not in added}
     if isinstance(node.get("chapters"), list):
         out["chapters"] = [

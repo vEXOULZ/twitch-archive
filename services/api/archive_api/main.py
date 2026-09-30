@@ -182,7 +182,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/vods/{vod_id}/comments")
     async def vod_comments(vod_id: str, request: Request):
         params = request.query_params
-        body = await comments.handle(engine, vod_id, params.get("content_offset_seconds"), params.get("cursor"))
+        body = await comments.handle(
+            engine, vod_id, params.get("content_offset_seconds"), params.get("cursor"), params.get("source")
+        )
         return body.response(request)
 
     # ── Badges ────────────────────────────────────────────────────────────
