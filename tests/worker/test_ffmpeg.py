@@ -1,11 +1,17 @@
 import shutil
 import subprocess
+import sys
 
 import pytest
 
 from archive_worker import ffmpeg, hls
 
-pytestmark = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
+pytestmark = [
+    pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed"),
+    # conftest.py runs the tests on a selector loop (the job runtime's psycopg needs one), which has
+    # no subprocesses on Windows.
+    pytest.mark.skipif(sys.platform == "win32", reason="asyncio subprocesses need the proactor loop on Windows"),
+]
 
 
 @pytest.fixture(scope="module")

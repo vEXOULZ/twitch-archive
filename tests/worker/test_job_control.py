@@ -1,4 +1,8 @@
-"""Manual step gates, pause/resume/cancel, and the admin job endpoints (needs the dev DB)."""
+"""Manual step gates, pause/resume/cancel, and the admin job endpoints (needs the dev DB).
+
+New jobs are runs of the job runtime; the legacy table's jobs are still finished by the old runner
+(legacy_jobs.py) and reached by the same admin actions.
+"""
 
 import asyncio
 import datetime as dt
@@ -6,12 +10,13 @@ import datetime as dt
 import httpx
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 
 from archive_common.db import get_sessionmaker
 from archive_common.models import Job, Vod
-from archive_worker import jobs
+from archive_worker import jobs, legacy_jobs
 from archive_worker.admin import create_admin_app
+from archive_worker.job_rows import RUNS, subject_of
 
 VOD = "test-job-control-vod"
 
@@ -19,6 +24,11 @@ VOD = "test-job-control-vod"
 async def _reset():
     async with get_sessionmaker()() as s:
         await s.execute(delete(Job).where(Job.vod_id == VOD))
+        await s.execute(delete(RUNS).where(RUNS.c.subject == subject_of(VOD)))
+        # A retry waiting out its backoff would hold the VOD's lock for the next test.
+        # (procrastinate's own SQL names its tables unqualified).
+        await s.execute(text("SET LOCAL search_path TO jobs, public"))
+        await s.execute(text("DELETE FROM procrastinate_jobs WHERE lock LIKE :vod"), {"vod": f"vod:{VOD}:%"})
         await s.execute(delete(Vod).where(Vod.id == VOD))
         await s.commit()
 
@@ -51,56 +61,55 @@ def steps(monkeypatch):
     return calls
 
 
-async def _job(job_id: int) -> Job:
-    async with get_sessionmaker()() as s:
-        return await s.get(Job, job_id)
+# ── Runs of the runtime ───────────────────────────────────────────────────
 
 
-async def _claim_and_run(runner: jobs.Runner, job_id: int) -> Job:
-    job = await runner._claim()
-    assert job is not None and job.id == job_id
-    await runner._run(job)
-    return await _job(job_id)
-
-
-async def test_global_gate_pauses_until_resumed(vod, steps, deps):
+async def test_global_gate_pauses_until_resumed(vod, steps, deps, make_service, wait_job):
     deps.settings.manual_steps = {"test": ["b"]}
-    runner = jobs.Runner(deps)
-    job = await jobs.enqueue("test", vod, settings=deps.settings)
+    service = await make_service()
+    job = await service.enqueue("test", vod)
 
-    after = await _claim_and_run(runner, job.id)
-    assert (after.state, after.step, steps) == ("paused", "b", ["a"])
-    assert await runner._claim() is None  # paused jobs are not picked up
+    after = await wait_job(job.id, "paused")
+    assert (after.step, steps, after.legacy) == ("b", ["a"], False)
 
-    assert (await jobs.resume(job.id)).state == "queued"
-    done = await _claim_and_run(runner, job.id)
-    assert (done.state, steps) == ("done", ["a", "b", "c"])
+    assert (await service.resume(job.id)).state in ("queued", "running", "done")
+    done = await wait_job(job.id, "done")
+    assert (steps, done.payload) == (["a", "b", "c"], {"a": True, "b": True, "c": True})
 
 
-async def test_job_override_beats_global_and_gates_first_step(vod, steps, deps):
+async def test_job_override_beats_global_and_gates_first_step(vod, steps, deps, make_service, wait_job):
     deps.settings.manual_steps = {"test": ["b"]}
-    runner = jobs.Runner(deps)
-    job = await jobs.enqueue("test", vod, pause_before=["a"], settings=deps.settings)
+    service = await make_service()
+    job = await service.enqueue("test", vod, pause_before=["a"])
     assert (job.state, job.step) == ("paused", "a")
 
-    assert (await jobs.resume(job.id)).state == "queued"
-    done = await _claim_and_run(runner, job.id)
-    assert (done.state, steps) == ("done", ["a", "b", "c"])  # global gate on b ignored
+    await service.resume(job.id)
+    await wait_job(job.id, "done")
+    assert steps == ["a", "b", "c"]  # global gate on b ignored
 
 
-async def test_resume_once_single_steps(vod, steps, deps):
-    runner = jobs.Runner(deps)
-    job = await jobs.enqueue("test", vod, paused=True, settings=deps.settings)
-
-    assert (await jobs.resume(job.id, once=True)).state == "queued"
-    after = await _claim_and_run(runner, job.id)
-    assert (after.state, after.step, after.pause_next, steps) == ("paused", "b", False, ["a"])
-
-    assert (await jobs.resume(job.id)).state == "queued"
-    assert (await _claim_and_run(runner, job.id)).state == "done"
+async def test_settings_gates_apply_to_queued_jobs(vod, steps, deps, make_service, wait_job):
+    service = await make_service(start=False)
+    job = await service.enqueue("test", vod)
+    deps.settings.manual_steps = {"test": ["c"]}
+    service.apply_settings()  # what PATCH /admin/settings does
+    await service.runtime.start()
+    assert (await wait_job(job.id, "paused")).step == "c"
 
 
-async def test_pause_requested_while_running(vod, deps, monkeypatch):
+async def test_resume_once_single_steps(vod, steps, make_service, wait_job):
+    service = await make_service()
+    job = await service.enqueue("test", vod, paused=True)
+
+    await service.resume(job.id, once=True)
+    after = await wait_job(job.id, "paused")
+    assert (after.step, after.pause_next, steps) == ("b", False, ["a"])
+
+    await service.resume(job.id)
+    await wait_job(job.id, "done")
+
+
+async def test_pause_requested_while_running(vod, monkeypatch, make_service, wait_job):
     started, release = asyncio.Event(), asyncio.Event()
 
     async def slow(ctx):
@@ -113,20 +122,17 @@ async def test_pause_requested_while_running(vod, deps, monkeypatch):
     monkeypatch.setitem(jobs.KINDS, "test", ["slow", "fast"])
     monkeypatch.setitem(jobs.STEPS, "slow", slow)
     monkeypatch.setitem(jobs.STEPS, "fast", fast)
-    runner = jobs.Runner(deps)
-    job = await jobs.enqueue("test", vod, settings=deps.settings)
-    claimed = await runner._claim()
-    task = asyncio.create_task(runner._run(claimed))
-    await started.wait()
+    service = await make_service()
+    job = await service.enqueue("test", vod)
+    await asyncio.wait_for(started.wait(), 10)
 
-    await jobs.pause(job.id)
+    await service.pause(job.id)
     release.set()
-    await task
-    after = await _job(job.id)
-    assert (after.state, after.step, after.pause_next) == ("paused", "fast", False)
+    after = await wait_job(job.id, "paused")
+    assert (after.step, after.pause_next) == ("fast", False)
 
 
-async def test_cancel_running_job(vod, deps, monkeypatch):
+async def test_cancel_running_job(vod, monkeypatch, make_service, wait_job):
     started = asyncio.Event()
 
     async def forever(ctx):
@@ -135,26 +141,98 @@ async def test_cancel_running_job(vod, deps, monkeypatch):
 
     monkeypatch.setitem(jobs.KINDS, "test", ["forever"])
     monkeypatch.setitem(jobs.STEPS, "forever", forever)
-    runner = jobs.Runner(deps)
-    job = await jobs.enqueue("test", vod, settings=deps.settings)
-    await runner._fill()
-    await started.wait()
+    service = await make_service()
+    job = await service.enqueue("test", vod)
+    await asyncio.wait_for(started.wait(), 10)
 
-    cancelled = await runner.cancel(job.id)
-    assert cancelled.state == "cancelled"
-    assert job.id not in runner.running
+    await service.cancel(job.id)
+    await wait_job(job.id, "cancelled")
+    assert service.running == 0
+
+
+async def test_steps_see_the_vod_and_save_the_payload(vod, monkeypatch, make_service, wait_job):
+    seen = []
+
+    async def look(ctx):
+        seen.append((ctx.vod_id, ctx.kind, ctx.step, (await ctx.get_vod()).id))
+        ctx.payload["n"] = 1
+        await ctx.save()
+        ctx.progress(1, 2, "parts", "half")
+
+    monkeypatch.setitem(jobs.KINDS, "test", ["look"])
+    monkeypatch.setitem(jobs.STEPS, "look", look)
+    service = await make_service()
+    job = await service.enqueue("test", vod)
+    assert (await wait_job(job.id, "done")).payload == {"n": 1}
+    assert seen == [(VOD, "test", "look", VOD)]
+    events = await service.events(job.id)
+    assert {"done": 1, "total": 2, "unit": "parts"} in [e["progress"] for e in events]
 
 
 def test_unknown_manual_step_fails_at_startup(deps):
     deps.settings.manual_steps = {"archive": ["uplaod"]}
     with pytest.raises(ValueError, match="uplaod"):
-        jobs.Runner(deps)
+        jobs.create_runtime(deps)
 
 
-async def test_admin_launch_list_pause_resume(vod, steps, deps):
+# ── Jobs of the legacy table ──────────────────────────────────────────────
+
+
+async def _legacy_job(kind: str, **values) -> Job:
+    """A job as the old runner's ``enqueue`` left it: nothing queues these any more."""
+    async with get_sessionmaker()() as s:
+        job = Job(kind=kind, vod_id=VOD, step=jobs.KINDS[kind][0], state="queued", payload={}, **values)
+        s.add(job)
+        await s.commit()
+        return job
+
+
+async def _claim_and_run(runner: legacy_jobs.Runner, job_id: int):
+    job = await runner._claim()
+    assert job is not None and job.id == job_id
+    await runner._run(job)
+    return await jobs.get(job_id)
+
+
+async def test_legacy_job_drains_through_its_gates(vod, steps, deps, make_service):
+    deps.settings.manual_steps = {"test": ["b"]}
+    service = await make_service(start=False)
+    job = await _legacy_job("test")
+
+    after = await _claim_and_run(service.legacy, job.id)
+    assert (after.state, after.step, after.legacy, steps) == ("paused", "b", True, ["a"])
+    assert await service.legacy._claim() is None  # paused jobs are not picked up
+
+    assert (await service.resume(job.id)).state == "queued"
+    done = await _claim_and_run(service.legacy, job.id)
+    assert (done.state, steps) == ("done", ["a", "b", "c"])
+
+
+async def test_legacy_job_cancelled_while_running(vod, deps, monkeypatch, make_service):
+    started = asyncio.Event()
+
+    async def forever(ctx):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setitem(jobs.KINDS, "test", ["forever"])
+    monkeypatch.setitem(jobs.STEPS, "forever", forever)
+    service = await make_service(start=False)
+    job = await _legacy_job("test")
+    await service.legacy._fill()
+    await asyncio.wait_for(started.wait(), 10)
+
+    assert (await service.cancel(job.id)).state == "cancelled"
+    assert job.id not in service.legacy.running
+
+
+# ── Admin endpoints ───────────────────────────────────────────────────────
+
+
+async def test_admin_launch_list_pause_resume(vod, steps, deps, make_service, wait_job):
     deps.settings.admin_api_key = SecretStr("k")
-    runner = jobs.Runner(deps)
-    app = create_admin_app(deps, runner)
+    service = await make_service(start=False)
+    app = create_admin_app(deps, service)
     headers = {"Authorization": "Bearer k"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://admin") as c:
         kinds = (await c.get("/admin/kinds", headers=headers)).json()
@@ -170,30 +248,41 @@ async def test_admin_launch_list_pause_resume(vod, steps, deps):
         assert [j["id"] for j in listed["data"]] == [job_id]
         assert listed["data"][0]["pauseBefore"] == ["c"]
 
-        await _claim_and_run(runner, job_id)
+        await service.runtime.start()
+        await wait_job(job_id, "paused")
         stopped = (await c.get(f"/admin/jobs?state=stopped&vodId={vod}", headers=headers)).json()
         assert [(j["id"], j["state"], j["step"]) for j in stopped["data"]] == [(job_id, "paused", "c")]
         assert steps == ["b"]
 
         assert (await c.post(f"/admin/jobs/{job_id}/resume", headers=headers)).status_code == 200
-        assert (await c.post(f"/admin/jobs/{job_id}/resume", headers=headers)).status_code == 409
-        assert (await _claim_and_run(runner, job_id)).state == "done"
+        r = await c.post(f"/admin/jobs/{job_id}/resume", headers=headers)
+        assert r.status_code == 409 and r.json()["msg"].startswith("Job is ")
+        await wait_job(job_id, "done")
+        events = (await c.get(f"/admin/jobs/{job_id}/events", headers=headers)).json()
+        assert f"Job {job_id} resumed at step c" in [e["message"] for e in events["data"]]
 
 
-async def test_admin_job_routes_404_and_409(vod, steps, deps):
+async def test_admin_job_routes_404_and_409(vod, steps, deps, make_service, wait_job):
     deps.settings.admin_api_key = SecretStr("k")
-    runner = jobs.Runner(deps)
-    app = create_admin_app(deps, runner)
+    service = await make_service()
+    app = create_admin_app(deps, service)
     headers = {"Authorization": "Bearer k"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://admin") as c:
         missing = 2**62
         for method, path in (("get", ""), ("post", "/resume"), ("post", "/pause"), ("post", "/retry"),
-                             ("post", "/cancel"), ("patch", "")):
+                             ("post", "/cancel"), ("patch", ""), ("get", "/events")):
             kwargs = {"json": {"pauseNext": True}} if method == "patch" else {}
             r = await c.request(method.upper(), f"/admin/jobs/{missing}{path}", headers=headers, **kwargs)
             assert (r.status_code, r.json()["msg"]) == (404, "No such job"), path
 
-        job = await jobs.enqueue("test", vod, settings=deps.settings)
-        assert (await _claim_and_run(runner, job.id)).state == "done"
+        job = await service.enqueue("test", vod)
+        await wait_job(job.id, "done")
         r = await c.post(f"/admin/jobs/{job.id}/pause", headers=headers)
+        assert (r.status_code, r.json()["msg"]) == (409, "Job is done; only queued or running jobs can be paused")
+
+        legacy = await _legacy_job("test")
+        async with get_sessionmaker()() as s:
+            (await s.get(Job, legacy.id)).state = "done"
+            await s.commit()
+        r = await c.post(f"/admin/jobs/{legacy.id}/pause", headers=headers)
         assert (r.status_code, r.json()["msg"]) == (409, "Job is done; only queued or running jobs can be paused")

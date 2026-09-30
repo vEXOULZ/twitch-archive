@@ -14,6 +14,7 @@ from archive_common.models import Emote, Job, Vod
 from archive_worker import jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.context import StepError
+from archive_worker.job_rows import RUNS, subject_of
 from archive_worker.steps import metadata
 
 VOD, OTHER = "test-emotes-vod", "test-emotes-vod-2"
@@ -61,6 +62,7 @@ async def _reset():
     async with get_sessionmaker()() as s:
         await s.execute(delete(Emote).where(Emote.vod_id.in_([VOD, OTHER])))
         await s.execute(delete(Job).where(Job.vod_id.in_([VOD, OTHER])))
+        await s.execute(delete(RUNS).where(RUNS.c.subject.in_([subject_of(VOD), subject_of(OTHER)])))
         await s.execute(delete(Vod).where(Vod.id.in_([VOD, OTHER])))
         await s.commit()
 
@@ -267,9 +269,9 @@ async def test_seventv_flags_backfill_leaves_failed_lookups_for_a_rerun(vods, ma
     assert (await _row(VOD)).seventv_emotes == [{"id": "zw", "code": "Blush", "flags": 1, "data_flags": 256}]
 
 
-async def test_admin_emotes_force_and_backfill_routes(vods, deps):
+async def test_admin_emotes_force_and_backfill_routes(vods, deps, make_service):
     deps.settings.admin_api_key = SecretStr("k")
-    app = create_admin_app(deps, jobs.Runner(deps))
+    app = create_admin_app(deps, await make_service(start=False))
     headers = {"Authorization": "Bearer k"}
     backfill_id = None
     try:
@@ -287,10 +289,9 @@ async def test_admin_emotes_force_and_backfill_routes(vods, deps):
     finally:
         if backfill_id is not None:
             async with get_sessionmaker()() as s:
-                await s.execute(delete(Job).where(Job.id == backfill_id))
+                await s.execute(delete(RUNS).where(RUNS.c.id == backfill_id))
                 await s.commit()
 
 
-async def _job(job_id: int) -> Job:
-    async with get_sessionmaker()() as s:
-        return await s.get(Job, job_id)
+async def _job(job_id: int):
+    return await jobs.get(job_id)

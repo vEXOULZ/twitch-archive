@@ -107,7 +107,7 @@ def test_plain_http_believes_x_forwarded_proto_only_from_proxies():
 def admin(deps):
     deps.settings.admin_api_key = SecretStr("k")
     deps.settings.admin_password = SecretStr("correct horse")
-    app = create_admin_app(deps, jobs.Runner(deps))
+    app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)))
 
     def client(peer: str = "192.168.1.10") -> httpx.AsyncClient:
         # https: the session cookie is Secure, so the client only sends it back over https.
@@ -157,7 +157,7 @@ async def test_password_login_over_plain_http_sets_a_cookie_the_browser_keeps(de
     deps.settings.admin_api_key = SecretStr("k")
     deps.settings.admin_password = SecretStr("correct horse")
     deps.settings.admin_trusted_proxies = ["192.168.1.2"]
-    app = create_admin_app(deps, jobs.Runner(deps))
+    app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)))
 
     async def login(base_url: str, peer: str, headers: dict[str, str]) -> tuple[str, str]:
         transport = httpx.ASGITransport(app=app, client=(peer, 1234))
@@ -204,7 +204,7 @@ async def test_failed_logins_are_rate_limited_per_address(admin):
 
 async def test_password_login_off_without_a_password(deps):
     deps.settings.admin_api_key = SecretStr("k")
-    app = create_admin_app(deps, jobs.Runner(deps))
+    app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://admin") as c:
         assert (await c.get("/admin/session")).json()["passwordLogin"] is False
         assert (await c.post("/admin/session", json={"password": ""})).status_code == 404

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import update
+from vex_platform.jobs import StepContext, StepError, StepRefused
 
 from archive_common.config import Settings
 from archive_common.db import execute, get_sessionmaker
@@ -17,6 +18,7 @@ from archive_common.twitch.helix import Helix
 
 from .doomtp import Doomtp
 from .events import JOB_LOGGER, UNITS, JobEvents
+from .job_rows import subject_of, vod_of
 from .vods import splice_reason
 from .youtube import YouTube
 
@@ -34,45 +36,82 @@ class Deps:
         self.doomtp = Doomtp(self.settings)
 
 
-class StepError(RuntimeError):
-    """Expected failure with a readable message (no traceback in job.last_error)."""
+# StepError: an expected failure with a readable message (no traceback in last_error).
+# StepRefused: a step that must not run on this VOD; the job fails at once instead of retrying.
+__all__ = ["Deps", "JobContext", "StepError", "StepRefused"]
 
 
-class StepRefused(StepError):
-    """A step that must not run on this VOD; the job fails at once instead of retrying."""
-
-
-@dataclass
 class JobContext:
-    job_id: int
-    kind: str
-    vod_id: str | None
-    payload: dict[str, Any]
-    deps: Deps
-    log: logging.LoggerAdapter = field(init=False)
-    # The worker's settings as the job started or resumed: a dashboard change applies to the next job,
-    # not halfway through this one (runtime_settings.py).
-    settings: Settings = field(init=False)
+    """What a step receives. Under the runtime (``of_run``) it wraps vex-platform's ``StepContext``:
+    payload, subject (``vod_id``), step, log, progress and save are the run's. Built directly, it is a
+    job of the legacy table (legacy_jobs.py) or a test's."""
 
-    def __post_init__(self) -> None:
-        self.settings = self.deps.settings.model_copy(deep=True)
-        # The runner updates "step" as the job moves on, so every line records where it came from.
-        self.log = logging.LoggerAdapter(logging.getLogger(JOB_LOGGER), {"job": self.job_id, "step": None})
+    def __init__(self, job_id: int, kind: str, vod_id: str | None, payload: dict[str, Any], deps: Deps,
+                 *, run: StepContext | None = None) -> None:
+        self.job_id = job_id
+        self.kind = kind
+        self.deps = deps
+        self.run = run
+        # The worker's settings as the job started or resumed: a dashboard change applies to the next job,
+        # not halfway through this one (runtime_settings.py).
+        self.settings: Settings = deps.settings.model_copy(deep=True)
+        if run is None:
+            self._payload = payload
+            self._vod_id = vod_id
+            # The runner updates "step" as the job moves on, so every line records where it came from.
+            self._log = logging.LoggerAdapter(logging.getLogger(JOB_LOGGER), {"job": job_id, "step": None})
+
+    @classmethod
+    def of_run(cls, run: StepContext, deps: Deps) -> JobContext:
+        return cls(run.run_id, run.kind.name, None, run.payload, deps, run=run)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        return self.run.payload if self.run else self._payload
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]) -> None:
+        if self.run:
+            self.run.payload = value
+        else:
+            self._payload = value
+
+    @property
+    def vod_id(self) -> str | None:
+        return vod_of(self.run.subject) if self.run else self._vod_id
+
+    @vod_id.setter
+    def vod_id(self, value: str | None) -> None:
+        if self.run:
+            self.run.subject = subject_of(value)
+        else:
+            self._vod_id = value
+
+    @property
+    def log(self) -> Any:
+        """``info``, ``warning`` and ``error`` with %-style arguments, like a stdlib logger."""
+        return self.run.log if self.run else self._log
 
     @property
     def step(self) -> str | None:
-        return self.log.extra["step"]
+        return self.run.step if self.run else self._log.extra["step"]
 
     @step.setter
     def step(self, name: str | None) -> None:
-        self.log.extra["step"] = name
+        if self.run:
+            self.run.step = name
+        else:
+            self._log.extra["step"] = name
 
     def progress(self, done: float, total: float, unit: str, message: str) -> None:
         """Record how far the current step is, for the dashboard (not the process log).
         Safe to call from a worker thread."""
         assert unit in UNITS, unit
-        self.deps.events.add(self.job_id, "info", self.step, message,
-                             {"done": done, "total": total, "unit": unit})
+        if self.run:
+            self.run.progress(done, total, unit, message)
+        else:
+            self.deps.events.add(self.job_id, "info", self.step, message,
+                                 {"done": done, "total": total, "unit": unit})
 
     @property
     def video_type(self) -> str:
@@ -112,7 +151,11 @@ class JobContext:
     # ── Persistence ───────────────────────────────────────────────────────
 
     async def save(self) -> None:
-        await execute(update(Job).where(Job.id == self.job_id).values(payload=self.payload, vod_id=self.vod_id))
+        """Checkpoint ``payload`` and ``vod_id`` now, mid-step."""
+        if self.run:
+            await self.run.save()
+        else:
+            await execute(update(Job).where(Job.id == self.job_id).values(payload=self.payload, vod_id=self.vod_id))
 
     async def get_vod(self) -> Vod:
         async with get_sessionmaker()() as s:

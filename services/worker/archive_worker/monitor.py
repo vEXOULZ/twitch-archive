@@ -21,9 +21,9 @@ log = logging.getLogger(__name__)
 
 
 class Monitor:
-    def __init__(self, helix: Helix, runner: jobs.Runner) -> None:
+    def __init__(self, helix: Helix, service: jobs.JobService) -> None:
         self.helix = helix
-        self.runner = runner
+        self.service = service
         self.settings = helix.settings
 
     async def run_forever(self) -> None:
@@ -53,7 +53,7 @@ class Monitor:
         if s.live_record and not await jobs.exists_any("live", stream_id=stream_id):
             log.info("stream %s is live; starting live recording", stream_id)
             payload = {"type": "live", "stream_id": stream_id, "login": s.twitch_username}
-            await self.runner.enqueue("live", None, payload)
+            await self.service.enqueue("live", None, payload)
 
         if s.vod_download and not await jobs.exists_any("archive", stream_id=stream_id):
             video = await self.helix.video_for_stream(s.twitch_id, stream_id)
@@ -62,7 +62,7 @@ class Monitor:
                 return
             await upsert_vod(video)
             log.info("stream %s -> vod %s; starting archive job", stream_id, video["id"])
-            await self.runner.enqueue("archive", video["id"], {"type": "vod", "stream_id": stream_id})
+            await self.service.enqueue("archive", video["id"], {"type": "vod", "stream_id": stream_id})
 
     async def stream_ended(self, stream_id: str) -> None:
         s = self.settings
@@ -77,4 +77,4 @@ class Monitor:
         if duration := parse_helix_duration(video.get("duration", "")):
             payload["duration"] = duration  # final now; the vods row may still hold the live one
         log.info("stream %s -> vod %s ended; starting bot chat job", stream_id, video["id"])
-        await self.runner.enqueue("bot_chat", video["id"], payload)
+        await self.service.enqueue("bot_chat", video["id"], payload)

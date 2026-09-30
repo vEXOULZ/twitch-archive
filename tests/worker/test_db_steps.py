@@ -1,6 +1,7 @@
-"""Steps and the job runner against the local Postgres (skipped without it).
+"""Steps and the legacy job runner against the local Postgres (skipped without it).
 
-Assumes a dev database with no other queued jobs (see README "Development").
+The runner only drains jobs queued before the job runtime (legacy_jobs.py); the tests insert such
+rows themselves. Assumes a dev database with no other queued legacy jobs (see README "Development").
 """
 
 import asyncio
@@ -15,7 +16,7 @@ from sqlalchemy import delete, select
 from archive_common.db import get_sessionmaker
 from archive_common.models import Job, Log, Vod
 from archive_common.twitch.gql import GQL_URL
-from archive_worker import jobs
+from archive_worker import jobs, legacy_jobs
 from archive_worker.steps import metadata
 
 VOD = "test-worker-vod"
@@ -27,6 +28,19 @@ async def _reset():
         await s.execute(delete(Job).where(Job.vod_id == VOD))
         await s.execute(delete(Vod).where(Vod.id == VOD))
         await s.commit()
+
+
+async def _legacy_job(kind: str) -> Job:
+    """A job as the old runner's ``enqueue`` left it."""
+    async with get_sessionmaker()() as s:
+        job = Job(kind=kind, vod_id=VOD, step=jobs.KINDS[kind][0], state="queued", payload={})
+        s.add(job)
+        await s.commit()
+        return job
+
+
+def _runner(deps) -> legacy_jobs.Runner:
+    return legacy_jobs.Runner(deps, jobs.build_registry())
 
 
 async def _vod():
@@ -112,8 +126,8 @@ async def test_runner_resumes_from_failed_step(db, deps, monkeypatch):
     for name in "abc":
         monkeypatch.setitem(jobs.STEPS, name, step(name))
 
-    runner = jobs.Runner(deps)
-    job = await jobs.enqueue("test", VOD)
+    runner = _runner(deps)
+    job = await _legacy_job("test")
     await runner._run(job)
     async with get_sessionmaker()() as s:
         after = await s.get(Job, job.id)
@@ -147,8 +161,8 @@ async def test_runner_does_not_repeat_finished_steps_after_interruption(db, deps
     monkeypatch.setitem(jobs.STEPS, "a", a)
     monkeypatch.setitem(jobs.STEPS, "b", b)
 
-    runner = jobs.Runner(deps)
-    job = await jobs.enqueue("test", VOD)
+    runner = _runner(deps)
+    job = await _legacy_job("test")
     with pytest.raises(asyncio.CancelledError):
         await runner._run(job)
     async with get_sessionmaker()() as s:
@@ -162,17 +176,17 @@ async def test_runner_does_not_repeat_finished_steps_after_interruption(db, deps
 
 async def test_claim_respects_not_before_and_exclusivity(db, deps):
     await _vod()
-    runner = jobs.Runner(deps)
-    later = await jobs.enqueue("emotes", VOD)
+    runner = _runner(deps)
+    later = await _legacy_job("emotes")
     async with get_sessionmaker()() as s:
         (await s.get(Job, later.id)).not_before = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
         await s.commit()
     assert await runner._claim() is None
-    j1 = await jobs.enqueue("emotes", VOD)
-    j2 = await jobs.enqueue("chapters", VOD)
+    j1 = await _legacy_job("emotes")
+    j2 = await _legacy_job("chapters")
     claimed = await runner._claim()
     assert claimed.id == j1.id
-    runner.running_keys[claimed.id] = jobs._exclusive_key(claimed)
+    runner.running_keys[claimed.id] = legacy_jobs._exclusive_key(claimed)
     assert await runner._claim() is None  # same vod + type is busy
     runner.running_keys.clear()
     assert (await runner._claim()).id == j2.id

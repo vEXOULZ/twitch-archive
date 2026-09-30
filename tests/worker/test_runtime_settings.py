@@ -7,7 +7,7 @@ from sqlalchemy import delete, func, insert, select
 
 from archive_common.db import get_sessionmaker
 from archive_common.models import AdminAudit, RuntimeSetting
-from archive_worker import jobs
+from archive_worker import jobs, legacy_jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.context import JobContext
 from archive_worker.runtime_settings import BY_KEY, RuntimeSettings, validate
@@ -59,12 +59,23 @@ def test_a_job_keeps_the_settings_it_started_with(deps):
     assert JobContext(2, "archive", "1", {}, deps).settings.keep_hls is True
 
 
-def test_runner_reads_concurrency_each_time(deps):
-    runner = jobs.Runner(deps)
+def test_apply_settings_reaches_the_runtime(deps):
+    runtime = jobs.create_runtime(deps)
+    assert (runtime.limiter.limit, runtime.max_attempts) == (3, deps.settings.max_attempts)
+    deps.settings.runner_concurrency, deps.settings.max_attempts = 5, 7
+    deps.settings.manual_steps = {"archive": ["upload"]}
+    jobs.apply_settings(runtime, deps.settings)
+    assert (runtime.limiter.limit, runtime.max_attempts) == (5, 7)
+    assert runtime.registry.get("archive").pause_before == ("upload",)
+    assert runtime.registry.get("download").pause_before == ()
+
+
+def test_legacy_runner_reads_concurrency_each_time(deps):
+    runner = legacy_jobs.Runner(deps, jobs.build_registry())
     assert runner.concurrency == 3
     deps.settings.runner_concurrency = 5
     assert runner.concurrency == 5
-    assert jobs.Runner(deps, concurrency=1).concurrency == 1
+    assert legacy_jobs.Runner(deps, jobs.build_registry(), concurrency=1).concurrency == 1
 
 
 # ── The table ─────────────────────────────────────────────────────────────
@@ -126,8 +137,8 @@ async def test_overrides_apply_and_reset(clean, settings):
 @pytest.fixture
 def app(deps, clean):
     deps.settings.admin_api_key = SecretStr("k")
-    runner = jobs.Runner(deps)
-    return create_admin_app(deps, runner), runner
+    service = jobs.JobService.create(deps)  # never opened: nothing here runs a job
+    return create_admin_app(deps, service), service
 
 
 def client(app) -> httpx.AsyncClient:
@@ -140,7 +151,7 @@ async def _audit(after: int) -> list[AdminAudit]:
 
 
 async def test_settings_routes(app, clean, deps):
-    runner = app[1]
+    limiter = app[1].runtime.limiter
     async with client(app) as c:
         assert (await c.get("/admin/settings")).status_code == 403
         rows = (await c.get("/admin/settings", headers=KEY)).json()["data"]
@@ -150,7 +161,7 @@ async def test_settings_routes(app, clean, deps):
 
         r = await c.patch("/admin/settings", headers=KEY, json={"runner_concurrency": 6, "keep_hls": "yes"})
         assert r.status_code == 400 and "true or false" in r.json()["msg"]
-        assert runner.concurrency == 3
+        assert limiter.limit == 3
         r = await c.patch("/admin/settings", headers=KEY, json={})
         assert r.status_code == 400
 
@@ -159,12 +170,12 @@ async def test_settings_routes(app, clean, deps):
         assert r.status_code == 200
         row = {x["key"]: x for x in r.json()["data"]}["runner_concurrency"]
         assert (row["value"], row["default"], row["overridden"], row["updatedBy"]) == (6, 3, True, "api-key")
-        assert runner.concurrency == 6
+        assert limiter.limit == 6 and app[1].legacy.concurrency == 6
         kinds = (await c.get("/admin/kinds", headers=KEY)).json()
         assert kinds["archive"]["manualSteps"] == ["upload"]
 
         r = await c.delete("/admin/settings/runner_concurrency", headers=KEY)
-        assert r.status_code == 200 and runner.concurrency == 3
+        assert r.status_code == 200 and limiter.limit == 3
         assert (await c.delete("/admin/settings/data_dir", headers=KEY)).status_code == 404
 
     patch, reset = await _audit(clean)

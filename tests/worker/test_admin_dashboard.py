@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 from pydantic import SecretStr
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 
 from archive_common.config import get_settings
 from archive_common.db import VOD_CHANGED, execute, get_sessionmaker
@@ -20,6 +20,7 @@ from archive_worker import jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.admin_auth import SESSION_COOKIE
 from archive_worker.events import JobEvents
+from archive_worker.job_rows import RUNS, subject_of
 from archive_worker.steps import metadata
 
 VOD = "test-admin-dashboard-vod"
@@ -31,6 +32,9 @@ TEMPLATE = "https://static-cdn.jtvnw.net/ttv-boxart/509658-{width}x{height}.jpg"
 async def _reset(audit_after: int | None = None):
     async with get_sessionmaker()() as s:
         await s.execute(delete(Job).where(Job.vod_id == VOD))  # job_events cascade
+        await s.execute(delete(RUNS).where(RUNS.c.subject == subject_of(VOD)))  # job_run_events cascade
+        await s.execute(text("SET LOCAL search_path TO jobs, public"))  # procrastinate's SQL is unqualified
+        await s.execute(text("DELETE FROM procrastinate_jobs WHERE lock LIKE :vod"), {"vod": f"vod:{VOD}:%"})
         await s.execute(delete(Emote).where(Emote.vod_id == VOD))
         await s.execute(delete(Game).where(Game.vod_id == VOD))
         await s.execute(delete(Vod).where(Vod.id == VOD))
@@ -79,11 +83,12 @@ def recorder(deps):
 
 
 @pytest.fixture
-def app(deps, recorder):
+async def app(deps, recorder, make_service):
+    """The admin app and its JobService, whose runtime is open but runs nothing until started."""
     deps.settings.admin_api_key = SecretStr("k")
     deps.settings.admin_password = SecretStr("pw")
-    runner = jobs.Runner(deps)
-    return create_admin_app(deps, runner), runner
+    service = await make_service(start=False)
+    return create_admin_app(deps, service), service
 
 
 def client(app) -> httpx.AsyncClient:
@@ -93,27 +98,22 @@ def client(app) -> httpx.AsyncClient:
 # ── Job events ────────────────────────────────────────────────────────────
 
 
-async def test_job_events_record_logs_steps_and_progress(vod, steps, app):
-    runner = app[1]
-    job = await jobs.enqueue("test", vod, settings=runner.deps.settings)
-    claimed = await runner._claim()
-    assert claimed.id == job.id
-    await runner._run(claimed)
+async def test_job_events_record_logs_steps_and_progress(vod, steps, app, wait_job):
+    service = app[1]
+    job = await service.enqueue("test", vod)
+    await service.runtime.start()
+    await wait_job(job.id, "done")
 
     async with client(app) as c:
         page = (await c.get(f"/admin/jobs/{job.id}/events", headers=KEY)).json()
         rows = page["data"]
-        assert [(e["level"], e["step"], e["message"]) for e in rows] == [
-            ("info", "a", "running test (vod=test-admin-dashboard-vod) from step a"),
-            ("info", "a", "step a"),
-            ("info", "a", "hello from a"),
-            ("info", "a", "half way"),
-            ("info", "b", "step b"),
-            ("warning", "b", "careful in b"),
-            ("info", None, "job test finished"),
-        ]
-        assert rows[3]["progress"] == {"done": 1, "total": 2, "unit": "parts"}
-        assert rows[2]["progress"] is None
+        lines = [(e["level"], e["step"], e["message"]) for e in rows]
+        mine = [("info", "a", "hello from a"), ("info", "a", "half way"), ("warning", "b", "careful in b")]
+        assert [line for line in lines if line in mine] == mine  # in order, among the runtime's own lines
+        half = rows[lines.index(mine[1])]
+        assert half["progress"] == {"done": 1, "total": 2, "unit": "parts"}
+        assert rows[lines.index(mine[0])]["progress"] is None
+        assert len(rows) >= 5
         assert all(e["at"].endswith("+00:00") for e in rows)
         seqs = [e["seq"] for e in rows]
         assert seqs == sorted(seqs) and page["next"] == seqs[-1]
@@ -127,7 +127,10 @@ async def test_job_events_record_logs_steps_and_progress(vod, steps, app):
 
 async def test_job_events_are_capped_per_job(vod, monkeypatch, deps):
     monkeypatch.setattr(events_mod, "PRUNE_EVERY", 1)
-    job = await jobs.enqueue("chat", vod, paused=True, settings=deps.settings)
+    async with get_sessionmaker()() as s:  # the legacy table's event log
+        job = Job(kind="chat", vod_id=vod, step="chat", state="paused", payload={})
+        s.add(job)
+        await s.commit()
     rec = JobEvents(cap=5)
     for i in range(12):
         rec.add(job.id, "info", "chat", f"line {i}")
@@ -140,8 +143,7 @@ async def test_job_events_are_capped_per_job(vod, monkeypatch, deps):
 
 
 async def test_jobs_before_paging_and_patch(vod, app):
-    settings = app[1].deps.settings
-    ids = [(await jobs.enqueue("download", vod, paused=True, settings=settings)).id for _ in range(3)]
+    ids = [(await app[1].enqueue("download", vod, paused=True)).id for _ in range(3)]
     async with client(app) as c:
         page = (await c.get(f"/admin/jobs?vodId={vod}&limit=2", headers=KEY)).json()["data"]
         assert [j["id"] for j in page] == ids[:0:-1]
@@ -170,7 +172,7 @@ def chapter(start, length, name="Just Chatting"):
 
 
 async def test_vod_editing(vod, app, make_ctx, monkeypatch):
-    await jobs.enqueue("emotes", vod, paused=True, settings=app[1].deps.settings)
+    await app[1].enqueue("emotes", vod, paused=True)
     async with client(app) as c:
         got = (await c.get(f"/admin/vods/{vod}", headers=KEY)).json()
         assert (got["id"], got["title"], got["chaptersLocked"], got["games"]) == (vod, "old title", False, [])
@@ -439,9 +441,9 @@ async def test_health(vod, app, monkeypatch, respx_mock):
         return {"authorized": True, "valid": False, "error": "RefreshError: invalid_grant", "checkedAt": checked}
 
     monkeypatch.setattr(deps.youtube, "cached_check", cached_check)
-    job = await jobs.enqueue("chat", vod, settings=deps.settings)
+    job = await app[1].enqueue("chat", vod)
     async with get_sessionmaker()() as s:
-        (await s.get(Job, job.id)).state = "failed"
+        await s.execute(update(RUNS).where(RUNS.c.id == job.id).values(state="failed", updated_at=func.now()))
         s.add(Stream(id=STREAM, started_at=dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=365), is_live=True))
         await s.commit()
 

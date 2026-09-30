@@ -92,7 +92,7 @@ async def world(db, settings):
 @pytest.fixture
 def app(deps):
     deps.settings.admin_api_key = SecretStr("k")
-    return create_admin_app(deps, jobs.Runner(deps))
+    return create_admin_app(deps, jobs.JobService.create(deps))
 
 
 async def test_storage_view_and_delete(world, app, settings):
