@@ -34,3 +34,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON vods, games, emotes, logs, bot_logs, str
 GRANT SELECT, INSERT ON admin_audit TO archive_worker;
 GRANT SELECT, INSERT, UPDATE, DELETE ON admin_sessions, settings TO archive_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO archive_worker;
+
+-- vex-platform (Alembic 0012). audit_log is append-only too. The jobs schema is procrastinate's queue
+-- plus job_runs/job_run_events: the worker needs DML on all of it, because procrastinate's triggers
+-- run as the caller and write its other tables (events, periodic defers).
+GRANT SELECT, INSERT ON audit_log TO archive_worker;
+GRANT USAGE ON SCHEMA jobs TO archive_worker;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA jobs TO archive_worker;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA jobs TO archive_worker;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA jobs TO archive_worker;

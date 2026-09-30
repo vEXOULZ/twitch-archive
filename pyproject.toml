@@ -2,7 +2,7 @@
 name = "twitch-archive"
 version = "0.1.0"
 description = "Twitch stream archiver (worker) + read-only VOD API, Python rewrite of the Feathers archive backend"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = ["archive-common", "archive-api", "archive-worker"]
 
 [tool.uv]
