@@ -2,7 +2,8 @@
 
 Everything comes from environment variables prefixed ``ARCHIVE_`` (or a
 ``.env`` file in the working directory). List values are JSON, e.g.
-``ARCHIVE_RESTRICTED_GAMES='["Artifact"]'``.
+``ARCHIVE_RESTRICTED_GAMES='["Artifact"]'``. The admin dashboard can override some of
+the worker's (archive_worker/runtime_settings.py); the env value is then the default.
 """
 
 from __future__ import annotations
@@ -67,6 +68,8 @@ class Settings(BaseSettings):
     keep_hls: bool = False
     keep_mp4: bool = False
     dry_run: bool = False
+    runner_concurrency: int = 3  # jobs run at once
+    max_attempts: int = 3  # tries of a failing step before its job fails
 
     # Chat from doomtp-bot's /log API into bot_logs (the bot_chat job); empty URL = off.
     doomtp_url: str = ""  # the bot's base URL, e.g. https://bot.example.net

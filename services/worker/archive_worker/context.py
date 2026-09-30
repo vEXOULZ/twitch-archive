@@ -50,8 +50,12 @@ class JobContext:
     payload: dict[str, Any]
     deps: Deps
     log: logging.LoggerAdapter = field(init=False)
+    # The worker's settings as the job started or resumed: a dashboard change applies to the next job,
+    # not halfway through this one (runtime_settings.py).
+    settings: Settings = field(init=False)
 
     def __post_init__(self) -> None:
+        self.settings = self.deps.settings.model_copy(deep=True)
         # The runner updates "step" as the job moves on, so every line records where it came from.
         self.log = logging.LoggerAdapter(logging.getLogger(JOB_LOGGER), {"job": self.job_id, "step": None})
 
@@ -69,10 +73,6 @@ class JobContext:
         assert unit in UNITS, unit
         self.deps.events.add(self.job_id, "info", self.step, message,
                              {"done": done, "total": total, "unit": unit})
-
-    @property
-    def settings(self) -> Settings:
-        return self.deps.settings
 
     @property
     def video_type(self) -> str:

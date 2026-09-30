@@ -60,6 +60,7 @@ from .admin_signin import (
 )
 from .context import Deps
 from .events import event_json, iso_utc
+from .runtime_settings import RuntimeSettings
 from .vods import notify_rows_moved, splice_reason, upsert_vod
 
 log = logging.getLogger(__name__)
@@ -160,10 +161,12 @@ def _job_json(job: Job) -> dict:
 
 
 def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None = None,
-                     sessions: SessionStore | None = None) -> FastAPI:
+                     sessions: SessionStore | None = None, runtime: RuntimeSettings | None = None) -> FastAPI:
     """``signin``: the vexoulz-auth client; by default built from the settings (None when not configured).
-    ``sessions``: where dashboard sessions are kept; the worker passes the database's, tests leave memory."""
+    ``sessions``: where dashboard sessions are kept; the worker passes the database's, tests leave memory.
+    ``runtime``: the dashboard's setting overrides, already loaded; by default a fresh one over ``deps.settings``."""
     settings = deps.settings
+    runtime = runtime or RuntimeSettings(settings)
     helix = deps.helix
     app = FastAPI(title="archive-worker admin", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -277,6 +280,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             target = f"vod:{params['vod_id']}"
         elif "job_id" in params:
             target = f"job:{params['job_id']}"
+        elif "key" in params:
+            target = f"setting:{params['key']}"
         elif isinstance(body, dict) and body.get("vodId") not in (None, ""):
             target = f"vod:{body['vodId']}"
         await execute(insert(AdminAudit).values(
@@ -539,6 +544,44 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             kind: {"steps": steps, "manualSteps": settings.manual_steps.get(kind, [])}
             for kind, steps in jobs.KINDS.items()
         }
+
+    # ── Runtime settings ──────────────────────────────────────────────────
+
+    def settings_json() -> dict:
+        return {"data": runtime.describe()}
+
+    async def edited_async(pending) -> Any:
+        try:
+            return await pending
+        except ValueError as exc:
+            raise AdminError(400, str(exc)) from exc
+
+    def changed_by(request: Request) -> str:
+        return getattr(request.state, "actor_login", None) or request.state.actor
+
+    @app.get("/admin/settings", dependencies=auth)
+    async def list_settings() -> dict:
+        """Each setting the dashboard can change: value, env default, whether overridden, type, when it applies."""
+        return settings_json()
+
+    @app.patch("/admin/settings", dependencies=auth)
+    async def patch_settings(request: Request, body: dict = Body(...)) -> dict:
+        """``{key: value, ...}``: all of them, or none when one is refused. Audited with before and after."""
+        before, after = await edited_async(runtime.update(body, changed_by(request)))
+        request.state.audit_detail = {"before": before, "after": after}
+        runner.poke()  # a higher concurrency starts waiting jobs now
+        return settings_json()
+
+    @app.delete("/admin/settings/{key}", dependencies=auth)
+    async def reset_setting(key: str, request: Request) -> dict:
+        """Back to the env value (or the default)."""
+        try:
+            before, after = await runtime.reset(key)
+        except KeyError:
+            raise AdminError(404, f"No setting {key}") from None
+        request.state.audit_detail = {"before": before, "after": after}
+        runner.poke()
+        return settings_json()
 
     @app.get("/admin/jobs", dependencies=auth)
     async def list_jobs(state: str | None = None, vodId: str | None = None, kind: str | None = None,

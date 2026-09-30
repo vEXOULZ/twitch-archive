@@ -27,6 +27,7 @@ from .admin_auth import DbSessionStore
 from .context import Deps
 from .events import JobEvents
 from .monitor import Monitor
+from .runtime_settings import RuntimeSettings
 
 log = logging.getLogger("archive_worker")
 
@@ -35,6 +36,8 @@ async def serve(dry_run: bool = False) -> None:
     settings = get_settings()
     if dry_run:
         settings.dry_run = True
+    runtime = RuntimeSettings(settings)
+    await runtime.load()  # the dashboard's overrides, over the env values
     events = JobEvents()
     events.install()  # job log lines -> GET /admin/jobs/{id}/events
     deps = Deps(settings, Helix(settings), Gql(settings), youtube.YouTube(settings), events)
@@ -42,7 +45,7 @@ async def serve(dry_run: bool = False) -> None:
     monitor = Monitor(deps.helix, runner)
     admin = uvicorn.Server(
         uvicorn.Config(
-            create_admin_app(deps, runner, sessions=DbSessionStore()),
+            create_admin_app(deps, runner, sessions=DbSessionStore(), runtime=runtime),
             host=settings.admin_host,
             port=settings.admin_port,
             log_level=settings.log_level.lower(),
@@ -70,11 +73,10 @@ async def serve(dry_run: bool = False) -> None:
         asyncio.create_task(monitor.run_forever(), name="monitor"),
         asyncio.create_task(events.run_forever(), name="job-events"),  # flushes on cancel
     ]
-    if settings.youtube_upload and settings.google_client_id:
-        # Daily refresh: surfaces a revoked token in the logs before a stream needs
-        # it, and keeps Google from revoking it after six months without uploads.
-        tasks.append(asyncio.create_task(deps.youtube.keepalive(settings.youtube_keepalive_hours),
-                                         name="youtube-keepalive"))
+    if settings.google_client_id:
+        # Daily refresh (while uploads are on): surfaces a revoked token in the logs before a
+        # stream needs it, and keeps Google from revoking it after six months without uploads.
+        tasks.append(asyncio.create_task(deps.youtube.keepalive(), name="youtube-keepalive"))
     tasks.append(asyncio.create_task(admin.serve(), name="admin"))  # keep last: shutdown awaits it
     stopper = asyncio.create_task(stop.wait())
     pending: set[asyncio.Task] = {*tasks, stopper}

@@ -286,3 +286,14 @@ class AdminSession(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     checked_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RuntimeSetting(Base):
+    """A worker setting overridden from the admin dashboard (Alembic 0011); wins over the env value."""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)  # a Settings field, e.g. "keep_hls"
+    value: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_by: Mapped[str | None] = mapped_column(Text)  # the Twitch login, or password / api-key

@@ -184,9 +184,13 @@ class YouTube:
         expiry = creds.expiry.replace(tzinfo=dt.timezone.utc).isoformat() if creds.expiry else None
         return {"authorized": True, "valid": True, "accessTokenExpiry": expiry}
 
-    async def keepalive(self, interval_hours: float) -> None:
-        """Refresh the token every ``interval_hours`` forever (never returns)."""
+    async def keepalive(self) -> None:
+        """Refresh the token every ``youtube_keepalive_hours`` while uploads are on (never returns).
+        Both are read each time round, so a dashboard change applies from the next refresh."""
         while True:
+            if not self.settings.youtube_upload:
+                await asyncio.sleep(self.settings.youtube_keepalive_hours * 3600)
+                continue
             result = await self.check()
             if result["valid"]:
                 log.info("YouTube token refreshed (keep-alive)")
@@ -196,7 +200,7 @@ class YouTube:
                     "run again: GET /admin/youtube/auth (README section 3).",
                     result["error"],
                 )
-            await asyncio.sleep(interval_hours * 3600)
+            await asyncio.sleep(self.settings.youtube_keepalive_hours * 3600)
 
     async def upload(
         self,

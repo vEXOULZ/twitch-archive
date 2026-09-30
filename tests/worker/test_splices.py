@@ -313,7 +313,7 @@ async def test_refresh_jobs_refuse_a_merged_vod(vods, admin, make_ctx, monkeypat
     job = await jobs.enqueue("chat", A, settings=runner.deps.settings)
     await runner._run(await runner._claim())
     job = await jobs.get(job.id)
-    assert (job.state, job.attempts) == ("failed", jobs.MAX_ATTEMPTS)
+    assert (job.state, job.attempts) == ("failed", runner.deps.settings.max_attempts)
     assert "refused" in job.last_error
 
 
