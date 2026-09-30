@@ -266,6 +266,15 @@ async def test_api_prefers_the_bot_unless_it_is_partial(vod, api):
         assert (await api.get(f"/v1/vods/{VOD}/comments?content_offset_seconds=0&source=x")).status_code == 400
 
 
+async def test_api_answers_a_missing_chat_with_an_empty_page(vod, api):
+    await _add(bot=0, replay=10)
+    async with api:
+        page = (await api.get(f"/v1/vods/{VOD}/comments?content_offset_seconds=0&source=bot")).json()
+        assert page == {"comments": [], "sources": {"replay": 10, "bot": 0}}
+        # Past the last message of a chat the VOD has, the legacy error stays.
+        assert (await api.get(f"/v1/vods/{VOD}/comments?content_offset_seconds=99&source=replay")).status_code == 500
+
+
 async def test_api_pages_bot_chat_by_cursor(vod, api):
     await _add(bot=450, replay=400)
     async with api:

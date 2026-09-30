@@ -164,6 +164,10 @@ class Comments:
                         return EMPTY
                     result = await self._offset_search(conn, src, vod_id, seconds, vod.createdAt)
                 if result is None:
+                    # A chat asked for by name that the VOD doesn't have is an empty page, so a site can see
+                    # (from ``sources``) what there is instead; without ``source`` the legacy error stays.
+                    if source != "auto" and counts[src.name] == 0:
+                        return {**EMPTY, "sources": counts}
                     raise LegacyError(500, f"Failed to retrieve comments from offset {fixed}")
                 return {**result, "sources": counts}
 
