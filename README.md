@@ -398,7 +398,7 @@ curl -s "${H[@]}" "$A/admin/health"                     # worker, api, youtube t
 curl -s "${H[@]}" "$A/admin/jobs?before=120&limit=50"   # older jobs: ids below 120
 curl -s "${H[@]}" -X PATCH "$A/admin/jobs/42" -d '{"pauseBefore":["upload"],"pauseNext":false}'
 curl -s "${H[@]}" "$A/admin/jobs/42/events?after=0&limit=200"   # log lines, step changes, progress; poll with after=<next>
-curl -s "${H[@]}" "$A/admin/vods/123"                   # as GET /vods/123, plus chaptersLocked, recent jobs, splices
+curl -s "${H[@]}" "$A/admin/vods/123"                   # as GET /vods/123, plus chaptersLocked, botChat, recent jobs, splices
 curl -s "${H[@]}" -X PATCH "$A/admin/vods/123" -d '{"title":"..."}'
 curl -s "${H[@]}" -X PUT "$A/admin/vods/123/chapters" \
   -d '{"locked":true,"chapters":[{"name":"Just Chatting","gameId":"509658","imageTemplate":"https://.../509658-{width}x{height}.jpg","start":0,"length":3600,"restricted":false}]}'
