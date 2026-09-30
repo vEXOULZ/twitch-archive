@@ -96,6 +96,7 @@ In production, non-secret settings go in `.env` (see `.env.example`). Secrets go
 | `ARCHIVE_DOMAIN_NAME` | – | Frontend host, used in the "Chat Replay" link in descriptions |
 | `ARCHIVE_TIMEZONE` | `UTC` | The date in YouTube titles |
 | `ARCHIVE_LOG_LEVEL` | `INFO` | |
+| `ARCHIVE_LOG_FORMAT` | `console` | `json` for one JSON object per line (containers) |
 | `ARCHIVE_TWITCH_ID` / `ARCHIVE_TWITCH_USERNAME` | – | The channel to archive (numeric user ID and login) |
 | `ARCHIVE_TWITCH_CLIENT_ID` / `ARCHIVE_TWITCH_CLIENT_SECRET` | – | Twitch app, used for Helix (app token). The API needs it for `/v2/badges`; the worker needs it for the monitor |
 

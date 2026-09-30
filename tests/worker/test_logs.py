@@ -1,6 +1,8 @@
+import json
 import logging
 
 import pytest
+import structlog
 
 from archive_common import logs
 
@@ -13,23 +15,33 @@ def restore_logging():
     root.handlers[:], root.level = saved[0], saved[1]
     for name, level in saved[2].items():
         logging.getLogger(name).setLevel(level)
+    structlog.reset_defaults()
 
 
-def test_setup_formats_job_records_and_quiets_libraries(capsys, restore_logging):
-    logs.setup("info")
-    logging.LoggerAdapter(logging.getLogger("archive_worker.job"), {"job": 42}).info("step %s", "split")
+def test_setup_adds_job_fields_and_quiets_libraries(capsys, restore_logging):
+    logs.setup("info", "json")
+    logging.LoggerAdapter(logging.getLogger("archive_worker.job"), {"job": 42, "step": None}).info("step %s", "split")
     logging.getLogger("archive_worker").info("plain")
     logging.getLogger("httpx").info("hidden")
-    err = capsys.readouterr().err.splitlines()
-    assert len(err) == 2
-    assert err[0].endswith("INFO    archive_worker.job: [job 42] step split")
-    assert err[1].endswith("INFO    archive_worker: plain")
+    structlog.get_logger("archive_api").info("api.started", port=8080)
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(r["logger"], r["event"]) for r in lines] == [
+        ("archive_worker.job", "step split"), ("archive_worker", "plain"), ("archive_api", "api.started")]
+    assert (lines[0]["job"], lines[0]["level"]) == (42, "info")
+    assert lines[2]["port"] == 8080
 
 
-def test_job_event_log_gets_info_even_when_stderr_is_quieter(capsys, restore_logging):
+def test_console_format(capsys, restore_logging):
+    logs.setup("INFO")
+    logging.LoggerAdapter(logging.getLogger("archive_worker.job"), {"job": 42}).info("step split")
+    out = capsys.readouterr().out
+    assert "step split" in out and "job=42" in out
+
+
+def test_job_event_log_gets_info_even_when_stdout_is_quieter(capsys, restore_logging):
     from archive_worker.events import JobEvents
 
-    logs.setup("warning")
+    logs.setup("warning", "json")
     job_logger = logging.getLogger("archive_worker.job")
     saved_level = job_logger.level
     rec = JobEvents()
@@ -39,6 +51,6 @@ def test_job_event_log_gets_info_even_when_stderr_is_quieter(capsys, restore_log
     finally:
         rec.uninstall()
         job_logger.setLevel(saved_level)
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr().out == ""
     [event] = rec._pending
     assert (event["job_id"], event["level"], event["step"], event["message"]) == (7, "info", "split", "cut part 1")

@@ -214,7 +214,7 @@ def run() -> None:
     import uvicorn
 
     settings = get_settings()
-    logs.setup(settings.log_level)
+    logs.setup(settings.log_level, settings.log_format)
     uvicorn.run(
         "archive_api.main:create_app",
         factory=True,

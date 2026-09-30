@@ -121,7 +121,7 @@ def run() -> None:
     p_enq.add_argument("payload", nargs="?", help="JSON object, e.g. '{\"start_part\": 2}'")
     args = parser.parse_args()
 
-    logs.setup(get_settings().log_level)
+    logs.setup(get_settings().log_level, get_settings().log_format)
     if args.cmd == "import-youtube-token":
         asyncio.run(youtube.import_legacy_token(args.config))
         print("YouTube refresh token imported.")
