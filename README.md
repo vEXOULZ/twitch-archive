@@ -393,7 +393,7 @@ curl -s "${H[@]}" -X POST "$A/admin/emotes/backfill"
 curl -s "${H[@]}" -X POST "$A/admin/emotes/backfill" -d '{"vodIds":["2375792832"]}'   # only these VODs
 ```
 
-**Bot chat** comes from doomtp-bot's log API into its own table, `bot_logs`, next to the replay chat in `logs`, which is never touched. The bot records the chat live, so like the replay chat it is read once, when the stream ends: the monitor then starts a `bot_chat` job with the VOD's final length from Twitch. Reading again (from the admin API) only adds rows or updates them (a message removed since). Gaps in the bot's coverage are logged as warnings on the job, and `vods.bot_chat` records the last read. Merged or split VODs are refused, like the other steps that fetch by VOD id. To read one VOD, or every VOD that has no bot chat yet (newest first, skipping merged or split ones):
+**Bot chat** comes from doomtp-bot's v2 log API (`/api/v2/channels/{login}/log`; entries are stored with epoch ms times, as before) into its own table, `bot_logs`, next to the replay chat in `logs`, which is never touched. The bot records the chat live, so like the replay chat it is read once, when the stream ends: the monitor then starts a `bot_chat` job with the VOD's final length from Twitch. Reading again (from the admin API) only adds rows or updates them (a message removed since). Gaps in the bot's coverage are logged as warnings on the job, and `vods.bot_chat` records the last read. Merged or split VODs are refused, like the other steps that fetch by VOD id. To read one VOD, or every VOD that has no bot chat yet (newest first, skipping merged or split ones):
 
 ```bash
 curl -s "${H[@]}" -X POST "$A/admin/bot-chat" -d '{"vodId":"2703890458"}'
