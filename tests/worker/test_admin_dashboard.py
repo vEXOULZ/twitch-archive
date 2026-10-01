@@ -12,7 +12,8 @@ from sqlalchemy import delete, func, select, text, update
 
 from archive_common.config import get_settings
 from archive_common.db import VOD_CHANGED, execute, get_sessionmaker
-from archive_common.models import AdminAudit, Emote, Game, Job, Stream, Vod
+from archive_common.audit import AUDIT_LOG
+from archive_common.models import Emote, Game, Job, Stream, Vod
 from archive_common.twitch.helix import HELIX, TOKEN_URL
 from archive_api.invalidation import asyncpg_dsn
 from archive_worker import events as events_mod
@@ -40,7 +41,7 @@ async def _reset(audit_after: int | None = None):
         await s.execute(delete(Vod).where(Vod.id == VOD))
         await s.execute(delete(Stream).where(Stream.id == STREAM))
         if audit_after is not None:
-            await s.execute(delete(AdminAudit).where(AdminAudit.id > audit_after))
+            await s.execute(delete(AUDIT_LOG).where(AUDIT_LOG.c.id > audit_after))
         await s.commit()
 
 
@@ -48,7 +49,7 @@ async def _reset(audit_after: int | None = None):
 async def vod(db):
     await _reset()
     async with get_sessionmaker()() as s:
-        audit_after = (await s.execute(select(func.max(AdminAudit.id)))).scalar() or 0
+        audit_after = (await s.execute(select(func.max(AUDIT_LOG.c.id)))).scalar() or 0
     async with get_sessionmaker()() as s:
         s.add(Vod(id=VOD, title="old title", created_at=dt.datetime.now(dt.timezone.utc), duration="02:00:00",
                   youtube=[{"id": "yt1", "type": "vod", "duration": 7200, "part": 1, "thumbnail_url": "https://t/1"}]))
@@ -288,7 +289,7 @@ async def test_vod_fields_and_the_admin_list(vod, app):
 
         audit = (await c.get("/admin/audit?limit=20", headers=KEY)).json()["data"]
         mine = [e["detail"] for e in audit
-                if e["target"] == f"vod:{vod}" and e["action"] == "PATCH /admin/vods/{vod_id}"]
+                if e["target"] == f"vod:{vod}" and e["action"] == "vod.update"]
         assert mine[0] == {"before": {"hidden": True}, "after": {"hidden": False}}
         assert mine[-1] == {
             "before": {"thumbnailUrl": None, "duration": "02:00:00", "createdAt": mine[-1]["before"]["createdAt"]},
@@ -328,7 +329,7 @@ async def test_games_rows(vod, app):
 
         assert (await c.put(f"/admin/vods/{vod}/games", headers=KEY, json={"games": []})).json()["games"] == []
         audit = (await c.get("/admin/audit?limit=5", headers=KEY)).json()["data"][0]
-        assert audit["action"] == "PUT /admin/vods/{vod_id}/games" and audit["detail"]["after"] == []
+        assert audit["action"] == "vod.games.replace" and audit["detail"]["after"] == []
         assert [g["game_name"] for g in audit["detail"]["before"]] == ["Elden Ring", "Renamed"]
 
 
@@ -477,15 +478,16 @@ async def test_audit_log_records_state_changes_with_actor(vod, app):
         mine = [e for e in (await c.get("/admin/audit?limit=500", headers=KEY)).json()["data"]
                 if e["target"] == f"vod:{vod}"]
         assert [(e["actor"], e["action"], e["detail"]) for e in mine] == [
-            ("password", "PUT /admin/vods/{vod_id}/drive", {"drive": []}),
-            ("api-key", "PATCH /admin/vods/{vod_id}", {"before": {"title": "old title"}, "after": {"title": "by key"}}),
+            ("password", "vod.drive.replace", {"drive": []}),
+            ("api-key", "vod.update", {"before": {"title": "old title"}, "after": {"title": "by key"}}),
         ]
         assert mine[0]["at"].endswith("+00:00")
         older = (await c.get(f"/admin/audit?before={mine[0]['id']}&limit=1", headers=KEY)).json()["data"]
-        assert [e["action"] for e in older] == ["POST /admin/session"]  # the login, between the two
+        assert [e["action"] for e in older] == ["session.login"]  # the login, between the two
 
     async with get_sessionmaker()() as s:
-        logins = (await s.execute(
-            select(AdminAudit).where(AdminAudit.action == "POST /admin/session").order_by(AdminAudit.id.desc())
-        )).scalars().first()
-    assert logins is not None and logins.actor == "password" and logins.detail == {}  # password never stored
+        login = (await s.execute(
+            select(AUDIT_LOG).where(AUDIT_LOG.c.action == "session.login").order_by(AUDIT_LOG.c.id.desc())
+        )).first()
+    assert login is not None and (login.actor_kind, login.actor_id, login.via) == ("user", "password", "web")
+    assert login.detail == {}  # the password is never stored

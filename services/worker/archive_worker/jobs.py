@@ -13,6 +13,9 @@ resuming, retrying or recovering a job runs its current step.
 
 A job's subject is ``vod:<id>``; one job per (VOD, video type) runs at a time (``_lock``). Jobs
 queued before the runtime existed are finished by legacy_jobs.py; ``JobService`` acts on either.
+
+Every action on a job is audited (``audit_log``): by the runtime, in the transaction that makes it,
+or for a legacy job by ``JobService`` once it is made.
 """
 
 from __future__ import annotations
@@ -26,8 +29,10 @@ from typing import Any
 from sqlalchemy import Row, select
 from sqlalchemy.engine import make_url
 from vex_platform.actor import SYSTEM, Actor
+from vex_platform.audit import AuditEntry
 from vex_platform.jobs import InvalidJob, JobConflict, JobNotFound, JobRun, JobRuntime, Registry
 
+from archive_common import audit
 from archive_common.config import Settings
 from archive_common.db import get_sessionmaker
 
@@ -126,7 +131,7 @@ def create_runtime(deps: Deps, **options: Any) -> JobRuntime:
         concurrency=settings.runner_concurrency,
         max_attempts=settings.max_attempts,
         context_factory=lambda ctx: JobContext.of_run(ctx, deps),
-        **options,
+        **{"audit_table": audit.TABLE, **options},
     )
 
 
@@ -217,45 +222,55 @@ class JobService:
         return await get(enqueued.run.id)
 
     async def resume(self, job_id: int, *, once: bool = False, actor: Actor = SYSTEM) -> Row:
-        if (await get(job_id)).legacy:
+        if (job := await get(job_id)).legacy:
             await self._legacy().resume(job_id, once=once)
-        else:
-            with _v1_conflicts():
-                await self.runtime.resume(job_id, once=once, actor=actor)
+            return await self._legacy_audit("job.resume", job, actor)
+        with _v1_conflicts():
+            await self.runtime.resume(job_id, once=once, actor=actor)
         return await get(job_id)
 
     async def pause(self, job_id: int, *, actor: Actor = SYSTEM) -> Row:
-        if (await get(job_id)).legacy:
+        if (job := await get(job_id)).legacy:
             await legacy_jobs.pause(job_id)
-        else:
-            with _v1_conflicts():
-                await self.runtime.pause(job_id, actor=actor)
+            return await self._legacy_audit("job.pause", job, actor)
+        with _v1_conflicts():
+            await self.runtime.pause(job_id, actor=actor)
         return await get(job_id)
 
     async def retry(self, job_id: int, *, actor: Actor = SYSTEM) -> Row:
-        if (await get(job_id)).legacy:
+        if (job := await get(job_id)).legacy:
             await self._legacy().retry(job_id)
-        else:
-            with _v1_conflicts():
-                await self.runtime.retry(job_id, actor=actor)
+            return await self._legacy_audit("job.retry", job, actor)
+        with _v1_conflicts():
+            await self.runtime.retry(job_id, actor=actor)
         return await get(job_id)
 
     async def cancel(self, job_id: int, *, actor: Actor = SYSTEM) -> Row:
-        if (await get(job_id)).legacy:
+        if (job := await get(job_id)).legacy:
             await self._legacy().cancel(job_id)
-        else:
-            with _v1_conflicts():
-                await self.runtime.cancel(job_id, actor=actor)
+            return await self._legacy_audit("job.cancel", job, actor)
+        with _v1_conflicts():
+            await self.runtime.cancel(job_id, actor=actor)
         return await get(job_id)
 
     async def update(self, job_id: int, *, actor: Actor = SYSTEM, **values: Any) -> Row:
         """``pause_before`` (None: back to the kind's default) and/or ``pause_next``."""
-        if (await get(job_id)).legacy:
+        if (job := await get(job_id)).legacy:
             await legacy_jobs.set_control(self.runtime.registry, job_id, **values)
-        else:
-            with _v1_conflicts():
-                await self.runtime.update(job_id, actor=actor, **values)
+            return await self._legacy_audit("job.update", job, actor, fields=("pause_before", "pause_next"))
+        with _v1_conflicts():
+            await self.runtime.update(job_id, actor=actor, **values)
         return await get(job_id)
+
+    async def _legacy_audit(self, action: str, before: Row, actor: Actor,
+                            fields: tuple[str, ...] = ("state",)) -> Row:
+        """The audit row of an action on a legacy job, as the runtime writes one for a run."""
+        after = await get(before.id)
+        await audit.write(AuditEntry(
+            action, actor, f"job:{before.id}", before={f: getattr(before, f) for f in fields},
+            after={f: getattr(after, f) for f in fields}, detail={"legacy": True},
+        ))
+        return after
 
     def note(self, job: Row, message: str) -> None:
         """A line in the job's event log (an admin action on it)."""

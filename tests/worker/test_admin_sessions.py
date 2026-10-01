@@ -76,5 +76,5 @@ async def test_audit_names_the_twitch_login(db, deps):
 
         audit = (await c.get("/admin/audit?limit=5", headers={"Authorization": "Bearer k"})).json()["data"]
     out, signed_in = audit[0], audit[1]
-    assert (out["action"], out["actor"], out["actorLogin"]) == ("DELETE /admin/session", "twitch:100", "alice")
-    assert (signed_in["action"], signed_in["actorLogin"]) == ("GET /admin/signin/callback", "alice")
+    assert (out["action"], out["actor"], out["actorLogin"]) == ("session.logout", "twitch:100", "alice")
+    assert (signed_in["action"], signed_in["actorLogin"]) == ("session.signin", "alice")

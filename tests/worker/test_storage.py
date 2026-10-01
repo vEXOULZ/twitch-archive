@@ -9,7 +9,8 @@ from pydantic import SecretStr
 from sqlalchemy import delete, func, select
 
 from archive_common.db import get_sessionmaker
-from archive_common.models import AdminAudit, Job, Vod
+from archive_common.audit import AUDIT_LOG
+from archive_common.models import Job, Vod
 from archive_worker import jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.storage import StorageError, folder_path, scan
@@ -62,7 +63,7 @@ async def _reset(audit_after: int | None = None):
         await s.execute(delete(Job).where(Job.vod_id.in_([KEPT, FAILED, ORPHAN])))
         await s.execute(delete(Vod).where(Vod.id.in_([KEPT, FAILED])))
         if audit_after is not None:
-            await s.execute(delete(AdminAudit).where(AdminAudit.id > audit_after))
+            await s.execute(delete(AUDIT_LOG).where(AUDIT_LOG.c.id > audit_after))
         await s.commit()
 
 
@@ -70,7 +71,7 @@ async def _reset(audit_after: int | None = None):
 async def world(db, settings):
     await _reset()
     async with get_sessionmaker()() as s:
-        audit_after = (await s.execute(select(func.max(AdminAudit.id)))).scalar() or 0
+        audit_after = (await s.execute(select(func.max(AUDIT_LOG.c.id)))).scalar() or 0
         now = dt.datetime.now(dt.timezone.utc)
         s.add_all([
             Vod(id=KEPT, title="kept", created_at=now, duration="01:00:00", stream_id=STREAM),
@@ -130,6 +131,6 @@ async def test_storage_view_and_delete(world, app, settings):
         assert f"vods/{ORPHAN}" not in paths and f"vods/{KEPT}" in paths
 
     async with get_sessionmaker()() as s:
-        row = (await s.execute(select(AdminAudit).where(AdminAudit.id > world))).scalar_one()
-    assert (row.action, row.target) == ("DELETE /admin/storage/{area}/{name}", f"storage:vods/{ORPHAN}")
+        row = (await s.execute(select(AUDIT_LOG).where(AUDIT_LOG.c.id > world))).one()
+    assert (row.action, row.target) == ("storage.delete", f"storage:vods/{ORPHAN}")
     assert row.detail == {"path": f"vods/{ORPHAN}", "bytes": 35, "files": 2}
