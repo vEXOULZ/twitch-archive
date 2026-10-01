@@ -39,9 +39,8 @@ from typing import Any
 from sqlalchemy import Column, Row, Table, func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from archive_common.models import BotLog, Log, Vod, VodSegment
-from archive_common.segments import Segment
-from archive_common.serialize import BOT_LOGS, LOGS, Resource, js_iso
+from archive_common.models import BotLog, Log, Vod
+from archive_common.serialize import BOT_LOGS, LOGS, Resource, flat_segments, js_iso
 
 from .errors import LegacyError
 from .middleware import JsonBody, ResponseCache
@@ -51,7 +50,7 @@ log = logging.getLogger(__name__)
 PAGE = 200
 EMPTY: dict[str, Any] = {"comments": []}
 BOT_SHARE = 0.9  # ``auto`` serves the bot's chat once it has this share of the replay's rows
-_lt, _bt, _vt, _sgt = Log.__table__, BotLog.__table__, Vod.__table__, VodSegment.__table__
+_lt, _bt, _vt = Log.__table__, BotLog.__table__, Vod.__table__
 HIDDEN = "Vod not found"  # a hidden VOD's chat answers like a missing page
 
 
@@ -223,9 +222,9 @@ class Comments:
         )).first()
 
     async def _synthetic(self, conn: AsyncConnection, vod_id: str) -> dict:
-        """A synthetic VOD's (empty) page: where its chat is, as stored (``end`` null: to the source's end)."""
-        rows = await conn.execute(select(_sgt).where(_sgt.c.vod_id == vod_id).order_by(_sgt.c.pos))
-        return {**EMPTY, "segments": [Segment.of_row(r).json() for r in rows]}
+        """A synthetic VOD's (empty) page: where its chat is (the real VODs it plays, as its JSON lists them)."""
+        segments = (await flat_segments(conn, [vod_id])).get(vod_id, [])
+        return {**EMPTY, "segments": [x.json() for x in segments]}
 
     async def _rows(self, conn: AsyncConnection, src: _Source, *where) -> list[dict]:
         stmt = (

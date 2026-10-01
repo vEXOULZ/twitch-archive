@@ -24,7 +24,7 @@ from sqlalchemy import Column, Table, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.models import BotLog, Emote, Game, Log, Stream, Vod, VodSegment
-from archive_common.segments import EPS, Segment, resolve, seconds
+from archive_common.segments import EPS, MAX_DEPTH, Segment, flatten, resolve, seconds
 from archive_common.timeutil import hhmmss_to_seconds
 
 
@@ -337,9 +337,36 @@ def _game_in(game: dict, seg: Segment, synthetic_id: str) -> dict | None:
             "start_time": str(seconds(start + shift)), "end_time": str(seconds(end + shift))}
 
 
+async def flat_segments(conn: AsyncConnection, ids: list[str]) -> dict[str, list[Segment]]:
+    """The segments of each synthetic VOD in ``ids``, resolved and flattened (``segments.flatten``):
+    windows of real VODs only, each with its stream. A VOD that isn't synthetic has no entry."""
+    raw: dict[str, list[Segment]] = {}
+    supersedes: dict[str, bool] = {}
+    todo = set(ids)
+    for _ in range(MAX_DEPTH + 2):  # each level's synthetic sources, then theirs
+        todo -= raw.keys()
+        if not todo:
+            break
+        rows = (await conn.execute(
+            select(_sgt, _vt.c.synthetic).join(_vt, _vt.c.id == _sgt.c.vod_id)
+            .where(_sgt.c.vod_id.in_(todo)).order_by(_sgt.c.vod_id, _sgt.c.pos)
+        )).mappings().all()
+        for r in rows:
+            raw.setdefault(r["vod_id"], []).append(Segment.of_row(r))
+            supersedes[r["vod_id"]] = bool((r["synthetic"] or {}).get("supersedes"))
+        todo = {x.source_id for k in todo for x in raw.get(k, [])}
+    if not raw:
+        return {}
+    sources = {x.source_id for v in raw.values() for x in v}
+    durations = {vod_id: float(duration_seconds(duration) or 0)
+                 for vod_id, duration in await conn.execute(select(_vt.c.id, _vt.c.duration).where(_vt.c.id.in_(sources)))}
+    resolved = {k: resolve(v, durations) for k, v in raw.items()}
+    return {k: flatten(resolved[k], resolved, supersedes, supersedes[k]) for k in ids if k in resolved}
+
+
 async def attach_segments(conn: AsyncConnection, vods: list[dict]) -> None:
-    """Synthetic VODs get ``synthetic.segments`` (each one's end resolved) and the games of their
-    sources' windows (after ``attach_games``); a VOD a shown synthetic VOD is made of gets
+    """Synthetic VODs get ``synthetic.segments`` (``flat_segments``: real VODs only, ends resolved,
+    streams numbered) and the games of their sources' windows (after ``attach_games``); a VOD a shown synthetic VOD is made of gets
     ``superseded_by`` (merges, splits: where each part of it went) or ``appears_in`` (the others)."""
     ids = [v["id"] for v in vods if "id" in v]
     if not ids:
@@ -353,16 +380,7 @@ async def attach_segments(conn: AsyncConnection, vods: list[dict]) -> None:
     )).mappings().all()
     if not rows:
         return
-    mine: dict[str, list[Segment]] = {}
-    for r in rows:
-        if r["vod_id"] in ids:
-            mine.setdefault(r["vod_id"], []).append(Segment.of_row(r))
-    durations: dict[str, float] = {}
-    if mine:
-        sources = {x.source_id for v in mine.values() for x in v}
-        for vod_id, duration in await conn.execute(select(_vt.c.id, _vt.c.duration).where(_vt.c.id.in_(sources))):
-            durations[vod_id] = float(duration_seconds(duration) or 0)
-    resolved = {k: resolve(v, durations) for k, v in mine.items()}
+    resolved = await flat_segments(conn, list({r["vod_id"] for r in rows if r["vod_id"] in ids}))
     games = await _games_for(conn, list({x.source_id for v in resolved.values() for x in v}))
     # Where the parts of each source went, for superseded_by / appears_in.
     used: dict[str, dict[str, Any]] = {}

@@ -8,7 +8,8 @@ synthetic VODs it is in (``superseded_by``, ``appears_in``).
 
 ``recompose`` writes a synthetic VOD's cached columns from its sources again. The monitor runs
 ``recompose_stale`` every round, which picks the ones with a source updated since: that is how a
-backfill or an edit of a source reaches the synthetic VODs made of it.
+backfill or an edit of a source reaches the synthetic VODs made of it. A source may be a synthetic
+VOD itself (``compose.check_nesting``); one that others are made of cannot be deleted.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from archive_common.db import VOD_CHANGED, get_sessionmaker
 from archive_common.models import Vod, VodSegment
-from archive_common.segments import EPS, Segment, resolve
+from archive_common.segments import EPS, MAX_DEPTH, Segment, resolve
 from archive_common.timeutil import hhmmss_to_seconds
 
 from . import compose
@@ -61,6 +62,22 @@ async def _segments(s: AsyncSession, vod_id: str) -> list[Segment]:
 
 async def _sources(s: AsyncSession, ids: set[str]) -> dict[str, Source]:
     return {v.id: source_of(v) for v in (await s.execute(select(Vod).where(Vod.id.in_(ids)))).scalars()}
+
+
+async def _inner(s: AsyncSession, ids: set[str]) -> dict[str, list[Segment]]:
+    """The segments of each synthetic VOD among ``ids``, and of theirs, one level past ``MAX_DEPTH``
+    (enough for ``check_nesting`` to see a cycle or a too-deep source)."""
+    out: dict[str, list[Segment]] = {}
+    for _ in range(MAX_DEPTH + 1):
+        ids = ids - out.keys()
+        if not ids:
+            break
+        rows = (await s.execute(select(VodSegment).where(VodSegment.vod_id.in_(ids))
+                                .order_by(VodSegment.vod_id, VodSegment.pos))).scalars()
+        for r in rows:
+            out.setdefault(r.vod_id, []).append(Segment.of_row(r))
+        ids = {x.source_id for k in ids for x in out.get(k, [])}
+    return out
 
 
 async def _locked(s: AsyncSession, vod_id: str) -> Vod:
@@ -122,6 +139,9 @@ def synthetic_json(vod: Vod, segments: list[Segment]) -> dict[str, Any]:
 async def _checked(s: AsyncSession, vod_id: str, segments: list[Segment], supersedes: bool) -> dict[str, Source]:
     sources = await _sources(s, {seg.source_id for seg in segments})
     _composed(compose.validate, segments, sources)
+    if any(x.synthetic for x in sources.values()):
+        _composed(compose.check_nesting, vod_id, segments,
+                  await _inner(s, {k for k, x in sources.items() if x.synthetic}))
     if supersedes:
         await _no_double_cover(s, vod_id, segments, sources)
     return sources
@@ -181,6 +201,11 @@ async def remove(vod_id: str) -> dict[str, Any]:
     """Delete a synthetic VOD (its segments go with it); its sources are as they were. Returns what it was."""
     async with get_sessionmaker()() as s, s.begin():
         vod = await _locked(s, vod_id)
+        users = list((await s.execute(select(VodSegment.vod_id).where(VodSegment.source_id == vod_id)
+                                      .distinct().order_by(VodSegment.vod_id))).scalars())
+        if users:
+            raise SyntheticError(409, f"{', '.join(users)} {'is' if len(users) == 1 else 'are'} made of {vod_id}; "
+                                      "change or delete that first", synthetic=users[0], vodId=vod_id)
         segments = await _segments(s, vod_id)
         before = synthetic_json(vod, segments)
         await s.execute(delete(Vod).where(Vod.id == vod_id))
@@ -258,9 +283,16 @@ async def stale_ids(limit: int = STALE_BATCH) -> list[str]:
 
 
 async def recompose_stale() -> list[str]:
-    ids = await stale_ids()
-    if ids:
-        done = await recompose(*ids)
-        log.info("recomposed synthetic VOD(s) %s", ", ".join(done))
-        return done
-    return []
+    """Recompose the stale ones; again for those made of them (a synthetic source just recomposed is a
+    newer source), down to ``MAX_DEPTH``."""
+    done: list[str] = []
+    for _ in range(MAX_DEPTH + 1):
+        ids = await stale_ids()
+        if not ids:
+            break
+        now = await recompose(*ids)
+        log.info("recomposed synthetic VOD(s) %s", ", ".join(now))
+        done += now
+        if not now:
+            break
+    return done

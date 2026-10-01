@@ -4,7 +4,7 @@ import datetime as dt
 
 import pytest
 
-from archive_common.segments import Segment, resolve, total
+from archive_common.segments import Segment, flatten, resolve, total
 from archive_worker import compose
 from archive_worker.compose import ComposeError, Source
 
@@ -65,10 +65,48 @@ def test_validate_refused(segments, message):
         compose.validate(segments, SOURCES)
 
 
-def test_no_synthetic_of_synthetics():
-    nested = Source("a+b", 100.0, [], START, synthetic=True)
-    with pytest.raises(ComposeError, match="synthetic"):
-        compose.validate([Segment("a+b", 0, None, 0)], {"a+b": nested})
+def test_synthetic_sources_validate_like_real_ones():
+    merged = Source("a+b", 100.0, [], START, synthetic=True)
+    compose.validate([Segment("a+b", 0, None, 0)], {"a+b": merged})
+    with pytest.raises(ComposeError, match=r"after the end of a\+b"):
+        compose.validate([Segment("a+b", 0, 200, 0)], {"a+b": merged})
+
+
+def test_nesting_refuses_cycles_and_depth():
+    inner = {"m": [Segment("a", 0, None, 0)], "p": [Segment("m", 0, 10, 0)]}
+    compose.check_nesting("q", [Segment("p", 0, None, 0)], inner)
+    with pytest.raises(ComposeError, match="m -> p -> m: a synthetic VOD cannot be made of itself"):
+        compose.check_nesting("m", [Segment("p", 0, None, 0)], inner)
+    deep = {"s1": [Segment("s2", 0, None, 0)], "s2": [Segment("s3", 0, None, 0)], "s3": [Segment("s4", 0, None, 0)],
+            "s4": [Segment("a", 0, None, 0)]}
+    compose.check_nesting("top", [Segment("s2", 0, None, 0)], deep)  # s2, s3, s4: 3 levels
+    with pytest.raises(ComposeError, match="nested at most 3 deep"):
+        compose.check_nesting("top", [Segment("s1", 0, None, 0)], deep)
+
+
+def test_flatten_maps_windows_of_synthetic_sources_to_real_vods():
+    # m: a merge of a (0-100) and b (from 120); p plays m 50-150, then c, then m again 200-250.
+    inner = {"m": [Segment("a", 0, 100, 0), Segment("b", 0, 300, 120)]}
+    top = [Segment("m", 50, 150, 0, "first"), Segment("c", 10, 20, 100), Segment("m", 200, 250, 110)]
+    assert flatten(top, inner, {"m": True}) == [
+        Segment("a", 50, 100, 0, "first", 0),
+        Segment("b", 0, 30, 70, "first", 0),  # the gap (100-120 of m) plays nothing
+        Segment("c", 10, 20, 100, None, 1),
+        Segment("b", 80, 130, 110, None, 2),  # m again after c: a new run, so a new stream
+    ]
+    # A playthrough inside a playthrough keeps its streams apart; the same window shows the same way.
+    assert [x.stream for x in flatten(top, inner, {"m": False})] == [0, 1, 2, 3]
+    assert [x.stream for x in flatten([Segment("a", 0, 10, 0), Segment("a", 50, 60, 10)], {}, {})] == [0, 0]
+    # A merge of its own is one broadcast: one stream.
+    assert [x.stream for x in flatten(top, inner, {"m": True}, one_stream=True)] == [0, 0, 0, 0]
+
+
+def test_flatten_goes_down_and_stops_at_the_depth_limit():
+    inner = {"x": [Segment("y", 0, 10, 0)], "y": [Segment("a", 100, 110, 0)]}
+    assert flatten([Segment("x", 2, 5, 0)], inner, {}) == [Segment("a", 102, 105, 0, None, 0)]
+    loop = {"x": [Segment("x", 0, 10, 0)]}
+    with pytest.raises(ValueError, match="nested more than"):
+        flatten([Segment("x", 0, 10, 0)], loop, {})
 
 
 def test_resolve_open_end_follows_the_source_and_stops_at_the_next():

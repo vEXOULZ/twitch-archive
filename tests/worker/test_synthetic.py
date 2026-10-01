@@ -107,8 +107,8 @@ async def test_merge_split_and_undo(admin):
 
     vod = (await public(f"/vods/{AB}")).json()
     assert vod["synthetic"] == {"supersedes": True, "segments": [
-        {"vodId": A, "start": 0, "end": 7200, "at": 0, "label": None},
-        {"vodId": B, "start": 0, "end": 3600, "at": OFFSET, "label": None}]}
+        {"vodId": A, "start": 0, "end": 7200, "at": 0, "label": None, "stream": 0},
+        {"vodId": B, "start": 0, "end": 3600, "at": OFFSET, "label": None, "stream": 0}]}
     assert (vod["duration"], vod["tags"], vod["createdAt"]) == ("03:05:00", [], "2001-03-04T20:00:00.000Z")
     assert [(c["start"], c.get("kind")) for c in vod["chapters"]] == [(0, None), (3600, None), (7200, "gap"),
                                                                        (OFFSET, None)]
@@ -146,7 +146,8 @@ async def test_merge_split_and_undo(admin):
     assert r.status_code == 201, r.text
     assert [(v["id"], v["duration"]) for v in r.json()] == [(f"{A}-1", "00:16:41"), (f"{A}-2", "01:43:20")]
     second = (await public(f"/vods/{A}-2")).json()
-    assert second["synthetic"]["segments"] == [{"vodId": A, "start": 1000.5, "end": 7200, "at": 0, "label": None}]
+    assert second["synthetic"]["segments"] == [
+        {"vodId": A, "start": 1000.5, "end": 7200, "at": 0, "label": None, "stream": 0}]
     assert second["createdAt"] == "2001-03-04T20:16:40.500Z"
     assert _ids((await public(f"/vods?{ALL}")).json()) == {f"{A}-1", f"{A}-2", B}
     assert await _sources() == before
@@ -204,3 +205,44 @@ async def test_playthrough_tags_and_recompose(admin):
     assert r.status_code == 200, r.text
     assert (await public(f"/vods/{P}")).status_code == 404
     assert "appears_in" not in (await public(f"/vods/{B}")).json()  # a hidden VOD is linked from nowhere
+
+
+async def test_nested_synthetic(admin):
+    r = await admin.post(f"/api/v2/vods/{A}/merge", headers=KEY, json={"source": B})
+    assert r.status_code == 201, r.text
+    # The test game, from the merged broadcast: A's second hour, the merge's gap, then B.
+    body = {"id": P, "title": "Test Game", "tags": ["compilation"], "segments": [{"vod_id": AB, "start": 3600}]}
+    r = await admin.post("/api/v2/synthetic", headers=KEY, json=body)
+    assert r.status_code == 201, r.text
+    assert r.json()["segments"] == [{"vod_id": AB, "start": 3600, "end": None, "at": 0, "label": None}]
+
+    # Served as windows of the real VODs, all one stream (a merge is one broadcast).
+    vod = (await public(f"/vods/{P}")).json()
+    assert vod["synthetic"]["segments"] == [
+        {"vodId": A, "start": 3600, "end": 7200, "at": 0, "label": None, "stream": 0},
+        {"vodId": B, "start": 0, "end": 3600, "at": 3900, "label": None, "stream": 0}]
+    [game] = vod["games"]
+    assert (game["sourceVodId"], game["start_time"], game["end_time"]) == (B, "4000", "4100")
+    page = (await public(f"/v1/vods/{P}/comments?content_offset_seconds=0")).json()
+    assert [s["vodId"] for s in page["segments"]] == [A, B]
+    assert (await public(f"/vods/{quote(AB)}")).json()["appears_in"] == [
+        {"id": P, "title": "Test Game", "tags": ["compilation"]}]
+
+    # No cycles, and the merge cannot go while the playthrough is made of it.
+    r = await admin.put(f"/api/v2/synthetic/{quote(AB)}", headers=KEY, json={"segments": [{"vod_id": P}]})
+    assert r.status_code == 422 and "made of itself" in r.text
+    r = await admin.delete(f"/api/v2/synthetic/{quote(AB)}", headers=KEY)
+    assert r.status_code == 409 and P in r.text
+
+    # A change to a real VOD reaches the merge, then the playthrough, in one sweep.
+    async with get_sessionmaker()() as s:
+        await s.execute(update(Vod).where(Vod.id == B).values(
+            chapters=[_ch(0, 1800, "Test Game", GAME), _ch(1800, 1800, "Other")], updated_at=func.now()))
+        await s.commit()
+    done = await synthetic.recompose_stale()
+    assert done.index(AB) < done.index(P)
+    vod = (await public(f"/vods/{P}")).json()
+    assert [c["name"] for c in vod["chapters"] if c.get("kind") != "gap"][-1] == "Other"
+
+    assert (await admin.delete(f"/api/v2/synthetic/{P}", headers=KEY)).status_code == 200
+    assert (await admin.delete(f"/api/v2/synthetic/{quote(AB)}", headers=KEY)).status_code == 200

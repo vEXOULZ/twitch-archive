@@ -13,6 +13,10 @@ of its sources' that lists, search and status read like any VOD's:
 
 The site plays each segment with its source's own timeline (uploads, delay, cuts), so nothing
 here touches uploads: a segment may start or end anywhere, mid-upload included.
+
+A source may be another synthetic VOD (``check_nesting``): its cached chapters and duration are
+already on its own timeline, so composing reads it like a real VOD; what plays it is flattened to
+real VODs (``segments.flatten``).
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from archive_common.segments import EPS, Segment, resolve, total
+from archive_common.segments import EPS, MAX_DEPTH, Segment, resolve, total
 from archive_common.timeutil import format_hhmmss
 
 from . import timeline
@@ -111,8 +115,7 @@ def parse(items: Any) -> list[Segment]:
 
 
 def validate(segments: list[Segment], sources: Mapping[str, Source]) -> None:
-    """The segments make a VOD: real sources (no synthetic of synthetics: list its segments instead),
-    each window inside its source, the first one at 0, in ``at`` order without overlapping."""
+    """The segments make a VOD: each window inside its source (real or synthetic, see ``check_nesting``), the first one at 0, in ``at`` order without overlapping."""
     if not segments:
         raise ComposeError("A synthetic VOD needs at least one segment")
     if segments[0].at > EPS:
@@ -122,8 +125,6 @@ def validate(segments: list[Segment], sources: Mapping[str, Source]) -> None:
         src = sources.get(seg.source_id)
         if src is None:
             raise ComposeError(f"{where}: no VOD {seg.source_id}", vodId=seg.source_id)
-        if src.synthetic:
-            raise ComposeError(f"{where}: {src.id} is a synthetic VOD; use its segments instead", vodId=src.id)
         if src.duration > 0 and seg.start >= src.duration - EPS:
             raise ComposeError(f"{where} starts at {seg.start:g}s, at or after the end of {src.id} "
                                f"({src.duration:g}s)", vodId=src.id)
@@ -138,6 +139,23 @@ def validate(segments: list[Segment], sources: Mapping[str, Source]) -> None:
             if prev.at + prev_end - prev.start > seg.at + EPS:
                 raise ComposeError(f"{where} is at {seg.at:g}s, inside segments[{i - 1}] (which runs to "
                                    f"{prev.at + prev_end - prev.start:g}s)")
+
+
+def check_nesting(vod_id: str, segments: list[Segment], inner: Mapping[str, list[Segment]]) -> None:
+    """Synthetic sources (``inner``: each synthetic VOD's own segments, as deep as they go) neither
+    lead back to ``vod_id`` nor go more than ``MAX_DEPTH`` levels down."""
+
+    def walk(ids: set[str], depth: int, path: tuple[str, ...]) -> None:
+        for source_id in sorted(ids & inner.keys()):
+            if source_id == vod_id:
+                raise ComposeError(f"{' -> '.join((vod_id, *path, source_id))}: a synthetic VOD cannot be made "
+                                   "of itself", vodId=source_id)
+            if depth >= MAX_DEPTH:
+                raise ComposeError(f"{' -> '.join((vod_id, *path, source_id))}: synthetic VODs can be nested at "
+                                   f"most {MAX_DEPTH} deep", vodId=source_id)
+            walk({x.source_id for x in inner[source_id]}, depth + 1, (*path, source_id))
+
+    walk({x.source_id for x in segments}, 0, ())
 
 
 def derive(segments: list[Segment], sources: Mapping[str, Source]) -> dict[str, Any]:
