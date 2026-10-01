@@ -76,7 +76,7 @@ class JobEvents:
 
     def install(self) -> None:
         """Record everything logged through a JobContext, INFO and up even when
-        ARCHIVE_LOG_LEVEL is higher (logs.setup keeps stderr at that level)."""
+        ARCHIVE_LOG_LEVEL is higher (logs.setup keeps stdout at that level)."""
         logger = logging.getLogger(JOB_LOGGER)
         if logger.getEffectiveLevel() > logging.INFO:
             logger.setLevel(logging.INFO)

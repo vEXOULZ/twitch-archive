@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+import sys
+
 import pytest
 
 from archive_common.config import Settings
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
+from archive_worker import jobs, legacy_jobs
 from archive_worker.context import Deps, JobContext
 from archive_worker.youtube import YouTube
+
+if sys.platform == "win32":
+    # The job runtime's psycopg pool needs a selector loop on Windows (asyncpg works on either).
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 @pytest.fixture
@@ -60,3 +68,41 @@ async def db():
     except Exception as exc:  # pragma: no cover - environment dependent
         pytest.skip(f"database unavailable: {exc}")
     return get_engine()
+
+
+@pytest.fixture
+async def make_service(deps, db):
+    """``await make_service(start=True)``: a JobService whose runtime runs the kinds in ``jobs.KINDS``
+    (a test's monkeypatched ones too) on the dev DB, closed after the test. ``start=False`` only
+    opens it: jobs are queued but nothing runs them."""
+    made: list = []
+
+    async def make(*, start: bool = True) -> jobs.JobService:
+        runtime = jobs.create_runtime(deps, poll_interval=0.2, shutdown_timeout=2.0)
+        await runtime.open()
+        made.append(runtime)
+        if start:
+            await runtime.start()
+        return jobs.JobService(deps, runtime, legacy_jobs.Runner(deps, runtime.registry))
+
+    yield make
+    for runtime in made:
+        await runtime.close()
+
+
+@pytest.fixture
+def wait_job():
+    """``await wait_job(job_id, "done", ...)``: the job (as ``jobs.get`` reads it) once in one of the states."""
+
+    async def wait(job_id: int, *states: str, timeout: float = 15.0):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            job = await jobs.get(job_id)
+            if job.state in states:
+                return job
+            if loop.time() > deadline:
+                raise AssertionError(f"job {job_id} still {job.state} ({job.last_error}); wanted {states}")
+            await asyncio.sleep(0.05)
+
+    return wait

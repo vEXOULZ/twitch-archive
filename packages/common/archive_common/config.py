@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,7 @@ class Settings(BaseSettings):
     domain_name: str = ""  # frontend host for the "Chat Replay" link
     timezone: str = "UTC"
     log_level: str = "INFO"
+    log_format: Literal["json", "console"] = "console"  # json: one object per line, for containers
 
     # ── Twitch ────────────────────────────────────────────────────────────
     twitch_id: str = ""

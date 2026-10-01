@@ -8,11 +8,12 @@ import httpx
 import pytest
 import respx
 from pydantic import SecretStr
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 
 from archive_common.config import get_settings
 from archive_common.db import VOD_CHANGED, execute, get_sessionmaker
-from archive_common.models import AdminAudit, Emote, Game, Job, Stream, Vod
+from archive_common.audit import AUDIT_LOG
+from archive_common.models import Emote, Game, Job, Stream, Vod
 from archive_common.twitch.helix import HELIX, TOKEN_URL
 from archive_api.invalidation import asyncpg_dsn
 from archive_worker import events as events_mod
@@ -20,6 +21,7 @@ from archive_worker import jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.admin_auth import SESSION_COOKIE
 from archive_worker.events import JobEvents
+from archive_worker.job_rows import RUNS, subject_of
 from archive_worker.steps import metadata
 
 VOD = "test-admin-dashboard-vod"
@@ -31,12 +33,15 @@ TEMPLATE = "https://static-cdn.jtvnw.net/ttv-boxart/509658-{width}x{height}.jpg"
 async def _reset(audit_after: int | None = None):
     async with get_sessionmaker()() as s:
         await s.execute(delete(Job).where(Job.vod_id == VOD))  # job_events cascade
+        await s.execute(delete(RUNS).where(RUNS.c.subject == subject_of(VOD)))  # job_run_events cascade
+        await s.execute(text("SET LOCAL search_path TO jobs, public"))  # procrastinate's SQL is unqualified
+        await s.execute(text("DELETE FROM procrastinate_jobs WHERE lock LIKE :vod"), {"vod": f"vod:{VOD}:%"})
         await s.execute(delete(Emote).where(Emote.vod_id == VOD))
         await s.execute(delete(Game).where(Game.vod_id == VOD))
         await s.execute(delete(Vod).where(Vod.id == VOD))
         await s.execute(delete(Stream).where(Stream.id == STREAM))
         if audit_after is not None:
-            await s.execute(delete(AdminAudit).where(AdminAudit.id > audit_after))
+            await s.execute(delete(AUDIT_LOG).where(AUDIT_LOG.c.id > audit_after))
         await s.commit()
 
 
@@ -44,7 +49,7 @@ async def _reset(audit_after: int | None = None):
 async def vod(db):
     await _reset()
     async with get_sessionmaker()() as s:
-        audit_after = (await s.execute(select(func.max(AdminAudit.id)))).scalar() or 0
+        audit_after = (await s.execute(select(func.max(AUDIT_LOG.c.id)))).scalar() or 0
     async with get_sessionmaker()() as s:
         s.add(Vod(id=VOD, title="old title", created_at=dt.datetime.now(dt.timezone.utc), duration="02:00:00",
                   youtube=[{"id": "yt1", "type": "vod", "duration": 7200, "part": 1, "thumbnail_url": "https://t/1"}]))
@@ -79,11 +84,12 @@ def recorder(deps):
 
 
 @pytest.fixture
-def app(deps, recorder):
+async def app(deps, recorder, make_service):
+    """The admin app and its JobService, whose runtime is open but runs nothing until started."""
     deps.settings.admin_api_key = SecretStr("k")
     deps.settings.admin_password = SecretStr("pw")
-    runner = jobs.Runner(deps)
-    return create_admin_app(deps, runner), runner
+    service = await make_service(start=False)
+    return create_admin_app(deps, service), service
 
 
 def client(app) -> httpx.AsyncClient:
@@ -93,27 +99,22 @@ def client(app) -> httpx.AsyncClient:
 # ── Job events ────────────────────────────────────────────────────────────
 
 
-async def test_job_events_record_logs_steps_and_progress(vod, steps, app):
-    runner = app[1]
-    job = await jobs.enqueue("test", vod, settings=runner.deps.settings)
-    claimed = await runner._claim()
-    assert claimed.id == job.id
-    await runner._run(claimed)
+async def test_job_events_record_logs_steps_and_progress(vod, steps, app, wait_job):
+    service = app[1]
+    job = await service.enqueue("test", vod)
+    await service.runtime.start()
+    await wait_job(job.id, "done")
 
     async with client(app) as c:
         page = (await c.get(f"/admin/jobs/{job.id}/events", headers=KEY)).json()
         rows = page["data"]
-        assert [(e["level"], e["step"], e["message"]) for e in rows] == [
-            ("info", "a", "running test (vod=test-admin-dashboard-vod) from step a"),
-            ("info", "a", "step a"),
-            ("info", "a", "hello from a"),
-            ("info", "a", "half way"),
-            ("info", "b", "step b"),
-            ("warning", "b", "careful in b"),
-            ("info", None, "job test finished"),
-        ]
-        assert rows[3]["progress"] == {"done": 1, "total": 2, "unit": "parts"}
-        assert rows[2]["progress"] is None
+        lines = [(e["level"], e["step"], e["message"]) for e in rows]
+        mine = [("info", "a", "hello from a"), ("info", "a", "half way"), ("warning", "b", "careful in b")]
+        assert [line for line in lines if line in mine] == mine  # in order, among the runtime's own lines
+        half = rows[lines.index(mine[1])]
+        assert half["progress"] == {"done": 1, "total": 2, "unit": "parts"}
+        assert rows[lines.index(mine[0])]["progress"] is None
+        assert len(rows) >= 5
         assert all(e["at"].endswith("+00:00") for e in rows)
         seqs = [e["seq"] for e in rows]
         assert seqs == sorted(seqs) and page["next"] == seqs[-1]
@@ -127,7 +128,10 @@ async def test_job_events_record_logs_steps_and_progress(vod, steps, app):
 
 async def test_job_events_are_capped_per_job(vod, monkeypatch, deps):
     monkeypatch.setattr(events_mod, "PRUNE_EVERY", 1)
-    job = await jobs.enqueue("chat", vod, paused=True, settings=deps.settings)
+    async with get_sessionmaker()() as s:  # the legacy table's event log
+        job = Job(kind="chat", vod_id=vod, step="chat", state="paused", payload={})
+        s.add(job)
+        await s.commit()
     rec = JobEvents(cap=5)
     for i in range(12):
         rec.add(job.id, "info", "chat", f"line {i}")
@@ -140,8 +144,7 @@ async def test_job_events_are_capped_per_job(vod, monkeypatch, deps):
 
 
 async def test_jobs_before_paging_and_patch(vod, app):
-    settings = app[1].deps.settings
-    ids = [(await jobs.enqueue("download", vod, paused=True, settings=settings)).id for _ in range(3)]
+    ids = [(await app[1].enqueue("download", vod, paused=True)).id for _ in range(3)]
     async with client(app) as c:
         page = (await c.get(f"/admin/jobs?vodId={vod}&limit=2", headers=KEY)).json()["data"]
         assert [j["id"] for j in page] == ids[:0:-1]
@@ -170,7 +173,7 @@ def chapter(start, length, name="Just Chatting"):
 
 
 async def test_vod_editing(vod, app, make_ctx, monkeypatch):
-    await jobs.enqueue("emotes", vod, paused=True, settings=app[1].deps.settings)
+    await app[1].enqueue("emotes", vod, paused=True)
     async with client(app) as c:
         got = (await c.get(f"/admin/vods/{vod}", headers=KEY)).json()
         assert (got["id"], got["title"], got["chaptersLocked"], got["games"]) == (vod, "old title", False, [])
@@ -286,7 +289,7 @@ async def test_vod_fields_and_the_admin_list(vod, app):
 
         audit = (await c.get("/admin/audit?limit=20", headers=KEY)).json()["data"]
         mine = [e["detail"] for e in audit
-                if e["target"] == f"vod:{vod}" and e["action"] == "PATCH /admin/vods/{vod_id}"]
+                if e["target"] == f"vod:{vod}" and e["action"] == "vod.update"]
         assert mine[0] == {"before": {"hidden": True}, "after": {"hidden": False}}
         assert mine[-1] == {
             "before": {"thumbnailUrl": None, "duration": "02:00:00", "createdAt": mine[-1]["before"]["createdAt"]},
@@ -326,7 +329,7 @@ async def test_games_rows(vod, app):
 
         assert (await c.put(f"/admin/vods/{vod}/games", headers=KEY, json={"games": []})).json()["games"] == []
         audit = (await c.get("/admin/audit?limit=5", headers=KEY)).json()["data"][0]
-        assert audit["action"] == "PUT /admin/vods/{vod_id}/games" and audit["detail"]["after"] == []
+        assert audit["action"] == "vod.games.replace" and audit["detail"]["after"] == []
         assert [g["game_name"] for g in audit["detail"]["before"]] == ["Elden Ring", "Renamed"]
 
 
@@ -455,9 +458,9 @@ async def test_health(vod, app, monkeypatch, respx_mock):
         return {"authorized": True, "valid": False, "error": "RefreshError: invalid_grant", "checkedAt": checked}
 
     monkeypatch.setattr(deps.youtube, "cached_check", cached_check)
-    job = await jobs.enqueue("chat", vod, settings=deps.settings)
+    job = await app[1].enqueue("chat", vod)
     async with get_sessionmaker()() as s:
-        (await s.get(Job, job.id)).state = "failed"
+        await s.execute(update(RUNS).where(RUNS.c.id == job.id).values(state="failed", updated_at=func.now()))
         s.add(Stream(id=STREAM, started_at=dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=365), is_live=True))
         await s.commit()
 
@@ -491,15 +494,16 @@ async def test_audit_log_records_state_changes_with_actor(vod, app):
         mine = [e for e in (await c.get("/admin/audit?limit=500", headers=KEY)).json()["data"]
                 if e["target"] == f"vod:{vod}"]
         assert [(e["actor"], e["action"], e["detail"]) for e in mine] == [
-            ("password", "PUT /admin/vods/{vod_id}/drive", {"drive": []}),
-            ("api-key", "PATCH /admin/vods/{vod_id}", {"before": {"title": "old title"}, "after": {"title": "by key"}}),
+            ("password", "vod.drive.replace", {"drive": []}),
+            ("api-key", "vod.update", {"before": {"title": "old title"}, "after": {"title": "by key"}}),
         ]
         assert mine[0]["at"].endswith("+00:00")
         older = (await c.get(f"/admin/audit?before={mine[0]['id']}&limit=1", headers=KEY)).json()["data"]
-        assert [e["action"] for e in older] == ["POST /admin/session"]  # the login, between the two
+        assert [e["action"] for e in older] == ["session.login"]  # the login, between the two
 
     async with get_sessionmaker()() as s:
-        logins = (await s.execute(
-            select(AdminAudit).where(AdminAudit.action == "POST /admin/session").order_by(AdminAudit.id.desc())
-        )).scalars().first()
-    assert logins is not None and logins.actor == "password" and logins.detail == {}  # password never stored
+        login = (await s.execute(
+            select(AUDIT_LOG).where(AUDIT_LOG.c.action == "session.login").order_by(AUDIT_LOG.c.id.desc())
+        )).first()
+    assert login is not None and (login.actor_kind, login.actor_id, login.via) == ("user", "password", "web")
+    assert login.detail == {}  # the password is never stored

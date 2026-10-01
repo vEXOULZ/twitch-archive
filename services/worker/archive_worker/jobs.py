@@ -1,37 +1,51 @@
-"""Postgres-backed job queue and runner.
+"""The worker's jobs, run by vex-platform's ``JobRuntime`` (rows in ``jobs.job_runs``).
 
-A job is a list of named steps (see ``KINDS``). ``jobs.step`` is the first step
-that has not finished: the runner advances it (together with ``jobs.payload``,
-which carries state between steps) only after a step returns, so a restarted
-worker never repeats a finished step. A step interrupted part-way is re-run, so
-steps must tolerate that (most checkpoint their own progress in the payload).
+A job is a list of named steps (see ``KINDS``). ``step`` is the first step that has not finished:
+the runtime advances it (together with ``payload``, which carries state between steps) only after a
+step returns, so a restarted worker never repeats a finished step. A step interrupted part-way is
+re-run, so steps must tolerate that (most checkpoint their own progress in the payload).
 
-Manual gates: a job pauses (state ``paused``) when it is about to start a gated
-step, and waits there until ``resume``. Gates come from the job's own
-``pause_before`` or, when that is NULL, ``Settings.manual_steps[kind]``.
-``pause_next`` pauses at the next step boundary once (single-stepping, or a
-pause requested while the job runs). Gates are checked when a job moves on to
-a step, so resuming, retrying or recovering a job runs its current step.
+Manual gates: a job pauses (state ``paused``) when it is about to start a gated step, and waits
+there until resumed. Gates come from the job's own ``pause_before`` or, when that is NULL,
+``Settings.manual_steps[kind]`` (``apply_settings`` hands those to the registry). ``pause_next``
+pauses at the next step boundary once. Gates are checked when a job moves on to a step, so
+resuming, retrying or recovering a job runs its current step.
+
+A job's subject is ``vod:<id>``; one job per (VOD, video type) runs at a time (``_lock``). Jobs
+queued before the runtime existed are finished by legacy_jobs.py; ``JobService`` acts on either.
+
+Every action on a job is audited (``audit_log``): by the runtime, in the transaction that makes it,
+or for a legacy job by ``JobService`` once it is made.
 """
 
 from __future__ import annotations
 
-import asyncio
-import datetime as dt
-import logging
-import traceback
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select, update
+from sqlalchemy import Row, select
+from sqlalchemy.engine import make_url
+from vex_platform.actor import SYSTEM, Actor
+from vex_platform.audit import AuditEntry
+from vex_platform.jobs import InvalidJob, JobConflict, JobNotFound, JobRun, JobRuntime, Registry
 
-from archive_common.config import Settings, get_settings
-from archive_common.db import execute, get_sessionmaker
-from archive_common.models import Job
+from archive_common import audit
+from archive_common.config import Settings
+from archive_common.db import get_sessionmaker
 
-from .context import Deps, JobContext, StepError, StepRefused
+from . import legacy_jobs
+from .context import Deps, JobContext
+from .events import event_json, iso_utc
+from .job_rows import ACTIVE, ALL_JOBS, STATES, subject_of, vod_of
 from .steps import STEPS
 
-log = logging.getLogger(__name__)
+__all__ = [
+    "ACTIVE", "KINDS", "STATES", "InvalidJob", "JobConflict", "JobNotFound", "JobService", "apply_settings",
+    "build_registry", "check_steps", "create_runtime", "exists_any", "find_active", "get",
+]
 
 KINDS: dict[str, list[str]] = {
     # Stream went live (or /admin/hls/download): follow the VOD playlist, then process.
@@ -60,25 +74,8 @@ KINDS: dict[str, list[str]] = {
     "bot_chat_backfill": ["bot_chat_backfill"],
 }
 
-ACTIVE = ("queued", "running", "paused")
-STATES = ("queued", "running", "paused", "done", "failed", "cancelled")
-
-
-class JobNotFound(LookupError):
-    def __init__(self, job_id: int) -> None:
-        super().__init__(f"no job {job_id}")
-
-
-class JobConflict(Exception):
-    """The job is in a state that does not allow the action; the message says why."""
-
-
-class InvalidJob(ValueError):
-    """An unknown job kind or step name."""
-
-
-def _now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+# The old runner waited 60·2^n seconds after the n-th failure; the runtime waits base·2^(n-1).
+RETRY_BASE_SECONDS = 120
 
 
 def check_steps(kind: str, steps: list[str]) -> None:
@@ -90,315 +87,207 @@ def check_steps(kind: str, steps: list[str]) -> None:
         raise InvalidJob(f"{kind!r} has no step(s) {', '.join(unknown)}; steps: {', '.join(KINDS[kind])}")
 
 
-def gates(job: Job, settings: Settings) -> list[str]:
-    """Steps this job pauses before: its own override, else the global per-kind setting."""
-    if job.pause_before is not None:
-        return job.pause_before
-    return settings.manual_steps.get(job.kind, [])
+def _lock(run: JobRun) -> str | None:
+    # One job per (vod, video type) at a time; the live recording and the VOD
+    # capture of the same stream run side by side, and bot chat beside the archive steps.
+    vod_id = vod_of(run.subject)
+    if vod_id is None:
+        return None
+    typ = "bot_chat" if run.kind == "bot_chat" else run.payload.get("type", "vod")
+    return f"vod:{vod_id}:{typ}"
 
 
-async def enqueue(
-    kind: str,
-    vod_id: str | None,
-    payload: dict[str, Any] | None = None,
-    *,
-    step: str | None = None,
-    pause_before: list[str] | None = None,
-    paused: bool = False,
-    settings: Settings | None = None,
-) -> Job:
-    """Queue a job at ``step`` (default: its first). ``paused`` holds it until resumed."""
-    check_steps(kind, [step] if step else [])
-    if pause_before is not None:
-        check_steps(kind, pause_before)
-    job = Job(kind=kind, vod_id=vod_id, step=step or KINDS[kind][0], payload=payload or {},
-              pause_before=pause_before)
-    job.state = "paused" if paused or job.step in gates(job, settings or get_settings()) else "queued"
-    async with get_sessionmaker()() as s:
-        s.add(job)
-        await s.commit()
-        await s.refresh(job)
-    log.info("enqueued job %s %s vod=%s (%s at %s)", job.id, kind, vod_id, job.state, job.step)
-    return job
+def build_registry(manual_steps: dict[str, list[str]] | None = None) -> Registry:
+    registry = Registry()
+    for name, fn in STEPS.items():
+        registry.add_step(name, fn)
+    for kind, steps in KINDS.items():
+        registry.kind(kind, steps, lock=_lock, retry_base_seconds=RETRY_BASE_SECONDS,
+                      pause_before=tuple((manual_steps or {}).get(kind, ())))
+    return registry
 
 
-def _matching(stmt: Select, kind: str, vod_id: str | None, stream_id: str | None) -> Select:
-    stmt = stmt.where(Job.kind == kind)
+def apply_settings(runtime: JobRuntime, settings: Settings) -> None:
+    """The runtime settings the runtime reads (runtime_settings.py): concurrency, attempts, gates."""
+    runtime.set_concurrency(settings.runner_concurrency)
+    runtime.max_attempts = settings.max_attempts
+    for kind in KINDS:
+        runtime.registry.set_pause_before(kind, settings.manual_steps.get(kind, []))
+
+
+def conninfo(database_url: str) -> str:
+    """The SQLAlchemy URL (postgresql+asyncpg://...) as a libpq one for the runtime's psycopg pool."""
+    return make_url(database_url).set(drivername="postgresql").render_as_string(hide_password=False)
+
+
+def create_runtime(deps: Deps, **options: Any) -> JobRuntime:
+    """The runtime of every kind in ``KINDS``; ``options`` go to ``JobRuntime``."""
+    settings = deps.settings
+    for kind, steps in settings.manual_steps.items():
+        check_steps(kind, steps)  # fail at startup on a typo in ARCHIVE_MANUAL_STEPS
+    return JobRuntime(
+        build_registry(settings.manual_steps),
+        conninfo(settings.database_url),
+        concurrency=settings.runner_concurrency,
+        max_attempts=settings.max_attempts,
+        context_factory=lambda ctx: JobContext.of_run(ctx, deps),
+        **{"audit_table": audit.TABLE, **options},
+    )
+
+
+# ── Reading jobs of both tables ────────────────────────────────────────────
+
+
+def _matching(stmt, kind: str, vod_id: str | None, stream_id: str | None):
+    stmt = stmt.where(ALL_JOBS.c.kind == kind)
     if vod_id is not None:
-        stmt = stmt.where(Job.vod_id == vod_id)
+        stmt = stmt.where(ALL_JOBS.c.vod_id == vod_id)
     if stream_id is not None:
-        stmt = stmt.where(Job.payload["stream_id"].astext == str(stream_id))
+        stmt = stmt.where(ALL_JOBS.c.payload["stream_id"].astext == str(stream_id))
     return stmt.limit(1)
 
 
-async def find_active(kind: str, *, vod_id: str | None = None, stream_id: str | None = None) -> Job | None:
-    stmt = _matching(select(Job).where(Job.state.in_(ACTIVE)), kind, vod_id, stream_id)
+async def find_active(kind: str, *, vod_id: str | None = None, stream_id: str | None = None) -> Row | None:
+    stmt = _matching(select(ALL_JOBS).where(ALL_JOBS.c.state.in_(ACTIVE)), kind, vod_id, stream_id)
     async with get_sessionmaker()() as s:
-        return (await s.execute(stmt)).scalar_one_or_none()
+        return (await s.execute(stmt)).first()
 
 
 async def exists_any(kind: str, *, vod_id: str | None = None, stream_id: str | None = None) -> bool:
     """Any job (including finished/failed) — used so the monitor enqueues once per stream."""
     async with get_sessionmaker()() as s:
-        return (await s.execute(_matching(select(Job.id), kind, vod_id, stream_id))).first() is not None
+        return (await s.execute(_matching(select(ALL_JOBS.c.id), kind, vod_id, stream_id))).first() is not None
 
 
-async def get(job_id: int) -> Job:
+async def get(job_id: int) -> Row:
     async with get_sessionmaker()() as s:
-        return await _load(s, job_id)
-
-
-async def _load(s, job_id: int) -> Job:
-    job = await s.get(Job, job_id)
-    if job is None:
+        row = (await s.execute(
+            select(ALL_JOBS).where(ALL_JOBS.c.id == job_id).order_by(ALL_JOBS.c.legacy).limit(1)
+        )).first()
+    if row is None:
         raise JobNotFound(job_id)
-    return job
+    return row
 
 
-async def retry(job_id: int) -> Job:
-    """Queue a job again at its current step, with a fresh attempt count."""
-    async with get_sessionmaker()() as s:
-        job = await _load(s, job_id)
-        job.state = "queued"
-        job.attempts = 0
-        job.not_before = None
-        await s.commit()
-        return job
+# ── Acting on jobs ─────────────────────────────────────────────────────────
+
+_RUN_CONFLICT = re.compile(r"run \d+ is (\w+); only (.+) runs can be (\w+)")
 
 
-async def resume(job_id: int, *, once: bool = False) -> Job:
-    """Queue a paused job at its current step; ``once`` pauses it again after that step."""
-    async with get_sessionmaker()() as s:
-        job = await _load(s, job_id)
-        if job.state != "paused":
-            raise JobConflict(f"Job is {job.state}; only paused jobs can be resumed")
-        job.state = "queued"
-        job.pause_next = once
-        await s.commit()
-        return job
+@contextmanager
+def _v1_conflicts() -> Iterator[None]:
+    """The runtime's conflicts ("run 7 is succeeded; only paused runs can be resumed") worded as the
+    admin API always has ("Job is done; only paused jobs can be resumed")."""
+    try:
+        yield
+    except JobConflict as exc:
+        m = _RUN_CONFLICT.fullmatch(str(exc))
+        if m is None:
+            raise
+        state = "done" if m[1] == "succeeded" else m[1]
+        raise JobConflict(f"Job is {state}; only {m[2]} jobs can be {m[3]}") from exc
 
 
-async def pause(job_id: int) -> Job:
-    """Pause a queued job now, or a running one when its current step finishes
-    (``state`` stays "running" until then). Pausing a paused job is a no-op."""
-    async with get_sessionmaker()() as s:
-        job = await _load(s, job_id)
-        if job.state == "queued":
-            job.state = "paused"
-        elif job.state == "running":
-            job.pause_next = True
-        elif job.state != "paused":
-            raise JobConflict(f"Job is {job.state}; only queued or running jobs can be paused")
-        await s.commit()
-        return job
 
+@dataclass
+class JobService:
+    """What the admin API, the monitor and the CLI do with jobs: new ones go to the runtime, and the
+    actions reach a job in whichever table it is. Each returns the job as ``get`` reads it."""
 
-async def set_control(job_id: int, **values: Any) -> Job:
-    """Change a job's ``pause_before`` and/or ``pause_next``. InvalidJob on a step the
-    job's kind does not have. Like every gate, it applies when the job next moves on
-    to a step, not to the step it is at."""
-    async with get_sessionmaker()() as s:
-        job = await _load(s, job_id)
-        if values.get("pause_before") is not None:
-            check_steps(job.kind, values["pause_before"])
-        for key, value in values.items():
-            setattr(job, key, value)
-        await s.commit()
-        await s.refresh(job)  # updated_at is set by the database
-        return job
+    deps: Deps
+    runtime: JobRuntime
+    legacy: legacy_jobs.Runner | None = None
 
-
-def _exclusive_key(job: Job) -> str:
-    # One job per (vod, video type) at a time; the live recording and the VOD
-    # capture of the same stream run side by side, and bot chat beside the archive steps.
-    typ = "bot_chat" if job.kind == "bot_chat" else (job.payload or {}).get("type", "vod")
-    return f"{job.vod_id}:{typ}" if job.vod_id else f"job:{job.id}"
-
-
-class Runner:
-    def __init__(self, deps: Deps, concurrency: int | None = None) -> None:
-        self.deps = deps
-        self._concurrency = concurrency  # None: Settings.runner_concurrency, read on every pick
-        self.running: dict[int, asyncio.Task] = {}
-        self.running_keys: dict[int, str] = {}
-        self.cancelling: set[int] = set()
-        self.wakeup = asyncio.Event()
-        for kind, steps in deps.settings.manual_steps.items():
-            check_steps(kind, steps)  # fail at startup on a typo in ARCHIVE_MANUAL_STEPS
-
-    async def enqueue(self, kind: str, vod_id: str | None, payload: dict[str, Any] | None = None,
-                      **kwargs: Any) -> Job:
-        """``enqueue`` with this worker's settings, started as soon as there is room."""
-        job = await enqueue(kind, vod_id, payload, settings=self.deps.settings, **kwargs)
-        self.poke()
-        return job
-
-    async def resume(self, job_id: int, *, once: bool = False) -> Job:
-        job = await resume(job_id, once=once)
-        self.poke()
-        return job
-
-    async def retry(self, job_id: int) -> Job:
-        job = await retry(job_id)
-        self.poke()
-        return job
-
-    async def cancel(self, job_id: int) -> Job:
-        """Cancel a queued or paused job, or stop a running one (at once, mid-step)."""
-        async with get_sessionmaker()() as s:
-            job = await _load(s, job_id)
-            if job.state in ("queued", "paused"):
-                job.state = "cancelled"
-                await s.commit()
-                return job
-        task = self.running.get(job_id)
-        if job.state == "running" and task is not None:
-            self.cancelling.add(job_id)
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            async with get_sessionmaker()() as s:
-                job = await _load(s, job_id)
-        if job.state != "cancelled":
-            raise JobConflict(f"Job is {job.state}; only queued, paused or running jobs can be cancelled")
-        return job
-
-    async def recover(self) -> None:
-        """Jobs left 'running' by a previous process are resumed."""
-        async with get_sessionmaker()() as s:
-            res = await s.execute(update(Job).where(Job.state == "running").values(state="queued"))
-            await s.commit()
-            if res.rowcount:
-                log.info("re-queued %d interrupted job(s)", res.rowcount)
+    @classmethod
+    def create(cls, deps: Deps) -> JobService:
+        runtime = create_runtime(deps)
+        return cls(deps, runtime, legacy_jobs.Runner(deps, runtime.registry))
 
     @property
-    def concurrency(self) -> int:
-        return self._concurrency or self.deps.settings.runner_concurrency
+    def running(self) -> int:
+        """Jobs running in this worker now."""
+        return self.runtime.limiter.active + (len(self.legacy.running) if self.legacy else 0)
 
-    def poke(self) -> None:
-        self.wakeup.set()
+    def apply_settings(self) -> None:
+        apply_settings(self.runtime, self.deps.settings)
+        if self.legacy:
+            self.legacy.poke()  # a higher concurrency starts waiting jobs now
 
-    async def run_forever(self) -> None:
-        await self.recover()
-        while True:
-            try:
-                await self._fill()
-            except Exception:
-                log.exception("job runner loop error")
-            try:
-                await asyncio.wait_for(self.wakeup.wait(), timeout=10)
-            except TimeoutError:
-                pass
-            self.wakeup.clear()
+    async def enqueue(self, kind: str, vod_id: str | None, payload: dict[str, Any] | None = None, *,
+                      actor: Actor = SYSTEM, step: str | None = None, pause_before: list[str] | None = None,
+                      paused: bool = False) -> Row:
+        """Queue a job at ``step`` (default: its first). ``paused`` holds it until resumed."""
+        enqueued = await self.runtime.enqueue(kind, subject_of(vod_id), payload, actor=actor, step=step,
+                                              pause_before=pause_before, paused=paused)
+        return await get(enqueued.run.id)
 
-    async def _fill(self) -> None:
-        while len(self.running) < self.concurrency:
-            job = await self._claim()
-            if job is None:
-                return
-            task = asyncio.create_task(self._run(job), name=f"job-{job.id}")
-            self.running[job.id] = task
-            self.running_keys[job.id] = _exclusive_key(job)
-            task.add_done_callback(lambda _t, jid=job.id: self._done(jid))
+    async def resume(self, job_id: int, *, once: bool = False, actor: Actor = SYSTEM) -> Row:
+        if (job := await get(job_id)).legacy:
+            await self._legacy().resume(job_id, once=once)
+            return await self._legacy_audit("job.resume", job, actor)
+        with _v1_conflicts():
+            await self.runtime.resume(job_id, once=once, actor=actor)
+        return await get(job_id)
 
-    def _done(self, job_id: int) -> None:
-        self.running.pop(job_id, None)
-        self.running_keys.pop(job_id, None)
-        self.cancelling.discard(job_id)
-        self.poke()
+    async def pause(self, job_id: int, *, actor: Actor = SYSTEM) -> Row:
+        if (job := await get(job_id)).legacy:
+            await legacy_jobs.pause(job_id)
+            return await self._legacy_audit("job.pause", job, actor)
+        with _v1_conflicts():
+            await self.runtime.pause(job_id, actor=actor)
+        return await get(job_id)
 
-    async def _claim(self) -> Job | None:
-        busy = set(self.running_keys.values())
-        async with get_sessionmaker()() as s:
-            stmt = (
-                select(Job)
-                .where(Job.state == "queued", or_(Job.not_before.is_(None), Job.not_before <= func.now()))
-                .order_by(Job.id)
-                .with_for_update(skip_locked=True)
-                .limit(50)
-            )
-            for job in (await s.execute(stmt)).scalars():
-                if _exclusive_key(job) in busy:
-                    continue
-                job.state = "running"
-                await s.commit()
-                return job
-        return None
+    async def retry(self, job_id: int, *, actor: Actor = SYSTEM) -> Row:
+        if (job := await get(job_id)).legacy:
+            await self._legacy().retry(job_id)
+            return await self._legacy_audit("job.retry", job, actor)
+        with _v1_conflicts():
+            await self.runtime.retry(job_id, actor=actor)
+        return await get(job_id)
 
-    async def _set(self, job_id: int, **values: Any) -> None:
-        await execute(update(Job).where(Job.id == job_id).values(**values))
+    async def cancel(self, job_id: int, *, actor: Actor = SYSTEM) -> Row:
+        if (job := await get(job_id)).legacy:
+            await self._legacy().cancel(job_id)
+            return await self._legacy_audit("job.cancel", job, actor)
+        with _v1_conflicts():
+            await self.runtime.cancel(job_id, actor=actor)
+        return await get(job_id)
 
-    async def _advance(self, job: Job, step: str, ctx: JobContext) -> bool:
-        """Checkpoint ``step`` as next; True if the job should pause before it."""
-        async with get_sessionmaker()() as s:
-            pause_next = (
-                await s.execute(
-                    update(Job)
-                    .where(Job.id == job.id)
-                    .values(step=step, payload=ctx.payload, vod_id=ctx.vod_id)
-                    .returning(Job.pause_next)
-                )
-            ).scalar_one()
-            pausing = pause_next or step in gates(job, self.deps.settings)
-            if pausing:
-                await s.execute(update(Job).where(Job.id == job.id).values(state="paused", pause_next=False))
-            await s.commit()
-            return pausing
+    async def update(self, job_id: int, *, actor: Actor = SYSTEM, **values: Any) -> Row:
+        """``pause_before`` (None: back to the kind's default) and/or ``pause_next``."""
+        if (job := await get(job_id)).legacy:
+            await legacy_jobs.set_control(self.runtime.registry, job_id, **values)
+            return await self._legacy_audit("job.update", job, actor, fields=("pause_before", "pause_next"))
+        with _v1_conflicts():
+            await self.runtime.update(job_id, actor=actor, **values)
+        return await get(job_id)
 
-    async def _run(self, job: Job) -> None:
-        steps = KINDS.get(job.kind)
-        if steps is None:
-            await self._set(job.id, state="failed", last_error=f"unknown kind {job.kind}")
-            return
-        ctx = JobContext(job.id, job.kind, job.vod_id, dict(job.payload or {}), self.deps)
-        start = steps.index(job.step) if job.step in steps else 0
-        # The step to resume from. Advanced as soon as a step returns, so the error
-        # paths below record progress even if the checkpoint write itself failed.
-        current: str | None = steps[start]
-        ctx.step = current
-        ctx.log.info("running %s (vod=%s) from step %s", job.kind, job.vod_id, current)
-        try:
-            for i in range(start, len(steps)):
-                ctx.step = steps[i]
-                ctx.log.info("step %s", steps[i])
-                await STEPS[steps[i]](ctx)
-                current = steps[i + 1] if i + 1 < len(steps) else None
-                if current is not None and await self._advance(job, current, ctx):
-                    ctx.step = current
-                    ctx.log.info("paused before step %s", current)
-                    return
-            await self._set(job.id, state="done", step=None, payload=ctx.payload, vod_id=ctx.vod_id,
-                            last_error=None, not_before=None, pause_next=False)
-            ctx.step = None
-            ctx.log.info("job %s finished", job.kind)
-        except asyncio.CancelledError:
-            # Worker shutdown re-queues the job; an admin cancel ends it.
-            state = "cancelled" if job.id in self.cancelling else "queued"
-            ctx.log.info("cancelled" if state == "cancelled" else "interrupted by shutdown; will resume")
-            await asyncio.shield(
-                self._set(job.id, state=state, step=current, payload=ctx.payload, vod_id=ctx.vod_id)
-            )
-            raise
-        except Exception as exc:
-            # A refused step would be refused again: no retries.
-            max_attempts = self.deps.settings.max_attempts
-            attempts = max_attempts if isinstance(exc, StepRefused) else job.attempts + 1
-            if isinstance(exc, StepError):
-                err = str(exc)
-            else:
-                err = "".join(traceback.format_exception(exc))[-4000:]
-            not_before = None
-            if attempts >= max_attempts:
-                state = "failed"
-                ctx.log.error("job failed permanently: %s", exc)
-            else:
-                state = "queued"
-                delay = 60 * 2**attempts
-                not_before = _now() + dt.timedelta(seconds=delay)
-                ctx.log.warning("job step failed (%s); retry %d in %ds", exc, attempts, delay)
-            await self._set(job.id, state=state, step=current, attempts=attempts, last_error=err,
-                            payload=ctx.payload, vod_id=ctx.vod_id, not_before=not_before)
+    async def _legacy_audit(self, action: str, before: Row, actor: Actor,
+                            fields: tuple[str, ...] = ("state",)) -> Row:
+        """The audit row of an action on a legacy job, as the runtime writes one for a run."""
+        after = await get(before.id)
+        await audit.write(AuditEntry(
+            action, actor, f"job:{before.id}", before={f: getattr(before, f) for f in fields},
+            after={f: getattr(after, f) for f in fields}, detail={"legacy": True},
+        ))
+        return after
 
-    async def shutdown(self) -> None:
-        for task in list(self.running.values()):
-            task.cancel()
-        await asyncio.gather(*self.running.values(), return_exceptions=True)
+    def note(self, job: Row, message: str) -> None:
+        """A line in the job's event log (an admin action on it)."""
+        events = self.deps.events if job.legacy else self.runtime.events
+        events.add(job.id, "info", job.step, message)
+
+    async def events(self, job_id: int, *, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        """The job's log lines, step changes and progress, oldest first, as ``event_json`` shapes them."""
+        if (await get(job_id)).legacy:
+            return [event_json(e) for e in await self.deps.events.list(job_id, after=after, limit=limit)]
+        return [
+            {"seq": e["id"], "at": iso_utc(e["at"]), "level": e["level"], "step": e["step"],
+             "message": e["message"], "progress": e["progress"]}
+            for e in await self.runtime.events.list(job_id, after=after, limit=limit)
+        ]
+
+    def _legacy(self) -> legacy_jobs.Runner:
+        if self.legacy is None:
+            raise JobConflict("legacy jobs are run by the worker")
+        return self.legacy

@@ -7,8 +7,10 @@ enqueues a job and answers ``{"error": false, "msg": ..., "jobId": ...}``.
 Every /admin route takes either ``Authorization: Bearer <admin_api_key>``
 (scripts) or the dashboard's session cookie (see admin_auth), which comes from
 the password (local network only) or a Twitch sign-in (see admin_signin). Every
-state-changing request that succeeds is written to the audit log: its body, or what the
-route put in ``request.state.audit_detail`` (e.g. a VOD edit's before and after).
+state-changing request that succeeds is written to the audit log (``audit_log``, named as in
+archive_common/audit.py): its body, or what the route put in ``request.state.audit_detail`` (e.g. a
+VOD edit's before and after). Actions on jobs are audited by the job runtime (and ``JobService`` for
+the legacy table's) instead, as every other way of acting on a job is.
 """
 
 from __future__ import annotations
@@ -19,16 +21,20 @@ import hmac
 import json
 import logging
 import secrets
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import Body, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy import delete, func, insert, or_, select, text, tuple_, update
+from vex_platform.actor import SYSTEM, Actor
 
 from archive_common import http
-from archive_common.db import execute, get_sessionmaker
-from archive_common.models import AdminAudit, Emote, Game, Job, Log, Stream, Vod
+from archive_common.audit import AUDIT_LOG, actor_of, legacy_actor, route_entry
+from archive_common.audit import write as write_audit
+from archive_common.db import get_sessionmaker
+from archive_common.models import Emote, Game, Log, Stream, Vod
 from archive_common.serialize import EMOTES, GAMES, box_art_template, duration_seconds, vod_json
 from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds, parse_helix_duration
 
@@ -59,7 +65,8 @@ from .admin_signin import (
     with_admin,
 )
 from .context import Deps
-from .events import event_json, iso_utc
+from .job_rows import ALL_JOBS
+from .events import iso_utc
 from .runtime_settings import RuntimeSettings
 from .storage import Storage, StorageError
 from .vods import notify_rows_moved, splice_reason, upsert_vod
@@ -73,6 +80,7 @@ SESSION_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite"
 LAN_SESSION_COOKIE_ARGS = {**SESSION_COOKIE_ARGS, "secure": False}
 STATE_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite": "lax"}
 AUDITED_PREFIXES = ("/admin/", "/v2/")
+JOB_ROUTES = "/admin/jobs"  # audited by the runtime (and JobService), not by the request
 YOUTUBE_CHECK_MAX_AGE = 600  # /admin/health refreshes the YouTube token at most this often
 RECENT_JOBS = 20  # jobs shown with a VOD
 VOD_LIST_MAX = 200  # GET /admin/vods?limit=
@@ -86,7 +94,7 @@ class AdminError(Exception):
         self.status, self.msg, self.headers, self.extra = status, msg, headers, extra or {}
 
 
-def _ok(msg: str, job: Job | None = None, **extra: Any) -> dict:
+def _ok(msg: str, job: Any = None, **extra: Any) -> dict:
     out: dict[str, Any] = {"error": False, "msg": msg, **extra}
     if job is not None:
         out["jobId"] = job.id
@@ -101,7 +109,7 @@ def _step_names(value: Any, msg: str) -> list[str] | None:
 
 
 async def _job_counts(s) -> dict[str, int]:
-    counts = dict((await s.execute(select(Job.state, func.count()).group_by(Job.state))).all())
+    counts = dict((await s.execute(select(ALL_JOBS.c.state, func.count()).group_by(ALL_JOBS.c.state))).all())
     return {st: counts.get(st, 0) for st in jobs.STATES}
 
 
@@ -137,12 +145,20 @@ def login_of(session: Session) -> str | None:
     return (session.user or {}).get("login") or None
 
 
-def _audit_json(row: AdminAudit) -> dict:
-    return {"id": row.id, "at": iso_utc(row.at), "actor": row.actor, "actorLogin": row.actor_login,
-            "action": row.action, "target": row.target, "detail": row.detail}
+def _audit_json(row: Any) -> dict:
+    """An ``audit_log`` row as GET /admin/audit has always shown one (``admin_audit``'s shape)."""
+    detail = row.detail
+    if row.before is not None or row.after is not None:
+        detail = {"before": row.before, "after": row.after}
+    return {"id": row.id, "at": iso_utc(row.at), "actor": legacy_actor(row.actor_kind, row.actor_id),
+            "actorLogin": row.actor_login, "action": row.action, "target": row.target, "detail": detail}
 
 
-def _job_json(job: Job) -> dict:
+# Who the request being handled is (set by ``verify``), for the jobs it queues or acts on.
+_actor: ContextVar[Actor] = ContextVar("admin_actor", default=SYSTEM)
+
+
+def _job_json(job: Any) -> dict:
     return {
         "id": job.id,
         "kind": job.kind,
@@ -161,7 +177,7 @@ def _job_json(job: Job) -> dict:
     }
 
 
-def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None = None,
+def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | None = None,
                      sessions: SessionStore | None = None, runtime: RuntimeSettings | None = None) -> FastAPI:
     """``signin``: the vexoulz-auth client; by default built from the settings (None when not configured).
     ``sessions``: where dashboard sessions are kept; the worker passes the database's, tests leave memory.
@@ -209,7 +225,6 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     def session_cookie_args(request: Request) -> dict:
         return LAN_SESSION_COOKIE_ARGS if plain_http(request, trusted_proxies) else SESSION_COOKIE_ARGS
     app.state.admin_sessions = passwords  # for tests
-    events = deps.events
     started_at = dt.datetime.now(dt.timezone.utc)
 
     async def live_session(token: str | None) -> Session | None:
@@ -241,6 +256,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             if not expected or not hmac.compare_digest(key.encode(), expected.encode()):
                 raise AdminError(403, "Not authorized")
             request.state.actor = "api-key"
+            _actor.set(actor_of("api-key"))
             return
         token = request.cookies.get(SESSION_COOKIE)
         if not token:
@@ -252,6 +268,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             raise AdminError(403, "Missing or wrong X-CSRF-Token")
         request.state.actor = session.actor
         request.state.actor_login = login_of(session)
+        _actor.set(actor_of(session.actor, login_of(session)))
 
     auth = [Depends(verify)]
 
@@ -264,7 +281,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         body = await request.body()  # cached by Starlette, so the route can still read it
         response = await call_next(request)
         actor = getattr(request.state, "actor", None)  # set once the request is authenticated
-        if actor and response.status_code < 400:
+        if actor and response.status_code < 400 and not request.url.path.startswith(JOB_ROUTES):
             try:
                 await audit(request, actor, body, getattr(request.state, "actor_login", None))
             except Exception:
@@ -292,13 +309,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             target = f"storage:{params['area']}/{params.get('name')}"
         elif isinstance(body, dict) and body.get("vodId") not in (None, ""):
             target = f"vod:{body['vodId']}"
-        await execute(insert(AdminAudit).values(
-            actor=actor,
-            actor_login=actor_login,
-            action=f"{request.method} {getattr(route, 'path', request.url.path)}",
-            target=target,
-            detail=body if detail is None else detail,
-        ))
+        await write_audit(route_entry(f"{request.method} {getattr(route, 'path', request.url.path)}",
+                                      actor_of(actor, actor_login), target, body if detail is None else detail))
 
     # ── Session (browser login) ───────────────────────────────────────────
 
@@ -419,9 +431,9 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         response.delete_cookie(SESSION_COOKIE, **session_cookie_args(request))
         return response
 
-    def job_action(msg: str, job: Job) -> dict:
+    def job_action(msg: str, job: Any) -> dict:
         """An admin action on a job: noted in the job's events, answered like any action."""
-        events.add(job.id, "info", job.step, msg)
+        service.note(job, msg)
         return _ok(msg, job)
 
     async def vod_exists(vod_id: str) -> Vod | None:
@@ -441,11 +453,11 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         if reason:
             raise AdminError(409, f"{reason}; {what} would refetch or replace it. Undo the merge/split first")
 
-    async def enqueue(kind: str, vod_id: str | None, payload: dict[str, Any] | None = None, **kwargs: Any) -> Job:
-        """``runner.enqueue``, refused for a job with a TWITCH_STEPS step on a merged or split VOD."""
+    async def enqueue(kind: str, vod_id: str | None, payload: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+        """``service.enqueue``, refused for a job with a TWITCH_STEPS step on a merged or split VOD."""
         if vod_id is not None and TWITCH_STEPS & set(jobs.KINDS.get(kind, [])):
             await refuse_spliced(vod_id, f"a {kind} job")
-        return await runner.enqueue(kind, vod_id, payload, **kwargs)
+        return await service.enqueue(kind, vod_id, payload, actor=_actor.get(), **kwargs)
 
     def require_helix() -> None:
         if not helix.configured:
@@ -493,7 +505,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     async def healthz() -> dict:
         async with get_sessionmaker()() as s:
             await s.execute(text("select 1"))
-        return {"status": "ok", "runningJobs": len(runner.running)}
+        return {"status": "ok", "runningJobs": service.running}
 
     async def api_ok() -> bool:
         url = (settings.api_internal_url or f"http://127.0.0.1:{settings.api_port}").rstrip("/")
@@ -507,13 +519,14 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     async def health() -> dict:
         """One call for the dashboard's status bar. The YouTube token is refreshed at
         most every 10 minutes here; /admin/youtube/status always refreshes it."""
-        async def db_state() -> tuple[dict[str, int], list[Job], Stream | None] | None:
+        async def db_state() -> tuple[dict[str, int], list[Any], Stream | None] | None:
             try:
                 async with get_sessionmaker()() as s:
                     counts = await _job_counts(s)
                     failures = list((await s.execute(
-                        select(Job).where(Job.state == "failed").order_by(Job.updated_at.desc(), Job.id.desc()).limit(5)
-                    )).scalars())
+                        select(ALL_JOBS).where(ALL_JOBS.c.state == "failed")
+                        .order_by(ALL_JOBS.c.updated_at.desc(), ALL_JOBS.c.id.desc()).limit(5)
+                    )).all())
                     live = (await s.execute(
                         select(Stream).where(Stream.is_live.is_(True)).order_by(Stream.started_at.desc()).limit(1)
                     )).scalar_one_or_none()
@@ -526,7 +539,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         db_ok = db is not None
         counts, failures, live = db or ({st: 0 for st in jobs.STATES}, [], None)
         return {
-            "worker": {"ok": db_ok, "runningJobs": len(runner.running), "startedAt": iso_utc(started_at)},
+            "worker": {"ok": db_ok, "runningJobs": service.running, "startedAt": iso_utc(started_at)},
             "api": {"ok": api},
             "youtube": {
                 "authorized": yt["authorized"],
@@ -577,7 +590,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         """``{key: value, ...}``: all of them, or none when one is refused. Audited with before and after."""
         before, after = await edited_async(runtime.update(body, changed_by(request)))
         request.state.audit_detail = {"before": before, "after": after}
-        runner.poke()  # a higher concurrency starts waiting jobs now
+        service.apply_settings()  # concurrency, attempts and gates, now
         return settings_json()
 
     @app.delete("/admin/settings/{key}", dependencies=auth)
@@ -588,7 +601,7 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         except KeyError:
             raise AdminError(404, f"No setting {key}") from None
         request.state.audit_detail = {"before": before, "after": after}
-        runner.poke()
+        service.apply_settings()
         return settings_json()
 
     # ── Storage ───────────────────────────────────────────────────────────
@@ -612,17 +625,18 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         """``state`` takes a comma-separated list of states and/or groups (see STATE_GROUPS).
         Newest first; ``before`` (a job id) pages back through older ones."""
         states = _states(state) if state else None
+        c = ALL_JOBS.c
         async with get_sessionmaker()() as s:
-            stmt = select(Job).order_by(Job.id.desc()).limit(min(max(limit, 1), 500))
+            stmt = select(ALL_JOBS).order_by(c.id.desc(), c.legacy).limit(min(max(limit, 1), 500))
             if before is not None:
-                stmt = stmt.where(Job.id < before)
+                stmt = stmt.where(c.id < before)
             if states:
-                stmt = stmt.where(Job.state.in_(states))
+                stmt = stmt.where(c.state.in_(states))
             if vodId:
-                stmt = stmt.where(Job.vod_id == vodId)
+                stmt = stmt.where(c.vod_id == vodId)
             if kind:
-                stmt = stmt.where(Job.kind == kind)
-            rows = (await s.execute(stmt)).scalars().all()
+                stmt = stmt.where(c.kind == kind)
+            rows = (await s.execute(stmt)).all()
             counts = await _job_counts(s)
         return {"counts": counts, "data": [_job_json(j) for j in rows]}
 
@@ -646,12 +660,12 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
     @app.post("/admin/jobs/{job_id}/resume", dependencies=auth)
     async def resume_job(job_id: int, body: dict | None = Body(None)) -> dict:
         """Run a paused job from its current step. ``{"once": true}`` pauses again after it."""
-        job = await runner.resume(job_id, once=bool((body or {}).get("once")))
+        job = await service.resume(job_id, once=bool((body or {}).get("once")), actor=_actor.get())
         return job_action(f"Job {job_id} resumed at step {job.step}", job)
 
     @app.post("/admin/jobs/{job_id}/pause", dependencies=auth)
     async def pause_job(job_id: int) -> dict:
-        job = await jobs.pause(job_id)
+        job = await service.pause(job_id, actor=_actor.get())
         if job.state == "running":
             return job_action(f"Job {job_id} will pause when step {job.step} finishes", job)
         return job_action(f"Job {job_id} paused at step {job.step}", job)
@@ -676,29 +690,25 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
             if not isinstance(body["pauseNext"], bool):
                 raise AdminError(400, "pauseNext must be true or false")
             values["pause_next"] = body["pauseNext"]
-        job = await jobs.set_control(job_id, **values)
-        events.add(job.id, "info", job.step,
-                   f"manual steps set: pauseBefore={job.pause_before}, pauseNext={job.pause_next}")
+        job = await service.update(job_id, actor=_actor.get(), **values)
+        service.note(job, f"manual steps set: pauseBefore={job.pause_before}, pauseNext={job.pause_next}")
         return _job_json(job)
 
     @app.get("/admin/jobs/{job_id}/events", dependencies=auth)
     async def job_events(job_id: int, after: int = 0, limit: int = 200) -> dict:
         """The job's log lines, step changes and progress, oldest first. Poll with
         ``after=<next>`` from the previous answer to get only what is new."""
-        async with get_sessionmaker()() as s:
-            if (await s.execute(select(Job.id).where(Job.id == job_id))).first() is None:
-                raise AdminError(404, "No such job")
-        rows = await events.list(job_id, after=after, limit=min(max(limit, 1), 1000))
-        return {"data": [event_json(e) for e in rows], "next": rows[-1].id if rows else after}
+        rows = await service.events(job_id, after=after, limit=min(max(limit, 1), 1000))
+        return {"data": rows, "next": rows[-1]["seq"] if rows else after}
 
     @app.post("/admin/jobs/{job_id}/retry", dependencies=auth)
     async def retry_job(job_id: int) -> dict:
-        job = await runner.retry(job_id)
+        job = await service.retry(job_id, actor=_actor.get())
         return job_action(f"Job {job_id} re-queued from step {job.step}", job)
 
     @app.post("/admin/jobs/{job_id}/cancel", dependencies=auth)
     async def cancel_job(job_id: int) -> dict:
-        job = await runner.cancel(job_id)
+        job = await service.cancel(job_id, actor=_actor.get())
         return job_action(f"Job {job_id} cancelled", job)
 
     # ── VOD rows ──────────────────────────────────────────────────────────
@@ -779,8 +789,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
                 select(Vod.chapters_locked, Vod.bot_chat, Vod.hidden).where(Vod.id == vod_id)
             )).one()
             recent = (await s.execute(
-                select(Job).where(Job.vod_id == vod_id).order_by(Job.id.desc()).limit(RECENT_JOBS)
-            )).scalars()
+                select(ALL_JOBS).where(ALL_JOBS.c.vod_id == vod_id).order_by(ALL_JOBS.c.id.desc()).limit(RECENT_JOBS)
+            )).all()
             recent = [_job_json(j) for j in recent]
         return {**vod, "hidden": hidden, "chaptersLocked": locked, "botChat": bot_chat, "jobs": recent,
                 "splices": await splices.active_splices(vod_id)}
@@ -996,12 +1006,15 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
 
     @app.get("/admin/audit", dependencies=auth)
     async def list_audit(before: int | None = None, limit: int = 50) -> dict:
-        """Newest first; ``before`` (an entry id) pages back."""
-        stmt = select(AdminAudit).order_by(AdminAudit.id.desc()).limit(min(max(limit, 1), 500))
+        """Newest first; ``before`` (an entry id) pages back. What admins did: the worker's own actions
+        (the monitor queueing a job) are left out."""
+        c = AUDIT_LOG.c
+        stmt = (select(AUDIT_LOG).where(c.actor_kind.in_(("user", "api_key")))
+                .order_by(c.id.desc()).limit(min(max(limit, 1), 500)))
         if before is not None:
-            stmt = stmt.where(AdminAudit.id < before)
+            stmt = stmt.where(c.id < before)
         async with get_sessionmaker()() as s:
-            rows = (await s.execute(stmt)).scalars().all()
+            rows = (await s.execute(stmt)).all()
         return {"data": [_audit_json(r) for r in rows]}
 
     # ── Download / upload pipelines ───────────────────────────────────────
@@ -1157,7 +1170,8 @@ def create_admin_app(deps: Deps, runner: jobs.Runner, signin: AuthClient | None 
         if not settings.multi_track:
             raise AdminError(404, "multiTrack is disabled")
         # Not the guarded enqueue: a refusal here would make the recorder delete its file.
-        job = await runner.enqueue("live_file", vod.id, {"type": "live", "stream_id": stream_id, "path": body["path"]})
+        job = await service.enqueue("live_file", vod.id, {"type": "live", "stream_id": stream_id, "path": body["path"]},
+                                    actor=_actor.get())
         return _ok("Starting upload to youtube", job)
 
     # ── YouTube OAuth ─────────────────────────────────────────────────────

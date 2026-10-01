@@ -62,7 +62,7 @@ async def test_audit_names_the_twitch_login(db, deps):
     deps.settings.admin_twitch_ids = ["100"]
 
     def client(cookies: httpx.Cookies | None = None) -> httpx.AsyncClient:
-        app = create_admin_app(deps, jobs.Runner(deps), signin=fake, sessions=DbSessionStore())
+        app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)), signin=fake, sessions=DbSessionStore())
         transport = httpx.ASGITransport(app=app, client=("203.0.113.5", 1234))
         return httpx.AsyncClient(transport=transport, base_url="https://admin", cookies=cookies)
 
@@ -76,5 +76,5 @@ async def test_audit_names_the_twitch_login(db, deps):
 
         audit = (await c.get("/admin/audit?limit=5", headers={"Authorization": "Bearer k"})).json()["data"]
     out, signed_in = audit[0], audit[1]
-    assert (out["action"], out["actor"], out["actorLogin"]) == ("DELETE /admin/session", "twitch:100", "alice")
-    assert (signed_in["action"], signed_in["actorLogin"]) == ("GET /admin/signin/callback", "alice")
+    assert (out["action"], out["actor"], out["actorLogin"]) == ("session.logout", "twitch:100", "alice")
+    assert (signed_in["action"], signed_in["actorLogin"]) == ("session.signin", "alice")

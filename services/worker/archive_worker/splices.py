@@ -21,12 +21,12 @@ from sqlalchemy import delete, func, insert, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from archive_common.db import get_sessionmaker
-from archive_common.models import BotLog, Emote, Game, Job, Log, Vod, VodSplice, VodSpliceBotLog, VodSpliceLog
+from archive_common.models import BotLog, Emote, Game, Log, Vod, VodSplice, VodSpliceBotLog, VodSpliceLog
 from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds
 
 from . import timeline
 from .events import iso_utc
-from .jobs import ACTIVE
+from .job_rows import ACTIVE, ALL_JOBS
 from .timeline import Plan, PlanError, Side
 from .vods import active_splices as _active_query
 from .vods import notify_rows_moved, resequence_bot_logs
@@ -105,8 +105,8 @@ async def _lock(s: AsyncSession, *vod_ids: str) -> list[Vod]:
 
 async def _no_active_jobs(s: AsyncSession, *vod_ids: str) -> None:
     active = (await s.execute(
-        select(Job).where(Job.vod_id.in_(vod_ids), Job.state.in_(ACTIVE)).order_by(Job.id)
-    )).scalars().all()
+        select(ALL_JOBS).where(ALL_JOBS.c.vod_id.in_(vod_ids), ALL_JOBS.c.state.in_(ACTIVE)).order_by(ALL_JOBS.c.id)
+    )).all()
     if active:
         raise SpliceError(409, "Jobs are active on " + ", ".join(sorted(vod_ids)) + ": " + ", ".join(
             f"{j.id} ({j.kind}, {j.state}, vod {j.vod_id})" for j in active) + "; wait for them or cancel them",

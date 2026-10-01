@@ -12,16 +12,17 @@ import asyncpg
 import httpx
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, text
 
 from archive_api.invalidation import asyncpg_dsn
 from archive_common.config import get_settings
 from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_sessionmaker
-from archive_common.models import AdminAudit, BotLog, Emote, Game, Job, Log, Vod, VodSplice
+from archive_common.audit import AUDIT_LOG
+from archive_common.models import BotLog, Emote, Game, Job, Log, Vod, VodSplice
 from archive_common.timeutil import hhmmss_to_seconds
-from archive_worker import jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.context import StepRefused
+from archive_worker.job_rows import RUNS, subject_of
 from archive_worker.steps import metadata
 
 A, B, C = "test-splice-a", "test-splice-b", "test-splice-c"
@@ -56,6 +57,10 @@ def _bot_log(vod_id, offset, kind="message"):
 async def _clean():
     async with get_sessionmaker()() as s:
         await s.execute(delete(Job).where(Job.vod_id.in_(IDS)))
+        await s.execute(delete(RUNS).where(RUNS.c.subject.in_([subject_of(i) for i in IDS])))
+        await s.execute(text("SET LOCAL search_path TO jobs, public"))  # procrastinate's SQL is unqualified
+        await s.execute(text("DELETE FROM procrastinate_jobs WHERE split_part(lock, ':', 2) = ANY(:ids)"),
+                        {"ids": list(IDS)})
         await s.execute(delete(VodSplice).where(or_(VodSplice.vod_id.in_(IDS), VodSplice.other_id.in_(IDS))))
         for model in (Log, BotLog, Emote, Game):
             await s.execute(delete(model).where(model.vod_id.in_(IDS)))
@@ -67,7 +72,7 @@ async def _clean():
 async def vods(db):
     await _clean()
     async with get_sessionmaker()() as s:
-        audit_after = (await s.execute(select(func.max(AdminAudit.id)))).scalar() or 0
+        audit_after = (await s.execute(select(func.max(AUDIT_LOG.c.id)))).scalar() or 0
         s.add_all([
             Vod(id=A, title="big stream", created_at=START, duration="02:00:00", stream_id="1001",
                 chapters=[_ch(0, 3600), _ch(3600, 3600, "Minecraft")],
@@ -86,16 +91,17 @@ async def vods(db):
     yield
     await _clean()
     async with get_sessionmaker()() as s:
-        await s.execute(delete(AdminAudit).where(AdminAudit.id > audit_after))
+        await s.execute(delete(AUDIT_LOG).where(AUDIT_LOG.c.id > audit_after))
         await s.commit()
 
 
 @pytest.fixture
-def admin(deps):
+async def admin(deps, make_service):
+    """A client of the admin app and its JobService (open; its runtime runs nothing until started)."""
     deps.settings.admin_api_key = SecretStr("k")
-    runner = jobs.Runner(deps)
-    app = create_admin_app(deps, runner)
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://admin"), runner
+    service = await make_service(start=False)
+    app = create_admin_app(deps, service)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://admin"), service
 
 
 def site_delay(vod: dict, typ: str = "vod") -> float:
@@ -176,8 +182,9 @@ async def test_merge_keeps_chat_and_video_in_sync(vods, admin, api):
         emotes = await s.get(Emote, A)
         assert emotes.ffz_emotes == [{"id": 1, "code": "a"}, {"id": 2, "code": "b"}]
         assert emotes.seventv_emotes == [{"id": "x", "code": "EZ"}]
-        audit = (await s.execute(select(AdminAudit).order_by(AdminAudit.id.desc()).limit(1))).scalar_one()
-        assert (audit.action, audit.target, audit.detail) == ("POST /admin/vods/{vod_id}/merge", f"vod:{A}",
+        audit = (await s.execute(select(AUDIT_LOG).where(AUDIT_LOG.c.action == "vod.merge")
+                                 .order_by(AUDIT_LOG.c.id.desc()).limit(1))).one()
+        assert (audit.action, audit.target, audit.detail) == ("vod.merge", f"vod:{A}",
                                                                {"source": B})
 
     # What the site sees
@@ -248,7 +255,7 @@ async def test_unmerge_refuses_to_lose_edits_unless_forced(vods, admin):
 
 
 async def test_merge_refusals(vods, admin):
-    c, runner = admin
+    c, service = admin
     async with c:
         # Wrong order: B is the later VOD.
         r = await c.post(f"/admin/vods/{B}/merge", headers=KEY, json={"source": A})
@@ -262,10 +269,10 @@ async def test_merge_refusals(vods, admin):
         assert (r.json()["offset"], r.json()["targetDuration"], r.json()["gap"]) == (7000, 7200, -200)
         assert (await c.post(f"/admin/vods/{A}/merge", headers=KEY, json={"source": B, "gap": -5})).status_code == 400
         # A running (or queued, or paused) job on either VOD.
-        job = await jobs.enqueue("chat", B, paused=True, settings=runner.deps.settings)
+        job = await service.enqueue("chat", B, paused=True)
         r = await c.post(f"/admin/vods/{A}/merge", headers=KEY, json={"source": B, "gap": 300})
         assert r.status_code == 409 and r.json()["jobs"] == [job.id]
-        await runner.cancel(job.id)
+        await service.cancel(job.id)
         assert (await c.post(f"/admin/vods/{A}/merge", headers=KEY, json={"source": B, "gap": 300})).status_code == 200
         # An already-merged source (or target).
         async with get_sessionmaker()() as s:
@@ -282,8 +289,8 @@ async def test_merge_refusals(vods, admin):
         assert (await c.post(f"/admin/vods/{A}/merge", headers=KEY, json={"source": "nope"})).status_code == 404
 
 
-async def test_refresh_jobs_refuse_a_merged_vod(vods, admin, make_ctx, monkeypatch):
-    c, runner = admin
+async def test_refresh_jobs_refuse_a_merged_vod(vods, admin, make_ctx, monkeypatch, wait_job):
+    c, service = admin
     async with c:
         assert (await c.post(f"/admin/vods/{A}/merge", headers=KEY, json={"source": B})).status_code == 200
         for route, body in (("/admin/logs", {"vodId": A}), ("/admin/chapters", {"vodId": A, "force": True}),
@@ -299,8 +306,8 @@ async def test_refresh_jobs_refuse_a_merged_vod(vods, admin, make_ctx, monkeypat
     async def boom(*_a, **_k):
         raise AssertionError("fetched from Twitch")
 
-    monkeypatch.setattr(runner.deps.gql, "comments", boom)
-    monkeypatch.setattr(runner.deps.gql, "video_moments", boom)
+    monkeypatch.setattr(service.deps.gql, "comments", boom)
+    monkeypatch.setattr(service.deps.gql, "video_moments", boom)
     comments = await _comments(A)
     for step, payload in ((metadata.chat, {}), (metadata.chapters, {"force": True}), (metadata.emotes, {})):
         with pytest.raises(StepRefused, match=f"vod {A} was merged with {B}"):
@@ -310,11 +317,10 @@ async def test_refresh_jobs_refuse_a_merged_vod(vods, admin, make_ctx, monkeypat
     assert await _comments(A) == comments and len(comments) == 7  # B's rows are still there
 
     # A job queued before the merge fails at once, without retries.
-    job = await jobs.enqueue("chat", A, settings=runner.deps.settings)
-    await runner._run(await runner._claim())
-    job = await jobs.get(job.id)
-    assert (job.state, job.attempts) == ("failed", runner.deps.settings.max_attempts)
-    assert "refused" in job.last_error
+    job = await service.enqueue("chat", A)
+    await service.runtime.start()
+    job = await wait_job(job.id, "failed")
+    assert job.attempts == 1 and "refused" in job.last_error
 
 
 # ── Split ─────────────────────────────────────────────────────────────────

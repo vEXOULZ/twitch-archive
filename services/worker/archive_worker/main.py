@@ -1,6 +1,6 @@
 """archive-worker entrypoint.
 
-    archive-worker run [--dry-run]            monitor + job runner + admin API
+    archive-worker run [--dry-run]            monitor + jobs + admin API
     archive-worker import-youtube-token FILE  import youtube.auth from a legacy config.json
     archive-worker enqueue KIND VOD_ID [JSON] queue a job without the admin API
 """
@@ -15,8 +15,9 @@ import signal
 from pathlib import Path
 
 import uvicorn
+from vex_platform.actor import Actor
 
-from archive_common import http, logs
+from archive_common import audit, http, logs
 from archive_common.config import get_settings
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
@@ -41,11 +42,11 @@ async def serve(dry_run: bool = False) -> None:
     events = JobEvents()
     events.install()  # job log lines -> GET /admin/jobs/{id}/events
     deps = Deps(settings, Helix(settings), Gql(settings), youtube.YouTube(settings), events)
-    runner = jobs.Runner(deps)
-    monitor = Monitor(deps.helix, runner)
+    service = jobs.JobService.create(deps)
+    monitor = Monitor(deps.helix, service)
     admin = uvicorn.Server(
         uvicorn.Config(
-            create_admin_app(deps, runner, sessions=DbSessionStore(), runtime=runtime),
+            create_admin_app(deps, service, sessions=DbSessionStore(), runtime=runtime),
             host=settings.admin_host,
             port=settings.admin_port,
             log_level=settings.log_level.lower(),
@@ -68,8 +69,13 @@ async def serve(dry_run: bool = False) -> None:
         settings.twitch_username, settings.live_record, settings.vod_download,
         settings.youtube_upload, settings.dry_run,
     )
+    copied = await audit.copy_admin_audit()  # what the previous release audited while it was replaced
+    if copied:
+        log.info("copied %d admin_audit rows into audit_log", copied)
+    await service.runtime.open()
+    await service.runtime.start()  # new jobs; the legacy runner below finishes the old table's
     tasks = [
-        asyncio.create_task(runner.run_forever(), name="runner"),
+        asyncio.create_task(service.legacy.run_forever(), name="legacy-runner"),
         asyncio.create_task(monitor.run_forever(), name="monitor"),
         asyncio.create_task(events.run_forever(), name="job-events"),  # flushes on cancel
     ]
@@ -91,7 +97,8 @@ async def serve(dry_run: bool = False) -> None:
 
     log.info("shutting down; interrupted jobs resume on next start")
     admin.should_exit = True  # uvicorn stops on its own; cancelling it logs a spurious traceback
-    await runner.shutdown()
+    await service.runtime.stop()
+    await service.legacy.shutdown()
     admin_task, others = tasks[-1], tasks[:-1]
     for t in others:
         t.cancel()
@@ -100,12 +107,20 @@ async def serve(dry_run: bool = False) -> None:
         await asyncio.wait_for(admin_task, timeout=10)
     except (TimeoutError, asyncio.CancelledError, Exception):
         pass
+    await service.runtime.close()
     await http.close_client()
 
 
 async def _enqueue(kind: str, vod_id: str, payload: str | None) -> None:
-    job = await jobs.enqueue(kind, vod_id, json.loads(payload) if payload else {})
-    print(f"queued job {job.id} ({kind} {vod_id}); a running worker picks it up within 10s")
+    settings = get_settings()
+    service = jobs.JobService.create(Deps(settings, Helix(settings), Gql(settings), youtube.YouTube(settings)))
+    await service.runtime.open()
+    try:
+        job = await service.enqueue(kind, vod_id, json.loads(payload) if payload else {},
+                                    actor=Actor("system", via="cli"))
+    finally:
+        await service.runtime.close()
+    print(f"queued job {job.id} ({kind} {vod_id}, {job.state}); a running worker picks it up at once")
 
 
 def run() -> None:
@@ -121,7 +136,7 @@ def run() -> None:
     p_enq.add_argument("payload", nargs="?", help="JSON object, e.g. '{\"start_part\": 2}'")
     args = parser.parse_args()
 
-    logs.setup(get_settings().log_level)
+    logs.setup(get_settings().log_level, get_settings().log_format)
     if args.cmd == "import-youtube-token":
         asyncio.run(youtube.import_legacy_token(args.config))
         print("YouTube refresh token imported.")

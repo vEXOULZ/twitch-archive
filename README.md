@@ -58,7 +58,7 @@ flowchart LR
 
 ## 1. Quick start (local development)
 
-You need Python 3.11+, [uv](https://docs.astral.sh/uv/), Docker, and ffmpeg/ffprobe on `PATH` (the worker only).
+You need Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker, and ffmpeg/ffprobe on `PATH` (the worker only).
 
 ```bash
 uv sync                                        # creates .venv with all three packages
@@ -96,6 +96,7 @@ In production, non-secret settings go in `.env` (see `.env.example`). Secrets go
 | `ARCHIVE_DOMAIN_NAME` | – | Frontend host, used in the "Chat Replay" link in descriptions |
 | `ARCHIVE_TIMEZONE` | `UTC` | The date in YouTube titles |
 | `ARCHIVE_LOG_LEVEL` | `INFO` | |
+| `ARCHIVE_LOG_FORMAT` | `console` | `json` for one JSON object per line (containers) |
 | `ARCHIVE_TWITCH_ID` / `ARCHIVE_TWITCH_USERNAME` | – | The channel to archive (numeric user ID and login) |
 | `ARCHIVE_TWITCH_CLIENT_ID` / `ARCHIVE_TWITCH_CLIENT_SECRET` | – | Twitch app, used for Helix (app token). The API needs it for `/v2/badges`; the worker needs it for the monitor |
 
@@ -455,7 +456,7 @@ curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 - **VOD fields** (`PATCH /admin/vods/{id}`): any of `title`, `hidden`, `thumbnailUrl` (an http(s) URL, or `null` for the site's default), `duration` (`HH:MM:SS`; it must still hold the chapters and games rows) and `createdAt` (ISO with an offset). A merged VOD takes only `hidden`. **Hidden** takes the VOD off the public API as if it were missing (see [§6](#6-public-api-reference)); the dashboard still has it, and unhiding brings it back.
 - **Games rows** (`PUT /admin/vods/{id}/games`) replace the VOD's rows. Send them in the shape `GET` returns (`id`, `vodId` and the dates are ignored): `start_time` and `end_time` in seconds, sorted, not overlapping and inside the VOD, a `game_name`, and optionally `game_id`, `title`, `video_provider`, `video_id`, and `thumbnail_url` and `chapter_image` (http(s) URLs). Refused on a merged VOD.
 - **Edits show up on the public API at once:** the worker sends a Postgres `NOTIFY`, and archive-api drops its cached responses for that VOD and for the lists that include it.
-- **Audit log:** every state-changing admin request that succeeds is stored as `{at, actor, actorLogin, action, target, detail}`. `actor` is `password`, `api-key` or `twitch:<id>`, `actorLogin` is the Twitch login behind a `twitch:<id>` (otherwise `null`), `action` is the method and route, `target` is `vod:<id>`, `job:<id>`, `setting:<key>` or `storage:<area>/<name>` when there is one, and `detail` is the request body. A VOD edit (`PATCH /admin/vods/{id}`, `PUT …/games`) and a settings change store `{before, after}` instead: the fields or settings it changed, or the rows. A login password is never stored.
+- **Audit log:** every state-changing admin request that succeeds is stored as `{at, actor, actorLogin, action, target, detail}`. `actor` is `password`, `api-key` or `twitch:<id>`, `actorLogin` is the Twitch login behind a `twitch:<id>` (otherwise `null`), `action` names what was done (`vod.update`, `setting.reset`, `job.cancel` …; the routes' names are in `packages/common/archive_common/audit.py`), `target` is `vod:<id>`, `job:<id>`, `setting:<key>` or `storage:<area>/<name>` when there is one, and `detail` is the request body. A VOD edit (`PATCH /admin/vods/{id}`, `PUT …/games`) and a settings change store `{before, after}` instead: the fields or settings it changed, or the rows. A login password is never stored. Actions on jobs are recorded by the job runtime, whichever way they were made. The rows live in `audit_log`, which the monitor's and jobs' own actions go to as well; this route lists only the admins'. Entries from before it (the old `admin_audit` table) were copied in, with their actions renamed the same way.
 
 ---
 
@@ -626,7 +627,7 @@ Pushes and pull requests run CI (`.github/workflows/tests.yml`): the unit tests 
 packages/common/archive_common/   settings, DB models, Twitch Helix/GQL clients, http helper
 services/api/archive_api/         FastAPI app, Feathers query parser, serializers, comments port
 services/worker/archive_worker/   monitor, job runner, steps/, hls, ffmpeg, youtube, admin API
-migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before, 0003 manual step control, … 0007 VOD merges and splits, 0008 bot chat, 0009 admin sessions, 0010 hidden VODs, 0011 runtime settings)
+migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before, 0003 manual step control, … 0007 VOD merges and splits, 0008 bot chat, 0009 admin sessions, 0010 hidden VODs, 0011 runtime settings, 0012 vex-platform jobs schema + audit_log)
 tests/api_contract/               golden responses from the legacy API + replay tests
 tests/worker/                     HLS parsing, planning, capture (respx), ffmpeg, DB-backed steps/runner
 deploy/                           roles.sql, example secrets

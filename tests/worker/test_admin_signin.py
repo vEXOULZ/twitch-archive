@@ -79,7 +79,7 @@ def admin(deps, fake):
     def client(peer: str = "203.0.113.5", *, networks: list[str] | None = None, signin=fake) -> httpx.AsyncClient:
         if networks is not None:
             deps.settings.admin_password_networks = networks
-        app = create_admin_app(deps, jobs.Runner(deps), signin=signin)
+        app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)), signin=signin)
         transport = httpx.ASGITransport(app=app, client=(peer, 1234))
         return httpx.AsyncClient(transport=transport, base_url="https://admin")
 
@@ -241,7 +241,7 @@ async def test_sign_out_everywhere_is_noticed_after_check_interval(deps, fake):
     from archive_worker.admin_signin import CHECK_S
 
     deps.settings.admin_twitch_ids = ["100"]
-    app = create_admin_app(deps, jobs.Runner(deps), signin=fake)
+    app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)), signin=fake)
     transport = httpx.ASGITransport(app=app, client=("203.0.113.5", 1234))
     clock = Clock()
     app.state.admin_sessions.clock = clock
@@ -263,7 +263,7 @@ async def test_sign_out_everywhere_is_noticed_after_check_interval(deps, fake):
 
 async def test_twitch_sign_in_off_without_settings(deps):
     deps.settings.admin_api_key = SecretStr("k")
-    app = create_admin_app(deps, jobs.Runner(deps))
+    app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://admin") as c:
         assert (await c.get("/admin/session")).json()["twitchLogin"] is False
         assert (await c.get("/admin/signin")).status_code == 404

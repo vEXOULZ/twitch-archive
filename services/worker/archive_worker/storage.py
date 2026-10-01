@@ -23,10 +23,10 @@ from typing import Any
 from sqlalchemy import func, select
 
 from archive_common.db import get_sessionmaker
-from archive_common.models import Job, Vod
+from archive_common.models import Vod
 
 from .events import iso_utc
-from .jobs import ACTIVE
+from .job_rows import ACTIVE, ALL_JOBS
 
 AREAS = ("vods", "live")
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -94,13 +94,13 @@ def folder_path(data_dir: Path, area: str, name: str) -> Path:
 
 def _jobs_of(area: str, names: list[str]) -> Any:
     """Jobs working in these folders (as JobContext.work_dir picks them)."""
-    typ = func.coalesce(Job.payload["type"].astext, "vod")
+    typ = func.coalesce(ALL_JOBS.c.payload["type"].astext, "vod")
     if area == "live":
-        return (typ == "live") & Job.payload["stream_id"].astext.in_(names)
-    return (typ != "live") & Job.vod_id.in_(names)
+        return (typ == "live") & ALL_JOBS.c.payload["stream_id"].astext.in_(names)
+    return (typ != "live") & ALL_JOBS.c.vod_id.in_(names)
 
 
-def _job_json(job: Job) -> dict:
+def _job_json(job: Any) -> dict:
     return {"id": job.id, "kind": job.kind, "state": job.state, "step": job.step,
             "updatedAt": iso_utc(job.updated_at)}
 
@@ -137,8 +137,9 @@ class Storage:
                 vods = {}
                 for v in (await s.execute(select(key, Vod.id, Vod.title, Vod.hidden).where(key.in_(names)))).all():
                     vods.setdefault(v[0], {"id": v.id, "title": v.title, "hidden": v.hidden})
-                by_folder: dict[str, list[Job]] = {}
-                for job in (await s.execute(select(Job).where(_jobs_of(area, names)).order_by(Job.id.desc()))).scalars():
+                by_folder: dict[str, list[Any]] = {}
+                stmt = select(ALL_JOBS).where(_jobs_of(area, names)).order_by(ALL_JOBS.c.id.desc())
+                for job in (await s.execute(stmt)).all():
                     name = (job.payload or {}).get("stream_id") if area == "live" else job.vod_id
                     by_folder.setdefault(str(name), []).append(job)
                 for f in mine:
@@ -162,7 +163,7 @@ class Storage:
         path = folder_path(self.data_dir, area, name)
         async with get_sessionmaker()() as s:
             active = (await s.execute(
-                select(Job.id).where(_jobs_of(area, [name]), Job.state.in_(ACTIVE)).limit(1)
+                select(ALL_JOBS.c.id).where(_jobs_of(area, [name]), ALL_JOBS.c.state.in_(ACTIVE)).limit(1)
             )).scalar()
         if active is not None:
             raise StorageError(409, f"Job {active} is working in {area}/{name}; cancel it or let it finish first")
