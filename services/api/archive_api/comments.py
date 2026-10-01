@@ -20,7 +20,9 @@ Every row says which it came from in ``source``. An offset page also carries
 offer only the ones that exist.
 
 A VOD merged into another has no rows of its own any more (they were re-keyed to
-that VOD), so it answers every request with an empty page.
+that VOD), so it answers every request with an empty page. So does a synthetic VOD (a merge,
+split or playthrough made of windows of others): its page also lists those ``segments``, whose
+chat a site reads from each source VOD (``segments[].vodId``) and maps onto its own timeline.
 """
 
 from __future__ import annotations
@@ -37,7 +39,8 @@ from typing import Any
 from sqlalchemy import Column, Row, Table, func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from archive_common.models import BotLog, Log, Vod
+from archive_common.models import BotLog, Log, Vod, VodSegment
+from archive_common.segments import Segment
 from archive_common.serialize import BOT_LOGS, LOGS, Resource, js_iso
 
 from .errors import LegacyError
@@ -48,7 +51,7 @@ log = logging.getLogger(__name__)
 PAGE = 200
 EMPTY: dict[str, Any] = {"comments": []}
 BOT_SHARE = 0.9  # ``auto`` serves the bot's chat once it has this share of the replay's rows
-_lt, _bt, _vt = Log.__table__, BotLog.__table__, Vod.__table__
+_lt, _bt, _vt, _sgt = Log.__table__, BotLog.__table__, Vod.__table__, VodSegment.__table__
 HIDDEN = "Vod not found"  # a hidden VOD's chat answers like a missing page
 
 
@@ -165,6 +168,8 @@ class Comments:
                         raise LegacyError(404, HIDDEN)
                     if vod.merged_into is not None:
                         return EMPTY
+                    if vod.synthetic is not None:
+                        return await self._synthetic(conn, vod_id)
                     result = await self._offset_search(conn, src, vod_id, seconds, vod.createdAt)
                 if result is None:
                     # A chat asked for by name that the VOD doesn't have is an empty page, so a site can see
@@ -188,6 +193,8 @@ class Comments:
                 result = await self._cursor_search(conn, src, vod_id, cursor_json)
                 if result is None and vod is not None and vod.merged_into is not None:
                     return EMPTY
+                if result is None and vod is not None and vod.synthetic is not None:
+                    return await self._synthetic(conn, vod_id)
             if result is None:
                 raise LegacyError(500, f"Failed to retrieve comments from cursor {cursor}")
             return result
@@ -212,8 +219,13 @@ class Comments:
 
     async def _vod(self, conn: AsyncConnection, vod_id: str) -> Row | None:
         return (await conn.execute(
-            select(_vt.c.createdAt, _vt.c.merged_into, _vt.c.hidden).where(_vt.c.id == vod_id)
+            select(_vt.c.createdAt, _vt.c.merged_into, _vt.c.hidden, _vt.c.synthetic).where(_vt.c.id == vod_id)
         )).first()
+
+    async def _synthetic(self, conn: AsyncConnection, vod_id: str) -> dict:
+        """A synthetic VOD's (empty) page: where its chat is, as stored (``end`` null: to the source's end)."""
+        rows = await conn.execute(select(_sgt).where(_sgt.c.vod_id == vod_id).order_by(_sgt.c.pos))
+        return {**EMPTY, "segments": [Segment.of_row(r).json() for r in rows]}
 
     async def _rows(self, conn: AsyncConnection, src: _Source, *where) -> list[dict]:
         stmt = (

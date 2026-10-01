@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import ColumnElement, and_, func, select, true
+from sqlalchemy import ColumnElement, and_, false, func, or_, select, true
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.config import Settings
 from archive_common.serialize import (
-    EMOTES, GAMES, STREAMS, VODS, Resource, attach_games, not_hidden, not_merged_away, of_shown_vod, vods_json,
+    EMOTES, GAMES, STREAMS, VODS, Resource, attach_games, attach_segments, not_hidden, not_merged_away,
+    not_superseded, of_shown_vod, tagged, vods_json,
 )
 
 from . import feathers_query as fq
@@ -81,15 +82,43 @@ class Service:
 
 class VodsService(Service):
     def __init__(self, settings: Settings) -> None:
-        super().__init__(VODS, settings, {"chapters": fq.chapter_filter(VODS.table.c.chapters)}, not_hidden())
+        special = {"chapters": fq.chapter_filter(VODS.table.c.chapters), "tags": _tags_filter}
+        super().__init__(VODS, settings, special, not_hidden())
 
     async def embed(self, conn: AsyncConnection, items: list[dict]) -> None:
         await attach_games(conn, items)
+        await attach_segments(conn, items)
 
     def scope(self, query: dict[str, Any]) -> ColumnElement[bool]:
-        """VODs merged into another one are left out unless ``$merged=true``
-        (``GET /vods/{id}`` still answers for them, with ``merged_into``). Hidden VODs are never shown."""
-        return true() if query.get("$merged") == "true" else not_merged_away()
+        """Left out unless asked for (``GET /vods/{id}`` still answers for them all):
+
+        * VODs merged into another one (``$merged=true``; they have ``merged_into``);
+        * VODs a merge or split synthetic VOD is made of (``$superseded=true``; ``superseded_by``);
+        * tagged VODs: only untagged ones are listed, unless ``$tag=<tag>`` (that tag's, e.g.
+          ``compilation``), ``$tag=*`` (all) or a ``tags`` filter.
+
+        Hidden VODs are never shown."""
+        clauses = []
+        if query.get("$merged") != "true":
+            clauses.append(not_merged_away())
+        if query.get("$superseded") != "true":
+            clauses.append(not_superseded())
+        tag = query.get("$tag")
+        if tag is None and "tags" not in query:
+            clauses.append(tagged(None))
+        elif isinstance(tag, str) and tag != "*":
+            clauses.append(tagged(tag))
+        return and_(true(), *clauses)
+
+
+def _tags_filter(value: Any) -> ColumnElement[bool]:
+    """``tags=a`` VODs tagged ``a``; ``tags[]=a&tags[]=b`` (or ``tags[$all]``) both; ``tags[$in]`` either."""
+    if isinstance(value, dict) and set(value) == {"$in"}:
+        return or_(false(), *(tagged(str(t)) for t in fq._as_list(value["$in"])))
+    values = fq._as_list(value["$all"]) if isinstance(value, dict) and set(value) == {"$all"} else fq._as_list(value)
+    if not values or not all(isinstance(t, str) for t in values):
+        raise FeathersError(400, "Invalid value for 'tags'")
+    return VODS.table.c.tags.contains(values)
 
 
 class GamesService(Service):

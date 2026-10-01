@@ -4,6 +4,8 @@ Every ``monitor_interval_seconds``: look up the channel's live stream, keep the
 ``streams`` row current, and enqueue one ``live`` job (live_record) and one
 ``archive`` job (vod_download) per stream. When a stream ends, enqueue one ``bot_chat``
 job (doomtp_url) for its VOD: the bot records the chat live, so it is read once, at the end.
+Each round also recomposes the synthetic VODs whose sources changed (``synthetic.recompose_stale``),
+with or without Twitch credentials.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import logging
 from archive_common.timeutil import parse_helix_duration, parse_ts
 from archive_common.twitch.helix import Helix
 
-from . import jobs
+from . import jobs, synthetic
 from .vods import live_stream_ids, set_live_stream, upsert_vod
 
 log = logging.getLogger(__name__)
@@ -27,14 +29,19 @@ class Monitor:
         self.settings = helix.settings
 
     async def run_forever(self) -> None:
-        if not self.helix.configured:
-            log.warning("Twitch client id/secret not set; monitor disabled")
-            return
+        watching = self.helix.configured
+        if not watching:
+            log.warning("Twitch client id/secret not set; monitor disabled (synthetic VODs are still recomposed)")
         while True:
+            if watching:
+                try:
+                    await self.tick()
+                except Exception:
+                    log.exception("monitor tick failed")
             try:
-                await self.tick()
+                await synthetic.recompose_stale()
             except Exception:
-                log.exception("monitor tick failed")
+                log.exception("recomposing synthetic VODs failed")
             await asyncio.sleep(self.settings.monitor_interval_seconds)
 
     async def tick(self) -> None:

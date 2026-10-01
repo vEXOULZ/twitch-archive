@@ -20,10 +20,11 @@ from functools import cached_property
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Column, Table, exists, select
+from sqlalchemy import Column, Table, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from archive_common.models import BotLog, Emote, Game, Log, Stream, Vod
+from archive_common.models import BotLog, Emote, Game, Log, Stream, Vod, VodSegment
+from archive_common.segments import EPS, Segment, resolve, seconds
 from archive_common.timeutil import hhmmss_to_seconds
 
 
@@ -128,6 +129,8 @@ def chapter_additions(chapter: Any) -> Any:
 def vod_additions(vod: dict[str, Any]) -> None:
     if "merged_into" in vod and vod["merged_into"] is None:
         del vod["merged_into"]  # only on VODs merged into another: {"id", "offset"}
+    if "synthetic" in vod and vod["synthetic"] is None:
+        del vod["synthetic"]  # only on synthetic VODs; attach_segments completes it
     if isinstance(vod.get("chapters"), list):
         vod["chapters"] = [chapter_additions(c) for c in vod["chapters"]]
     if "duration" in vod:
@@ -139,6 +142,7 @@ def _t(model) -> Table:
 
 
 _vt, _gt, _et, _lt, _st, _bt = _t(Vod), _t(Game), _t(Emote), _t(Log), _t(Stream), _t(BotLog)
+_sgt = _t(VodSegment)
 
 VODS = Resource(
     _vt,
@@ -156,6 +160,8 @@ VODS = Resource(
         Field("updatedAt", _vt.c.updatedAt, js_iso),
         # Added after the legacy API; left out of the JSON while NULL (see vod_additions).
         Field("merged_into", _vt.c.merged_into),
+        Field("tags", _vt.c.tags),
+        Field("synthetic", _vt.c.synthetic),
     ),
     "id",
     {},
@@ -171,6 +177,24 @@ def not_merged_away() -> Any:
 def not_hidden() -> Any:
     """VODs the public API shows at all: a hidden one answers like a missing one."""
     return _vt.c.hidden.is_(False)
+
+
+def not_superseded() -> Any:
+    """VODs no superseding synthetic VOD (a merge, a split) is made of: lists leave those out, and
+    ``GET /vods/{id}`` answers for them with ``superseded_by``."""
+    syn = _vt.alias("syn")
+    return ~exists().where(_sgt.c.source_id == _vt.c.id, syn.c.id == _sgt.c.vod_id,
+                           syn.c.synthetic["supersedes"].as_boolean().is_(True))
+
+
+def tagged(tag: str | None) -> Any:
+    """VODs with ``tag``; None: those with no tags at all (the regular ones)."""
+    return func.cardinality(_vt.c.tags) == 0 if tag is None else _vt.c.tags.contains([tag])
+
+
+def real() -> Any:
+    """Real VODs (not synthetic ones)."""
+    return _vt.c.synthetic.is_(None)
 
 
 def of_shown_vod(vod_id: Any) -> Any:
@@ -299,6 +323,77 @@ async def attach_games(conn: AsyncConnection, vods: list[dict]) -> None:
         vod["games"] = games[vod["id"]]
 
 
+def _game_in(game: dict, seg: Segment, synthetic_id: str) -> dict | None:
+    """A source's game row cut to ``seg``'s window and moved to where it plays on the synthetic VOD."""
+    try:
+        start, end = float(game["start_time"]), float(game["end_time"])
+    except (TypeError, ValueError):
+        return None
+    start, end = max(start, seg.start), min(end, seg.end)
+    if end - start <= EPS:
+        return None
+    shift = seg.at - seg.start
+    return {**game, "vodId": synthetic_id, "sourceVodId": game["vodId"],
+            "start_time": str(seconds(start + shift)), "end_time": str(seconds(end + shift))}
+
+
+async def attach_segments(conn: AsyncConnection, vods: list[dict]) -> None:
+    """Synthetic VODs get ``synthetic.segments`` (each one's end resolved) and the games of their
+    sources' windows (after ``attach_games``); a VOD a shown synthetic VOD is made of gets
+    ``superseded_by`` (merges, splits: where each part of it went) or ``appears_in`` (the others)."""
+    ids = [v["id"] for v in vods if "id" in v]
+    if not ids:
+        return
+    syn = _vt.alias("syn")
+    rows = (await conn.execute(
+        select(_sgt, syn.c.title, syn.c.tags, syn.c.synthetic, syn.c.hidden)
+        .join(syn, syn.c.id == _sgt.c.vod_id)
+        .where(or_(_sgt.c.vod_id.in_(ids), _sgt.c.source_id.in_(ids)))
+        .order_by(syn.c.createdAt, _sgt.c.vod_id, _sgt.c.pos)
+    )).mappings().all()
+    if not rows:
+        return
+    mine: dict[str, list[Segment]] = {}
+    for r in rows:
+        if r["vod_id"] in ids:
+            mine.setdefault(r["vod_id"], []).append(Segment.of_row(r))
+    durations: dict[str, float] = {}
+    if mine:
+        sources = {x.source_id for v in mine.values() for x in v}
+        for vod_id, duration in await conn.execute(select(_vt.c.id, _vt.c.duration).where(_vt.c.id.in_(sources))):
+            durations[vod_id] = float(duration_seconds(duration) or 0)
+    resolved = {k: resolve(v, durations) for k, v in mine.items()}
+    games = await _games_for(conn, list({x.source_id for v in resolved.values() for x in v}))
+    # Where the parts of each source went, for superseded_by / appears_in.
+    used: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        if r["source_id"] not in ids or r["hidden"]:
+            continue
+        entry = used.setdefault(r["source_id"], {})
+        if (r["synthetic"] or {}).get("supersedes"):
+            seg = Segment.of_row(r)
+            entry.setdefault("superseded_by", []).append(
+                {"id": r["vod_id"], "start": seconds(seg.start), "end": None if seg.end is None else seconds(seg.end),
+                 "at": seconds(seg.at)})
+        else:
+            entry.setdefault("appears_in", {}).setdefault(
+                r["vod_id"], {"id": r["vod_id"], "title": r["title"], "tags": list(r["tags"] or [])})
+    for vod in vods:
+        segs = resolved.get(vod["id"])
+        if segs is not None and "synthetic" in vod:  # (not when $select left it out)
+            supersedes = bool((vod["synthetic"] or {}).get("supersedes"))
+            vod["synthetic"] = {"supersedes": supersedes, "segments": [x.json() for x in segs]}
+            if "games" in vod:
+                vod["games"] = [g for x in segs for g in (_game_in(g, x, vod["id"]) for g in games.get(x.source_id, []))
+                                if g is not None]
+        entry = used.get(vod["id"])
+        if entry:
+            if "superseded_by" in entry:
+                vod["superseded_by"] = entry["superseded_by"]
+            if "appears_in" in entry:
+                vod["appears_in"] = list(entry["appears_in"].values())
+
+
 async def vods_json(
     conn: AsyncConnection, *where: Any, order_by: Any = None, limit: int | None = None
 ) -> list[dict[str, Any]]:
@@ -308,6 +403,7 @@ async def vods_json(
         stmt = stmt.order_by(order_by)
     vods = [VODS.to_json(r) for r in (await conn.execute(stmt)).mappings()]
     await attach_games(conn, vods)
+    await attach_segments(conn, vods)
     return vods
 
 

@@ -41,9 +41,13 @@ def active_splices(*vod_ids: str) -> Select:
 
 
 async def splice_reason(vod_id: str) -> str | None:
-    """Why ``vod_id`` no longer matches Twitch's VOD of that id (merged or split), or None."""
+    """Why ``vod_id`` does not match Twitch's VOD of that id (a synthetic VOD, or merged or split), or None.
+    The real VODs behind a synthetic one are untouched, so they are never refused."""
     async with get_sessionmaker()() as s:
-        merged_into = (await s.execute(select(Vod.merged_into).where(Vod.id == vod_id))).scalar_one_or_none()
+        row = (await s.execute(select(Vod.merged_into, Vod.synthetic).where(Vod.id == vod_id))).one_or_none()
+        merged_into, synthetic = row if row else (None, None)
+        if synthetic is not None:
+            return f"vod {vod_id} is a synthetic VOD, made of parts of others (run jobs on those)"
         if merged_into:
             return f"vod {vod_id} was merged into {merged_into.get('id')}"
         splice = (await s.execute(

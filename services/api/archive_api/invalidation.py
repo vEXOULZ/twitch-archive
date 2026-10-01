@@ -6,6 +6,10 @@ any write to ``vods`` or ``games`` commits; this LISTENs on its own connection. 
 
 A merge or split also moves the VOD's chat rows and emotes, and says so with a
 ``ROWS_MOVED`` notice, which drops the chat replay and emotes cached for it.
+
+A synthetic VOD's JSON is made from its sources' rows (games, segment ends), and a source's
+lists the synthetic VODs made of it, so any change also drops every cached synthetic VOD
+(those ids are never only digits; there are few of them).
 """
 
 from __future__ import annotations
@@ -40,6 +44,11 @@ def _emotes_of(vod_id: str, key: str) -> bool:
     return key == f"emotes/{vod_id}" or (key.startswith("emotes?") and vod_id in key)
 
 
+def _synthetic_vod(key: str) -> bool:
+    """``vods/<id>`` of a synthetic VOD (a Twitch VOD's id is only digits)."""
+    return key.startswith("vods/") and not key.removeprefix("vods/").isdigit()
+
+
 class VodInvalidator:
     def __init__(self, database_url: str, service_cache: ResponseCache, *other_caches: ResponseCache,
                  comments: Comments | None = None) -> None:
@@ -50,9 +59,12 @@ class VodInvalidator:
 
     def invalidate(self, vod_id: str) -> None:
         own = f"vods/{vod_id}"
-        self.service_cache.invalidate(lambda key: key == own or key.startswith(_LIST_PREFIXES))
+        self.service_cache.invalidate(
+            lambda key: key == own or key.startswith(_LIST_PREFIXES) or _synthetic_vod(key))
         for cache in self.other_caches:
             cache.clear()
+        if self.comments is not None and not vod_id.isdigit():
+            self.comments.invalidate(vod_id)  # a synthetic VOD's page lists its segments
 
     def rows_moved(self, vod_id: str) -> None:
         self.service_cache.invalidate(lambda key: _emotes_of(vod_id, key))

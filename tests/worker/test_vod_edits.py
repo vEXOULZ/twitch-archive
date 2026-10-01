@@ -43,6 +43,15 @@ def test_vod_fields_refused(body, message):
         vod_edits.vod_fields(body)
 
 
+def test_tags():
+    assert vod_edits.vod_fields({"tags": [" Compilation", "compilation"]}) == {"tags": ["compilation"]}
+    assert vod_edits.vod_fields({"tags": []}) == {"tags": []}
+    for value, message in (("compilation", "list of strings"), ([1], "list of strings"),
+                           (["nope"], "unknown tag(s) nope; known: compilation")):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            vod_edits.tags(value)
+
+
 def test_content_end():
     assert vod_edits.content_end([{"start": 0, "end": 60}, {"start": 60, "end": 30.5}, {"start": "x"}, None]) == 90.5
     assert vod_edits.content_end(None) == 0
