@@ -37,7 +37,7 @@ from archive_common.audit import write as write_audit
 from archive_common.db import get_sessionmaker
 from archive_common.models import Emote, Game, Log, Stream, Vod
 from archive_common.serialize import EMOTES, GAMES, box_art_template, duration_seconds, vod_json
-from archive_common.timeutil import hhmmss_to_seconds, parse_helix_duration
+from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds, parse_helix_duration
 
 from . import api_v2, jobs, splices, vod_edits, youtube
 from .admin_auth import (
@@ -782,7 +782,7 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
         await require_vod(body["vodId"])
         await refuse_spliced(body["vodId"], "setting its duration from Twitch")
         video = await helix_video(body["vodId"])
-        duration = _helix_hhmmss(video)
+        duration = format_hhmmss(parse_helix_duration(video.get("duration", "")))
         await save_vod(str(body["vodId"]), duration=duration)
         return _ok("Saved duration!", duration=duration)
 
