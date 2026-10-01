@@ -40,7 +40,7 @@ from archive_common import audit
 from archive_common.db import get_sessionmaker
 from archive_common.models import Game, Vod
 from archive_common.segments import Segment
-from archive_common.serialize import duration_seconds
+from archive_common.serialize import duration_seconds, not_hidden, not_merged_away, real, tagged
 from archive_common.timeutil import hhmmss_to_seconds
 
 from . import compose, splices, synthetic, vod_edits
@@ -292,9 +292,9 @@ def vods_router(auth: Auth) -> APIRouter:
         if hidden is not None:
             stmt = stmt.where(Vod.hidden.is_(hidden))
         if tag is not None:
-            stmt = stmt.where(Vod.tags.contains([tag]) if tag else func.cardinality(Vod.tags) == 0)
+            stmt = stmt.where(tagged(tag or None))
         if is_synthetic is not None:
-            stmt = stmt.where(Vod.synthetic.is_not(None) if is_synthetic else Vod.synthetic.is_(None))
+            stmt = stmt.where(~real() if is_synthetic else real())
         if key := decode_cursor(cursor, size=2):
             try:
                 at = dt.datetime.fromisoformat(key[0])
@@ -427,8 +427,7 @@ def vods_router(auth: Auth) -> APIRouter:
         ["compilation"]``, ``supersedes: false``); a window's ``segment`` is ready to send."""
         async with get_sessionmaker()() as s:
             vods = (await s.execute(
-                select(Vod).where(Vod.synthetic.is_(None), Vod.merged_into.is_(None), Vod.hidden.is_(False),
-                                  Vod.chapters.contains([{"gameId": game_id}]))
+                select(Vod).where(real(), not_merged_away(), not_hidden(), Vod.chapters.contains([{"gameId": game_id}]))
                 .order_by(Vod.created_at, Vod.id)
             )).scalars().all()
         items = []
@@ -520,7 +519,7 @@ async def _synthetic(fn, *args, **kwargs):
     except compose.ComposeError as exc:
         raise ApiError(422, "invalid_synthetic", str(exc)) from None
     except synthetic.SyntheticError as exc:
-        raise ApiError(exc.status, _SYNTHETIC_CODES.get(exc.status, "synthetic_refused"), exc.msg) from None
+        raise ApiError(exc.status, _SYNTHETIC_CODES.get(exc.status, "synthetic_refused"), exc.msg, **exc.extra) from None
     return _snake(result) if isinstance(result, dict) else result
 
 

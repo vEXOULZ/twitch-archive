@@ -14,14 +14,14 @@ from __future__ import annotations
 import datetime as dt
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import cached_property
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import Column, Table, exists, func, or_, select
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from archive_common.models import BotLog, Emote, Game, Log, Stream, Vod, VodSegment
 from archive_common.segments import EPS, MAX_DEPTH, Segment, flatten, resolve, seconds
@@ -337,13 +337,14 @@ def _game_in(game: dict, seg: Segment, synthetic_id: str) -> dict | None:
             "start_time": str(seconds(start + shift)), "end_time": str(seconds(end + shift))}
 
 
-async def flat_segments(conn: AsyncConnection, ids: list[str]) -> dict[str, list[Segment]]:
-    """The segments of each synthetic VOD in ``ids``, resolved and flattened (``segments.flatten``):
-    windows of real VODs only, each with its stream. A VOD that isn't synthetic has no entry."""
+async def nested_segments(conn: AsyncConnection | AsyncSession, ids: Iterable[str],
+                          levels: int) -> tuple[dict[str, list[Segment]], dict[str, bool]]:
+    """The stored segments of each synthetic VOD among ``ids``, then of the synthetic VODs they are
+    made of, ``levels`` levels down; and whether each of those supersedes its sources."""
     raw: dict[str, list[Segment]] = {}
     supersedes: dict[str, bool] = {}
     todo = set(ids)
-    for _ in range(MAX_DEPTH + 2):  # each level's synthetic sources, then theirs
+    for _ in range(levels):
         todo -= raw.keys()
         if not todo:
             break
@@ -355,6 +356,13 @@ async def flat_segments(conn: AsyncConnection, ids: list[str]) -> dict[str, list
             raw.setdefault(r["vod_id"], []).append(Segment.of_row(r))
             supersedes[r["vod_id"]] = bool((r["synthetic"] or {}).get("supersedes"))
         todo = {x.source_id for k in todo for x in raw.get(k, [])}
+    return raw, supersedes
+
+
+async def flat_segments(conn: AsyncConnection, ids: list[str]) -> dict[str, list[Segment]]:
+    """The segments of each synthetic VOD in ``ids``, resolved and flattened (``segments.flatten``):
+    windows of real VODs only, each with its stream. A VOD that isn't synthetic has no entry."""
+    raw, supersedes = await nested_segments(conn, ids, MAX_DEPTH + 2)  # each level's sources, then theirs
     if not raw:
         return {}
     sources = {x.source_id for v in raw.values() for x in v}
