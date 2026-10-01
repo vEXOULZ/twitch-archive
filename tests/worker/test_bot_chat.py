@@ -16,14 +16,14 @@ from archive_common.config import Settings
 from archive_common.db import get_sessionmaker
 from archive_common.models import BotLog, Job, Log, Stream, Vod, VodSplice
 from archive_worker.context import StepError, StepRefused
-from archive_worker.doomtp import Doomtp
+from archive_worker.doomtp import Doomtp, v1_coverage, v1_entry
 from archive_worker.monitor import Monitor
 from archive_worker.steps import bot_chat as step
 from archive_worker.steps.metadata import DEFAULT_COLOR
 from archive_worker.vods import resequence_bot_logs
 
 BOT = "https://bot.test"
-LOG_URL = f"{BOT}/api/v1/channels/vexoulz/log"
+LOG_URL = f"{BOT}/api/v2/channels/vexoulz/log"
 START = dt.datetime(2001, 3, 4, 20, 0, tzinfo=dt.timezone.utc)
 START_MS = int(START.timestamp() * 1000)
 VOD, VOD2 = "test-bot-chat", "test-bot-chat-2"
@@ -35,6 +35,20 @@ def _message(mid, at_s, text="hi", user="u1", **extra):
             "text": text, "fragments": [{"type": "text", "text": text}],
             "badges": [{"set_id": "subscriber", "id": "12", "info": "14"}], "color": "#FF0000", **extra}
 
+
+
+def _ms(when):
+    return round(when.timestamp() * 1000)
+
+
+def _iso(ms):
+    return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _v2(entry):
+    """An entry as doomtp's v2 serves it: ISO times."""
+    return {**entry, **{k: _iso(entry[k]) for k in ("at", "received_at", "deleted_at", "cleared_at")
+                        if entry.get(k) is not None}}
 
 # ── Conversions ───────────────────────────────────────────────────────────
 
@@ -98,21 +112,39 @@ def test_rows_for_each_kind():
 # ── Client ────────────────────────────────────────────────────────────────
 
 
+
+def test_v2_entries_and_coverage_come_back_in_v1s_ms():
+    entry = {"kind": "notification", "id": "f", "at": "2001-03-04T20:00:01.500Z", "type": "follow",
+             "payload": {"followed_at": "2001-03-04T20:00:01Z"}, "deleted_at": None}
+    assert v1_entry(entry) == {**entry, "at": START_MS + 1500, "payload": {"followed_at": START_MS + 1000}}
+    assert v1_entry(_v2(_message("m", 2, deleted_at=START_MS + 3000))) == _message("m", 2, deleted_at=START_MS + 3000)
+    body = {"since": "2001-03-04T20:00:00Z", "until": "2001-03-04T21:00:00.000Z",
+            "sessions": [{"started_at": "2001-03-04T20:10:00Z", "ended_at": None, "end_reason": None}],
+            "gaps": [{"start": "2001-03-04T20:00:00Z", "end": "2001-03-04T20:10:00Z", "reason": "before_log",
+                      "backfill": None}], "complete": False}
+    assert v1_coverage(body) == {
+        "since": START_MS, "until": START_MS + 3_600_000,
+        "sessions": [{"started_at": START_MS + 600_000, "ended_at": None, "end_reason": None}],
+        "gaps": [{"from": START_MS, "to": START_MS + 600_000, "reason": "before_log", "backfill": None}],
+        "complete": False}
+    assert v1_coverage({}) == {}
+
 @respx.mock
 async def test_client_pages_and_sends_the_key_only_when_set(settings):
     settings.doomtp_url = BOT + "/"
-    pages = {None: {"entries": [{"id": 1}, {"id": 2}], "next": "c2"}, "c2": {"entries": [{"id": 3}], "next": None}}
+    pages = {None: {"items": [{"id": 1}, {"id": 2}], "next_cursor": "c2"},
+             "c2": {"items": [{"id": 3}], "next_cursor": None}}
     route = respx.get(LOG_URL).mock(side_effect=lambda r: httpx.Response(200, json=pages[r.url.params.get("cursor")]))
     client = Doomtp(settings)
     assert client.configured and not client.keyed
     assert [e["id"] async for e in client.log(1, 2)] == [1, 2, 3]
     first = route.calls[0].request
-    assert (first.url.params["since"], first.url.params["until"], first.url.params["order"]) == ("1", "2", "asc")
+    assert (first.url.params["since"], first.url.params["until"], first.url.params["order"]) == ("1970-01-01T00:00:00.001Z", "1970-01-01T00:00:00.002Z", "asc")
     assert "authorization" not in first.headers and "python" not in first.headers["user-agent"].lower()
 
     settings.doomtp_api_key = SecretStr("read-key")
     settings.doomtp_login = "other"
-    respx.get(f"{BOT}/api/v1/channels/other/log").mock(return_value=httpx.Response(200, json={"entries": []}))
+    respx.get(f"{BOT}/api/v2/channels/other/log").mock(return_value=httpx.Response(200, json={"items": []}))
     assert [e async for e in Doomtp(settings).log(1, 2)] == []
     assert respx.calls.last.request.headers["authorization"] == "Bearer read-key"
     assert not Doomtp(Settings(doomtp_url="")).configured
@@ -144,14 +176,15 @@ async def vod(db, settings):
 
 
 def _serve(entries):
-    """A /log answering from ``entries`` by since/until, 2 per page."""
+    """A v2 /log answering from ``entries`` (v1's ms times) by since/until, 2 per page."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.params
-        rows = [e for e in entries if int(p["since"]) <= e["at"] < int(p["until"])]
+        since, until = (dt.datetime.fromisoformat(p[k].replace("Z", "+00:00")) for k in ("since", "until"))
+        rows = [_v2(e) for e in entries if _ms(since) <= e["at"] < _ms(until)]
         start = int(p.get("cursor") or 0)
         nxt = str(start + 2) if start + 2 < len(rows) else None
-        return httpx.Response(200, json={"entries": rows[start : start + 2], "next": nxt})
+        return httpx.Response(200, json={"items": rows[start : start + 2], "next_cursor": nxt})
 
     return handler
 
@@ -226,12 +259,12 @@ async def test_refusals_and_off(vod, make_ctx, settings):
 @respx.mock
 async def test_backfill_skips_done_and_spliced_vods(vod, make_ctx):
     respx.get(f"{LOG_URL}/coverage").mock(return_value=httpx.Response(200, json={}))
-    route = respx.get(LOG_URL).mock(return_value=httpx.Response(200, json={"entries": []}))
+    route = respx.get(LOG_URL).mock(return_value=httpx.Response(200, json={"items": []}))
     async with get_sessionmaker()() as s:
         (await s.get(Vod, VOD2)).merged_into = {"id": VOD, "offset": 100}
         await s.commit()
     await step.bot_chat_backfill(make_ctx("bot_chat_backfill", None, {"vod_ids": [VOD, VOD2]}))
-    assert [dict(c.request.url.params)["since"] for c in route.calls] == [str(START_MS)]  # only VOD
+    assert [dict(c.request.url.params)["since"] for c in route.calls] == ["2001-03-04T20:00:00.000Z"]  # only VOD
     async with get_sessionmaker()() as s:
         assert (await s.get(Vod, VOD)).bot_chat is not None and (await s.get(Vod, VOD2)).bot_chat is None
 
