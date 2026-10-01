@@ -259,7 +259,7 @@ curl -s "${H[@]}" "$A/api/v2/vods?q=title&hidden=false"            # also cursor
 curl -s "${H[@]}" -X PATCH "$A/api/v2/vods/123" -d '{"title":"…","thumbnail_url":null}'
 ```
 
-`/api/v2/jobs` covers the job runtime's runs only. Jobs still in the old `jobs` table are listed and acted on through `/admin/jobs`. A VOD's games, chapters, YouTube and Drive lists, and merging and splitting, are still `/admin` only. The `/admin` routes stay until their clients have moved.
+`/api/v2/jobs` covers the job runtime's runs only. Jobs still in the old `jobs` table are listed and acted on through `/admin/jobs`. A VOD's games, chapters, YouTube and Drive lists are still `/admin` only. Merging and splitting exist in both, done differently: see [Merging and splitting VODs](#merging-and-splitting-vods). The `/admin` routes stay until their clients have moved.
 
 A v2 change writes its audit row in the same transaction as the change (`setting.update`, `setting.reset`, `vod.update`), with the fields before and after, so the two never disagree. A storage delete is files, so its row (`storage.delete`, with what it freed) comes right after.
 
@@ -436,17 +436,40 @@ curl -s "${H[@]}" -X POST "$A/admin/vods/A/split" -d '{"at":3605}'        # from
 curl -s "${H[@]}" -X POST "$A/admin/vods/A/unsplit" -d '{}'               # the latest split of A, or {"source":"A-2"}
 ```
 
-**Merge.** B's offset in A is `B.createdAt − A.createdAt`, in whole seconds (chat offsets are whole seconds), and the gap is that minus A's duration; `gap` in the body replaces it. A keeps its id. Its duration becomes offset + B's duration; its chapters are A's, the gap chapter, then B's shifted by the offset; its YouTube parts are A's then B's, renumbered per type (and `drive` is A's then B's). B's `games` rows, emotes (A's set becomes the union, no duplicate ids) and chat rows move to A, every offset shifted by the offset, so a comment keeps its place against the video. A gets `chaptersLocked`. B's row stays with `merged_into: {id, offset}` and empty chapters and uploads; see [§6](#6-public-api-reference).
+These `/admin` routes move rows. `/api/v2` merges and splits without touching either VOD: it makes [synthetic VODs](#synthetic-vods) that supersede the original, so undoing one is deleting it.
+
+```bash
+curl -s "${H[@]}" -X POST "$A/api/v2/vods/A/merge" -d '{"source":"B"}'    # synthetic A+B; also "gap"
+curl -s "${H[@]}" -X POST "$A/api/v2/vods/A/split" -d '{"at":3605}'       # synthetic A-1 and A-2, at any second
+curl -s "${H[@]}" -X DELETE "$A/api/v2/synthetic/A+B"                     # undo: A and B list and play as before
+```
+
+Both are audited as `synthetic.create`, with `detail` naming the merge or split.
+
+**Merge** (`/admin`). B's offset in A is `B.createdAt − A.createdAt`, in whole seconds (chat offsets are whole seconds), and the gap is that minus A's duration; `gap` in the body replaces it. A keeps its id. Its duration becomes offset + B's duration; its chapters are A's, the gap chapter, then B's shifted by the offset; its YouTube parts are A's then B's, renumbered per type (and `drive` is A's then B's). B's `games` rows, emotes (A's set becomes the union, no duplicate ids) and chat rows move to A, every offset shifted by the offset, so a comment keeps its place against the video. A gets `chaptersLocked`. B's row stays with `merged_into: {id, offset}` and empty chapters and uploads; see [§6](#6-public-api-reference).
 
 The gap chapter runs from the end of A to where B's first uploaded frame lands: offset + B's delay (B's footage missing at its start, plus any cut at its start). That keeps the site's formula, `duration − Σ parts − Σ cuts = delay`, equal to A's own delay. A's uploads always end at A's duration in that model (any shortfall reads as delay at A's start, which stays where it is). The site plays `live` uploads when a VOD has any, so the gap is fitted to them; when a VOD also has `vod` uploads whose delay differs, the response has a warning with the difference. The merge record (`splices[].detail` on `GET /admin/vods/{id}`) has every number.
 
 Refused (409, with the reason and the numbers): B started before A, the VODs overlap, either is already merged into another VOD, either has a queued, running or paused job, the two have uploads of different types, or a part has no duration.
 
-**Split.** A VOD can only be split where an upload ends: between two parts (anywhere across a cut or gap chapter there), or inside a cut before the first part or after the last. Anywhere else is a 409 with `validPoints` (`[{at, from, to}]`, nearest first). At a merge's join (inside its gap chapter) the split undoes that merge instead. Otherwise the rest becomes a new VOD `<id>-2` (`-3`, … if taken) starting at `createdAt + at`, with the chapters, parts (renumbered), `games` rows and chat rows from `at` on, shifted back by `at`, and a copy of the emotes. A chapter cut in two keeps its name and `kind` on both sides. `drive` entries have no times, so they stay on the first half.
+**Split** (`/admin`). A VOD can only be split where an upload ends: between two parts (anywhere across a cut or gap chapter there), or inside a cut before the first part or after the last. Anywhere else is a 409 with `validPoints` (`[{at, from, to}]`, nearest first). At a merge's join (inside its gap chapter) the split undoes that merge instead. Otherwise the rest becomes a new VOD `<id>-2` (`-3`, … if taken) starting at `createdAt + at`, with the chapters, parts (renumbered), `games` rows and chat rows from `at` on, shifted back by `at`, and a copy of the emotes. A chapter cut in two keeps its name and `kind` on both sides. `drive` entries have no times, so they stay on the first half.
 
 **Undo** (`unmerge`, `unsplit`) restores every row as it was, chat included. Only the latest merge or split touching either VOD can be undone: undo them in reverse order. An undo that would throw away edits made since (title, duration, chapters, uploads) is refused unless the body has `"force": true`.
 
 **Jobs.** A merged or split VOD no longer matches Twitch's VOD of that id. `/admin/logs`, `/admin/chapters` (even with `force`), `/admin/emotes`, `/admin/duration`, `/admin/download`, `/admin/hls/download`, `/admin/reupload`, `/admin/dmca`, `/admin/part/dmca`, `/admin/delete`, and `POST /admin/jobs` of a kind with a `capture`, `fetch_vod`, `finalize`, `chapters`, `chat` or `emotes` step, answer 409 for it. The same steps also refuse at run time (the job fails at once, no retries), for jobs queued another way. `/admin/youtube/parts` still works: run it after a merge or split so the descriptions list the new parts.
+
+### Synthetic VODs
+
+A synthetic VOD is made of windows of real ones (segments), each placed at `at` seconds on its own timeline: a merge, the halves of a split, or a playthrough of one game across streams. It reads its video, chapters and chat from those VODs; nothing is copied. With `supersedes`, the VODs it is made of leave the lists and redirect into it. Its id is never only digits, since those are Twitch's.
+
+```bash
+curl -s "${H[@]}" -X POST "$A/api/v2/synthetic" -d '{"id":"elden-ring","tags":["playthrough"],"segments":[{"vod_id":"1","start":5,"end":3600},{"vod_id":"2"}]}'
+curl -s "${H[@]}" -X PUT "$A/api/v2/synthetic/elden-ring" -d '{"title":"Elden Ring"}'   # only the fields sent
+curl -s "${H[@]}" "$A/api/v2/vods?synthetic=true"                                       # only synthetic VODs
+curl -s "${H[@]}" "$A/api/v2/playthrough-candidates?game_id=512953"                     # every window of a game, oldest first
+```
+
+A segment's `start` defaults to 0, `end` to its VOD's end, and `at` to right after the segment before. Changes are audited as `synthetic.create`, `synthetic.update` and `synthetic.delete`.
 
 ### Browser access (dashboard)
 
