@@ -182,9 +182,19 @@ docker compose run --rm -v /path/to/archive/config:/legacy:ro worker \
 
 This copies `youtube.auth.refresh_token` into the `app_state` table. `ARCHIVE_GOOGLE_CLIENT_ID` and `ARCHIVE_GOOGLE_CLIENT_SECRET` must be the same Google client the old app used; they are `google.client_id` and `google.client_secret` in the old config.
 
-### Option B: run the consent flow again
+### Option B: run the consent flow again from the dashboard
 
-Google only accepts `http://` redirect URIs for `localhost`, so open an SSH tunnel to the worker's admin port and do the flow in your own browser:
+When the admin API is published behind the site's proxy (vods.vexoulz.net serves it at `/backend-admin`), Google can redirect straight back through it:
+
+1. In Google Cloud Console → Credentials → your OAuth client, add the authorized redirect URI `https://<site>/backend-admin/admin/refreshtoken` (e.g. `https://vods.vexoulz.net/backend-admin/admin/refreshtoken`).
+2. Set `ARCHIVE_GOOGLE_REDIRECT_URL` to the same URI and restart the worker.
+3. On the site, Manage → Overview → **Connect YouTube**, sign in with the channel's Google account and allow access. The tab ends on "YouTube authorized. You can close this tab.", and the YouTube tile turns valid.
+
+`/admin/refreshtoken` needs no key or session (the signed `state` proves the request), and it answers with or without a trailing slash, so the old app's `/admin/refreshtoken/` URI works too.
+
+### Option C: run the consent flow through an SSH tunnel
+
+Google only accepts `http://` redirect URIs for `localhost`, so without the proxy, open an SSH tunnel to the worker's admin port and do the flow in your own browser:
 
 1. In Google Cloud Console → Credentials → your OAuth client, make sure an authorized redirect URI matches `ARCHIVE_GOOGLE_REDIRECT_URL`. The old app registered `http://localhost:3030/admin/refreshtoken/`. You can either reuse it (set `ARCHIVE_GOOGLE_REDIRECT_URL` to it and tunnel local port 3030) or add `http://localhost:3031/admin/refreshtoken`.
 2. Open the tunnel: `ssh -L 3031:127.0.0.1:3031 user@your-server` (use `-L 3030:127.0.0.1:3031` if you reuse the old URI).

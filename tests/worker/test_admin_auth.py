@@ -5,7 +5,7 @@ import pytest
 from pydantic import SecretStr
 from starlette.requests import Request
 
-from archive_worker import jobs
+from archive_worker import jobs, youtube
 from archive_worker.admin import create_admin_app
 from archive_worker.admin_auth import (
     SESSION_COOKIE,
@@ -208,3 +208,27 @@ async def test_password_login_off_without_a_password(deps):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://admin") as c:
         assert (await c.get("/admin/session")).json()["passwordLogin"] is False
         assert (await c.post("/admin/session", json={"password": ""})).status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/admin/refreshtoken", "/admin/refreshtoken/"])
+async def test_youtube_callback_answers_with_and_without_slash(admin, deps, monkeypatch, path):
+    # Never a redirect: behind the site's proxy it would leave /backend-admin and land on the site.
+    async with admin() as c:
+        r = await c.get(path, params={"state": "1.bad", "code": "c"})
+    assert r.status_code == 403
+
+    monkeypatch.setattr(youtube, "verify_state", lambda settings, state: True)
+    exchanged = []
+
+    async def exchange(settings, code):
+        exchanged.append(code)
+
+    async def check():
+        return {"authorized": True, "valid": True, "error": None}
+
+    monkeypatch.setattr(youtube, "exchange_code", exchange)
+    monkeypatch.setattr(deps.youtube, "check", check)
+    async with admin() as c:
+        r = await c.get(path, params={"state": "s", "code": "c"})
+    assert r.status_code == 200 and r.json()["msg"].startswith("YouTube authorized")
+    assert exchanged == ["c"]

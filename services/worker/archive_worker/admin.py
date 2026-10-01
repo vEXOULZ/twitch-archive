@@ -1207,7 +1207,10 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
         # A real refresh against Google, not just "is a token stored".
         return await deps.youtube.check()
 
+    # With the slash too (the old app's redirect URI): FastAPI would answer it with a redirect built from
+    # the Host header, which behind the site's proxy loses the /backend-admin prefix and lands on the site.
     @app.get("/admin/refreshtoken")
+    @app.get("/admin/refreshtoken/", include_in_schema=False)
     async def refresh_token(code: str | None = None, state: str | None = None) -> dict:
         # Google redirects the browser here, so this cannot carry the API key;
         # the HMAC-signed ``state`` from /admin/youtube/auth proves the request.
