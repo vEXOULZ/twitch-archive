@@ -65,8 +65,33 @@ class Vod(Base):
     bot_chat: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     # Alembic 0010: off the public API (lists, GET, games rows, chat, games-played, status); admin still sees it.
     hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"), default=False)
+    # Alembic 0016: NULL on a real VOD; {"supersedes": bool} on a synthetic one (its content is vod_segments,
+    # and its title, duration, chapters, thumbnail and date are composed from them).
+    synthetic: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # Alembic 0016: [] = a regular VOD; a tagged one (e.g. "compilation") is listed apart.
+    tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"),
+                                            default=list)
     created_at: Mapped[dt.datetime] = _created()
     updated_at: Mapped[dt.datetime] = _updated()
+
+
+class VodSegment(Base):
+    """One window of a real VOD (``source_id``, ``[start_s, end_s)``) placed at ``at_s`` on a synthetic
+    VOD's timeline (Alembic 0016). ``end_s`` NULL runs to the source's end."""
+
+    __tablename__ = "vod_segments"
+
+    vod_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("vods.id", onupdate="CASCADE", ondelete="CASCADE"), primary_key=True
+    )
+    pos: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("vods.id", onupdate="CASCADE", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    start_s: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    end_s: Mapped[Decimal | None] = mapped_column(Numeric)
+    at_s: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    label: Mapped[str | None] = mapped_column(Text)
 
 
 class Game(Base):

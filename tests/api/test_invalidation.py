@@ -41,6 +41,20 @@ def test_invalidate_drops_the_vod_and_everything_listing_vods():
     assert status.get("status") is None
 
 
+def test_any_change_drops_synthetic_vods():
+    """A synthetic VOD's JSON is made from its sources' rows, and a source's names the synthetic VODs of it."""
+    keys = ["vods/1", "vods/12", "vods/12-2", "vods/1+12", "vods/p-game"]
+    service = _filled(keys)
+    comments = Comments(ResponseCache(300), ResponseCache(300))
+    comments.cache.set("offset:1+12:0", object())
+    listener = VodInvalidator("postgresql+asyncpg://x@h/db", service, comments=comments)
+    listener.invalidate("1")
+    assert [k for k in keys if service.get(k) is not None] == ["vods/12"]
+    assert comments.cache.get("offset:1+12:0") is not None
+    listener.invalidate("1+12")  # its own change also drops its (segments-only) chat page
+    assert comments.cache.get("offset:1+12:0") is None
+
+
 def test_rows_moved_drops_the_vods_chat_replay_and_emotes():
     """A merge or split re-keys chat rows and emotes, and says so with a ROWS_MOVED notice."""
     comments = Comments(ResponseCache(300), ResponseCache(300))

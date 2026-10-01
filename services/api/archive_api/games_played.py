@@ -16,7 +16,8 @@ NO_CATEGORY = "No category"
 # from the most recent chapter that has one (games get renamed on Twitch).
 # A chapter's ``end`` is its length in seconds (not its end time); one that is
 # missing or not a JSON number counts as 0. A merge's gap chapters (kind "gap") are
-# no game, and a VOD merged into another is counted once, as part of that one. Hidden VODs don't count.
+# no game, and a VOD merged into another is counted once, as part of that one. Hidden VODs don't count,
+# nor do synthetic VODs (merges, splits, playthroughs): their chapters are their sources'.
 _SQL = text(
     """
     with chapters as (
@@ -34,6 +35,7 @@ _SQL = text(
         where jsonb_typeof(c.value) = 'object'
           and not c.value @> '{"kind": "gap"}'
           and v.merged_into is null
+          and v.synthetic is null
           and not v.hidden
     ),
     keyed as (

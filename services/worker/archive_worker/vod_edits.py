@@ -156,8 +156,13 @@ def drive(items: Any) -> list[dict[str, str]]:
 
 # Request key -> vods column. A merged VOD takes only MERGED_EDITABLE (its content is the other VOD's now).
 FIELDS = {"title": "title", "hidden": "hidden", "thumbnailUrl": "thumbnail_url", "duration": "duration",
-          "createdAt": "created_at"}
-MERGED_EDITABLE = {"hidden"}
+          "createdAt": "created_at", "tags": "tags"}
+MERGED_EDITABLE = {"hidden", "tags"}
+# A synthetic VOD's duration, chapters, thumbnail and date are composed from its segments.
+SYNTHETIC_EDITABLE = {"title", "hidden", "tags"}
+# vods.tags: an untagged VOD is a regular one; a tagged one is listed apart (the site gives each known
+# tag its own tab). Adding a tag is adding it here.
+KNOWN_TAGS = ("compilation",)
 _HHMMSS = re.compile(r"^(\d{1,3}):([0-5]\d):([0-5]\d)$")
 
 
@@ -212,6 +217,19 @@ def vod_fields(body: dict) -> dict[str, Any]:
         out["duration"] = duration(body["duration"])
     if "createdAt" in body:
         out["created_at"] = created_at(body["createdAt"])
+    if "tags" in body:
+        out["tags"] = tags(body["tags"])
+    return out
+
+
+def tags(value: Any) -> list[str]:
+    """Known tags, each once, sorted ([] = a regular VOD)."""
+    if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
+        raise ValueError("tags must be a list of strings")
+    out = sorted({t.strip().lower() for t in value})
+    unknown = [t for t in out if t not in KNOWN_TAGS]
+    if unknown:
+        raise ValueError(f"unknown tag(s) {', '.join(unknown)}; known: {', '.join(KNOWN_TAGS)}")
     return out
 
 
