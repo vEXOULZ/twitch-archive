@@ -87,6 +87,12 @@ async def _sources() -> dict:
                 for v in (await s.execute(select(Vod).where(Vod.id.in_((A, B))))).scalars()}
 
 
+def _same(a: str, b: str) -> bool:
+    """Two ISO times (archive-api's and the admin API's formats differ) are the same instant, to the ms."""
+    t = [dt.datetime.fromisoformat(x.replace("Z", "+00:00")) for x in (a, b)]
+    return abs(t[0] - t[1]) < dt.timedelta(milliseconds=1)
+
+
 def _ids(page: dict) -> set[str]:
     return {v["id"] for v in page["data"]}
 
@@ -106,7 +112,10 @@ async def test_merge_split_and_undo(admin):
     assert await _sources() == before  # the originals are never written
 
     vod = (await public(f"/vods/{AB}")).json()
-    assert vod["synthetic"] == {"supersedes": True, "segments": [
+    made = vod["synthetic"].pop("madeAt")
+    assert made == vod["synthetic"].pop("changedAt") and _same(made, view["made_at"])
+    assert vod["synthetic"] == {"supersedes": True, "firstLiveAt": "2001-03-04T20:00:00.000Z",
+                                "lastLiveAt": "2001-03-04T23:05:00.000Z", "segments": [
         {"vodId": A, "start": 0, "end": 7200, "at": 0, "label": None, "stream": 0},
         {"vodId": B, "start": 0, "end": 3600, "at": OFFSET, "label": None, "stream": 0}]}
     assert (vod["duration"], vod["tags"], vod["createdAt"]) == ("03:05:00", [], "2001-03-04T20:00:00.000Z")
@@ -246,3 +255,45 @@ async def test_nested_synthetic(admin):
 
     assert (await admin.delete(f"/api/v2/synthetic/{P}", headers=KEY)).status_code == 200
     assert (await admin.delete(f"/api/v2/synthetic/{quote(AB)}", headers=KEY)).status_code == 200
+
+
+async def test_changed_at(admin):
+    """``changedAt`` moves when what it plays changes (segments, or a source growing), not on a rename or a
+    source's chapter edit; ``lastLiveAt`` follows the latest footage."""
+
+    async def stamps():
+        syn = (await public(f"/vods/{P}")).json()["synthetic"]
+        return syn["madeAt"], syn["changedAt"], syn["lastLiveAt"]
+
+    r = await admin.post("/api/v2/synthetic", headers=KEY, json={
+        "id": P, "tags": ["compilation"], "segments": [{"vod_id": A, "start": 3600, "end": 5400}]})
+    assert r.status_code == 201, r.text
+    made, changed, last = await stamps()
+    assert made == changed and last == "2001-03-04T21:30:00.000Z"
+
+    async with get_sessionmaker()() as s:  # a source's chapter edit, recomposed: same length
+        await s.execute(update(Vod).where(Vod.id == A).values(
+            chapters=[_ch(0, 3600), _ch(3600, 3600, "Renamed", GAME)], updated_at=func.now()))
+        await s.commit()
+    assert P in await synthetic.recompose_stale()
+    assert (await admin.put(f"/api/v2/synthetic/{P}", headers=KEY, json={"title": "renamed"})).status_code == 200
+    assert await stamps() == (made, changed, last)
+
+    # Played again on a later stream: its window goes on the end.
+    r = await admin.put(f"/api/v2/synthetic/{P}", headers=KEY, json={"segments": [
+        {"vod_id": A, "start": 3600, "end": 5400}, {"vod_id": B, "start": 0, "end": 1800}]})
+    assert r.status_code == 200, r.text
+    _, changed2, last2 = await stamps()
+    assert changed2 > changed and _same(r.json()["changed_at"], changed2) and _same(r.json()["made_at"], made)
+    assert last2 == "2001-03-04T22:35:00.000Z"
+
+    # A source growing under an open-ended window lengthens it too.
+    assert (await admin.put(f"/api/v2/synthetic/{P}", headers=KEY, json={"segments": [
+        {"vod_id": A, "start": 3600, "end": 5400}, {"vod_id": B, "start": 0}]})).status_code == 200
+    _, changed3, _ = await stamps()
+    async with get_sessionmaker()() as s:
+        await s.execute(update(Vod).where(Vod.id == B).values(duration="01:30:00", updated_at=func.now()))
+        await s.commit()
+    assert P in await synthetic.recompose_stale()
+    _, changed4, last4 = await stamps()
+    assert changed4 > changed3 and last4 == "2001-03-04T23:35:00.000Z"

@@ -474,6 +474,8 @@ class SyntheticView(ApiModel):
     hidden: bool
     duration: str | None = None
     created_at: UtcDatetime | None = None
+    made_at: UtcDatetime | None = None
+    changed_at: UtcDatetime | None = None
     segments: list[dict[str, Any]]
 
 

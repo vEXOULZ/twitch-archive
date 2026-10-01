@@ -6,6 +6,10 @@ transaction with the synthetic row locked. Writes to ``vods`` NOTIFY archive-api
 ``vod_segments`` has no trigger, so a change NOTIFYs each source too, whose JSON lists the
 synthetic VODs it is in (``superseded_by``, ``appears_in``).
 
+Besides ``supersedes``, the ``synthetic`` column keeps ``madeAt`` (when it was created) and
+``changedAt`` (when what it plays last changed: its segments, or its length as a source grew), so
+the site can tell a viewer who finished it that there is more now.
+
 ``recompose`` writes a synthetic VOD's cached columns from its sources again. The monitor runs
 ``recompose_stale`` every round, which picks the ones with a source updated since: that is how a
 backfill or an edit of a source reaches the synthetic VODs made of it. A source may be a synthetic
@@ -14,6 +18,7 @@ VOD itself (``compose.check_nesting``); one that others are made of cannot be de
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from typing import Any
 
@@ -23,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from archive_common.db import VOD_CHANGED, get_sessionmaker
 from archive_common.models import Vod, VodSegment
+from archive_common.serialize import js_iso
 from archive_common.segments import EPS, MAX_DEPTH, Segment, resolve
 from archive_common.timeutil import hhmmss_to_seconds
 
@@ -130,10 +136,22 @@ def _apply(vod: Vod, derived: dict[str, Any]) -> None:
         vod.created_at = derived["created_at"]
 
 
+def _now() -> str | None:
+    """As archive-api writes times (stored as it serves them)."""
+    return js_iso(dt.datetime.now(dt.UTC))
+
+
+def _changed(vod: Vod) -> None:
+    """What ``vod`` plays changed just now (a new dict: SQLAlchemy doesn't see a JSON value change in place)."""
+    vod.synthetic = {**(vod.synthetic or {}), "changedAt": _now()}
+
+
 def synthetic_json(vod: Vod, segments: list[Segment]) -> dict[str, Any]:
-    return {"id": vod.id, "title": vod.title, "supersedes": bool((vod.synthetic or {}).get("supersedes")),
+    meta = vod.synthetic or {}
+    return {"id": vod.id, "title": vod.title, "supersedes": bool(meta.get("supersedes")),
             "tags": list(vod.tags or []), "hidden": vod.hidden, "duration": vod.duration,
-            "createdAt": iso_utc(vod.created_at), "segments": [seg.json() for seg in segments]}
+            "createdAt": iso_utc(vod.created_at), "madeAt": meta.get("madeAt"), "changedAt": meta.get("changedAt"),
+            "segments": [seg.json() for seg in segments]}
 
 
 async def _checked(s: AsyncSession, vod_id: str, segments: list[Segment], supersedes: bool) -> dict[str, Source]:
@@ -161,7 +179,7 @@ async def create(vod_id: str, segments: list[Segment], *, title: str | None = No
         sources = await _checked(s, vod_id, segments, supersedes)
         first = sources[segments[0].source_id]
         vod = Vod(id=vod_id, title=(title or "").strip() or first.title, platform="twitch", chapters_locked=True,
-                  synthetic={"supersedes": supersedes}, tags=tags, hidden=hidden, youtube=[], drive=[])
+                  synthetic={"supersedes": supersedes, "madeAt": (now := _now()), "changedAt": now}, tags=tags, hidden=hidden, youtube=[], drive=[])
         _apply(vod, compose.derive(segments, sources))
         s.add(vod)
         await s.flush()
@@ -190,6 +208,8 @@ async def change(vod_id: str, *, segments: list[Segment] | None = None, title: s
             vod.tags = tags
         vod.synthetic = {**(vod.synthetic or {}), "supersedes": supersedes}
         _apply(vod, compose.derive(new, sources))
+        if vod.duration != before["duration"] or [x.json() for x in new] != before["segments"]:
+            _changed(vod)
         if segments is not None:
             await _write_segments(s, vod_id, new)
         await _notify(s, *{x.source_id for x in old}, *sources)
@@ -255,7 +275,10 @@ async def recompose(*vod_ids: str) -> list[str]:
             segments = await _segments(s, vod_id)
             sources = await _sources(s, {x.source_id for x in segments})
             if segments and all(x.source_id in sources for x in segments):
+                duration = vod.duration
                 _apply(vod, compose.derive(segments, sources))
+                if vod.duration != duration:  # a source grew (or shrank)
+                    _changed(vod)
             vod.updated_at = func.now()  # done, even when nothing changed (that sends no NOTIFY)
             done.append(vod_id)
     return done

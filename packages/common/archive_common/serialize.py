@@ -364,9 +364,18 @@ async def flat_segments(conn: AsyncConnection, ids: list[str]) -> dict[str, list
     return {k: flatten(resolved[k], resolved, supersedes, supersedes[k]) for k in ids if k in resolved}
 
 
+def _live_span(segs: list[Segment], live: Mapping[str, dt.datetime | None]) -> dict[str, str | None]:
+    """When the earliest and the latest of ``segs``'s footage was live (a source's start plus the
+    seconds into it, as ``createdAt`` counts them)."""
+    at = [(live[x.source_id] + dt.timedelta(seconds=x.start), live[x.source_id] + dt.timedelta(seconds=x.end or x.start))
+          for x in segs if live.get(x.source_id)]
+    return {"firstLiveAt": js_iso(min(a for a, _ in at)) if at else None,
+            "lastLiveAt": js_iso(max(b for _, b in at)) if at else None}
+
+
 async def attach_segments(conn: AsyncConnection, vods: list[dict]) -> None:
     """Synthetic VODs get ``synthetic.segments`` (``flat_segments``: real VODs only, ends resolved,
-    streams numbered) and the games of their sources' windows (after ``attach_games``); a VOD a shown synthetic VOD is made of gets
+    streams numbered), ``madeAt`` and ``changedAt`` (as stored), ``firstLiveAt`` and ``lastLiveAt`` (``_live_span``) and the games of their sources' windows (after ``attach_games``); a VOD a shown synthetic VOD is made of gets
     ``superseded_by`` (merges, splits: where each part of it went) or ``appears_in`` (the others)."""
     ids = [v["id"] for v in vods if "id" in v]
     if not ids:
@@ -381,7 +390,9 @@ async def attach_segments(conn: AsyncConnection, vods: list[dict]) -> None:
     if not rows:
         return
     resolved = await flat_segments(conn, list({r["vod_id"] for r in rows if r["vod_id"] in ids}))
-    games = await _games_for(conn, list({x.source_id for v in resolved.values() for x in v}))
+    real = list({x.source_id for v in resolved.values() for x in v})
+    games = await _games_for(conn, real)
+    live = dict((await conn.execute(select(_vt.c.id, _vt.c.createdAt).where(_vt.c.id.in_(real)))).all()) if real else {}
     # Where the parts of each source went, for superseded_by / appears_in.
     used: dict[str, dict[str, Any]] = {}
     for r in rows:
@@ -399,8 +410,10 @@ async def attach_segments(conn: AsyncConnection, vods: list[dict]) -> None:
     for vod in vods:
         segs = resolved.get(vod["id"])
         if segs is not None and "synthetic" in vod:  # (not when $select left it out)
-            supersedes = bool((vod["synthetic"] or {}).get("supersedes"))
-            vod["synthetic"] = {"supersedes": supersedes, "segments": [x.json() for x in segs]}
+            meta = vod["synthetic"] or {}
+            vod["synthetic"] = {"supersedes": bool(meta.get("supersedes")), "segments": [x.json() for x in segs],
+                                "madeAt": meta.get("madeAt"), "changedAt": meta.get("changedAt"),
+                                **_live_span(segs, live)}
             if "games" in vod:
                 vod["games"] = [g for x in segs for g in (_game_in(g, x, vod["id"]) for g in games.get(x.source_id, []))
                                 if g is not None]
