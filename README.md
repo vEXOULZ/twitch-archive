@@ -224,6 +224,35 @@ A=http://your-server:3031
 H=(-H "Authorization: Bearer $KEY" -H "Content-Type: application/json")
 ```
 
+### /api/v2
+
+The same API is moving to `/api/v2`, shared with doomtp-bot (the conventions are vex-platform's `docs/conventions.md`). It takes the same key or dashboard login, but answers differently:
+
+- JSON keys are snake_case and times are ISO 8601 in UTC (`2026-09-30T12:00:00Z`).
+- Lists are `{items, next_cursor}`. Pass `cursor=<next_cursor>` for the next page; `limit` is at most 500.
+- Errors are `application/problem+json`: `{type, title, status, code, detail, request_id}`, plus `errors` for a body that did not validate. `code` is stable (`job_not_found`, `vod_spliced` …). With no credentials it answers 401, and with wrong ones 403.
+- Every response has an `X-Request-ID` (yours, if you send one). Audit rows keep it.
+- A write that is refused or fails is audited too (`request.denied`, `request.failed`).
+- OpenAPI is at `/api/v2/docs`, behind the same login.
+
+```bash
+curl -s "${H[@]}" "$A/api/v2/jobs?state=paused&subject=vod:123"   # runs; also kind=, cursor=, limit=
+curl -s "${H[@]}" -X POST "$A/api/v2/jobs" -d '{"kind":"download","subject":"vod:123","payload":{"type":"vod"}}'
+curl -s "${H[@]}" -X POST "$A/api/v2/jobs/42/resume" -d '{"once":true}'   # also pause, retry, cancel; PATCH for gates
+curl -s "${H[@]}" "$A/api/v2/jobs/42/events?cursor="                # tail: pass next_cursor back
+curl -s "${H[@]}" "$A/api/v2/job-kinds"
+curl -s "${H[@]}" "$A/api/v2/audit?action=vod.&target=vod:123"     # every actor; a trailing . or : is a prefix
+curl -s "${H[@]}" "$A/api/v2/settings"
+curl -s "${H[@]}" -X PATCH "$A/api/v2/settings" -d '{"keep_hls":true}'   # DELETE /api/v2/settings/keep_hls resets it
+curl -s "${H[@]}" "$A/api/v2/storage?refresh=true"                 # DELETE /api/v2/storage/vods/123 frees one
+curl -s "${H[@]}" "$A/api/v2/vods?q=title&hidden=false"            # also cursor=, limit= (at most 200)
+curl -s "${H[@]}" -X PATCH "$A/api/v2/vods/123" -d '{"title":"…","thumbnail_url":null}'
+```
+
+`/api/v2/jobs` covers the job runtime's runs only. Jobs still in the old `jobs` table are listed and acted on through `/admin/jobs`. A VOD's games, chapters, YouTube and Drive lists, and merging and splitting, are still `/admin` only. The `/admin` routes stay until their clients have moved.
+
+A v2 change writes its audit row in the same transaction as the change (`setting.update`, `setting.reset`, `vod.update`), with the fields before and after, so the two never disagree. A storage delete is files, so its row (`storage.delete`, with what it freed) comes right after.
+
 ### Jobs
 
 ```bash

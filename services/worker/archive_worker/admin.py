@@ -29,6 +29,7 @@ from fastapi import Body, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy import delete, func, insert, or_, select, text, tuple_, update
 from vex_platform.actor import SYSTEM, Actor
+from vex_platform.api import ApiError
 
 from archive_common import http
 from archive_common.audit import AUDIT_LOG, actor_of, legacy_actor, route_entry
@@ -38,7 +39,7 @@ from archive_common.models import Emote, Game, Log, Stream, Vod
 from archive_common.serialize import EMOTES, GAMES, box_art_template, duration_seconds, vod_json
 from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds, parse_helix_duration
 
-from . import jobs, splices, vod_edits, youtube
+from . import api_v2, api_v2_routes, jobs, splices, vod_edits, youtube
 from .admin_auth import (
     CSRF_HEADER,
     SESSION_COOKIE,
@@ -92,6 +93,13 @@ class AdminError(Exception):
     def __init__(self, status: int, msg: str, headers: dict[str, str] | None = None,
                  extra: dict[str, Any] | None = None) -> None:
         self.status, self.msg, self.headers, self.extra = status, msg, headers, extra or {}
+
+
+class Unauthenticated(AdminError):
+    """No credentials, or a session that has ended: 403 in v1 as always, 401 in v2."""
+
+    def __init__(self, msg: str) -> None:
+        super().__init__(403, msg)
 
 
 def _ok(msg: str, job: Any = None, **extra: Any) -> dict:
@@ -260,17 +268,29 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
             return
         token = request.cookies.get(SESSION_COOKIE)
         if not token:
-            raise AdminError(403, "Missing auth key")
+            raise Unauthenticated("Missing auth key")
         session = await live_session(token)
         if session is None:
-            raise AdminError(403, "Session expired; log in again")
-        if request.method not in SAFE_METHODS and not passwords.valid_csrf(session, request.headers.get(CSRF_HEADER)):
-            raise AdminError(403, "Missing or wrong X-CSRF-Token")
+            raise Unauthenticated("Session expired; log in again")
+        # Known from here, so a refused write still says who (the v2 refusals audit).
         request.state.actor = session.actor
         request.state.actor_login = login_of(session)
         _actor.set(actor_of(session.actor, login_of(session)))
+        if request.method not in SAFE_METHODS and not passwords.valid_csrf(session, request.headers.get(CSRF_HEADER)):
+            raise AdminError(403, "Missing or wrong X-CSRF-Token")
 
     auth = [Depends(verify)]
+
+    async def verify_v2(request: Request) -> None:
+        """``verify`` for /api/v2: ``request.state.actor`` is an ``Actor``, and a refusal is an
+        ``ApiError`` (401 without credentials, 403 with wrong ones)."""
+        try:
+            await verify(request)
+        except AdminError as exc:
+            raise ApiError(401 if isinstance(exc, Unauthenticated) else 403, detail=exc.msg) from None
+        finally:
+            if isinstance(actor := getattr(request.state, "actor", None), str):
+                request.state.actor = actor_of(actor, getattr(request.state, "actor_login", None))
 
     # ── Audit log ─────────────────────────────────────────────────────────
 
@@ -872,10 +892,7 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
         """A new duration must still hold the VOD's chapters and games rows."""
         async with get_sessionmaker()() as s:
             games_end = (await s.execute(select(func.max(Game.end_time)).where(Game.vod_id == vod.id))).scalar()
-        for what, end in (("chapters", vod_edits.content_end(vod.chapters)), ("games rows", float(games_end or 0))):
-            if end > seconds + vod_edits.DURATION_SLACK:
-                raise AdminError(400, f"The {what} run to {end:g}s, past the new duration ({seconds:g}s); "
-                                      f"shorten them first")
+        edited(vod_edits.check_fits, vod.chapters, float(games_end or 0), seconds)
 
     async def games_json(vod_id: str) -> list[dict]:
         async with get_sessionmaker()() as s:
@@ -1201,5 +1218,12 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
         if not status["valid"]:
             raise AdminError(500, f"Token stored but not usable: {status['error']}")
         return _ok("YouTube authorized. You can close this tab.")
+
+    # ── /api/v2 ───────────────────────────────────────────────────────────
+
+    api_v2.mount(app, auth=verify_v2, runtime=service.runtime, vod_exists=vod_exists, twitch_steps=TWITCH_STEPS,
+                 routers=[api_v2_routes.settings_router(runtime, service.apply_settings, verify_v2),
+                          api_v2_routes.storage_router(storage, verify_v2),
+                          api_v2_routes.vods_router(verify_v2)])
 
     return app
