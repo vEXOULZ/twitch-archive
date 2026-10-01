@@ -242,9 +242,16 @@ curl -s "${H[@]}" -X POST "$A/api/v2/jobs/42/resume" -d '{"once":true}'   # also
 curl -s "${H[@]}" "$A/api/v2/jobs/42/events?cursor="                # tail: pass next_cursor back
 curl -s "${H[@]}" "$A/api/v2/job-kinds"
 curl -s "${H[@]}" "$A/api/v2/audit?action=vod.&target=vod:123"     # every actor; a trailing . or : is a prefix
+curl -s "${H[@]}" "$A/api/v2/settings"
+curl -s "${H[@]}" -X PATCH "$A/api/v2/settings" -d '{"keep_hls":true}'   # DELETE /api/v2/settings/keep_hls resets it
+curl -s "${H[@]}" "$A/api/v2/storage?refresh=true"                 # DELETE /api/v2/storage/vods/123 frees one
+curl -s "${H[@]}" "$A/api/v2/vods?q=title&hidden=false"            # also cursor=, limit= (at most 200)
+curl -s "${H[@]}" -X PATCH "$A/api/v2/vods/123" -d '{"title":"…","thumbnail_url":null}'
 ```
 
-`/api/v2/jobs` covers the job runtime's runs only. Jobs still in the old `jobs` table are listed and acted on through `/admin/jobs`. Settings, storage and VODs come to v2 next. The `/admin` routes stay until their clients have moved.
+`/api/v2/jobs` covers the job runtime's runs only. Jobs still in the old `jobs` table are listed and acted on through `/admin/jobs`. A VOD's games, chapters, YouTube and Drive lists, and merging and splitting, are still `/admin` only. The `/admin` routes stay until their clients have moved.
+
+A v2 change writes its audit row in the same transaction as the change (`setting.update`, `setting.reset`, `vod.update`), with the fields before and after, so the two never disagree. A storage delete is files, so its row (`storage.delete`, with what it freed) comes right after.
 
 ### Jobs
 

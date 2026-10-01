@@ -9,12 +9,15 @@ changes they make themselves.
     /api/v2/jobs ...        vex-platform's job routes, over the runtime's runs (not the legacy table)
     /api/v2/job-kinds
     /api/v2/audit           the audit log, every actor (GET /admin/audit lists admins only)
+    /api/v2/settings ...    the admin API's own routes (api_v2_routes.py)
+    /api/v2/storage ...
+    /api/v2/vods ...
     /api/v2/docs            OpenAPI for these routes, behind the same auth
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -67,8 +70,9 @@ class GuardedRuntime:
 
 
 def mount(app: FastAPI, *, auth: Auth, runtime: JobRuntime, vod_exists: VodExists,
-          twitch_steps: set[str]) -> None:
-    """``auth`` admits a caller and sets ``request.state.actor`` to an ``Actor``, raising ``ApiError``."""
+          twitch_steps: set[str], routers: Sequence[APIRouter] = ()) -> None:
+    """``auth`` admits a caller and sets ``request.state.actor`` to an ``Actor``, raising ``ApiError``.
+    ``routers``: more routes under the prefix (their paths without it)."""
     install_error_handlers(app, PREFIX)
     # Last added runs first: the request id is there for the refusals' audit rows.
     app.add_middleware(AuditRefusalsMiddleware, write=audit.write, prefix=PREFIX)
@@ -77,6 +81,8 @@ def mount(app: FastAPI, *, auth: Auth, runtime: JobRuntime, vod_exists: VodExist
     v2 = APIRouter(prefix=PREFIX)
     v2.include_router(jobs_router(GuardedRuntime(runtime, vod_exists, twitch_steps), auth))  # type: ignore[arg-type]
     v2.include_router(audit_router(runtime.pool.connection, auth, table=audit.TABLE))
+    for router in routers:
+        v2.include_router(router)
     schema = APIRouter()  # v2 alone, for its OpenAPI (the rest of the app has none)
     schema.include_router(v2)
     docs = APIRouter(prefix=PREFIX, dependencies=[Depends(auth)], include_in_schema=False)

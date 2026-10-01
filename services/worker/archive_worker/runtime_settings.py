@@ -17,12 +17,16 @@ import copy
 import datetime as dt
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
+from vex_platform.audit import AuditEntry
+from vex_platform.audit.sqlalchemy import record
 
+from archive_common import audit
 from archive_common.config import Settings
 from archive_common.db import get_sessionmaker
 from archive_common.models import RuntimeSetting
@@ -33,6 +37,9 @@ from .events import iso_utc
 log = logging.getLogger(__name__)
 
 TEXT_MAX = 500
+
+# (before, after) -> the audit row a change writes in its own transaction (the v2 routes).
+Audit = Callable[[dict, dict], AuditEntry]
 
 
 @dataclass(frozen=True)
@@ -152,7 +159,7 @@ class RuntimeSettings:
             out.append(item)
         return out
 
-    async def update(self, changes: dict[str, Any], by: str) -> tuple[dict, dict]:
+    async def update(self, changes: dict[str, Any], by: str, audit_as: Audit | None = None) -> tuple[dict, dict]:
         """Override every key in ``changes``, or none (ValueError). Returns the values before and after."""
         if not changes:
             raise ValueError("Send at least one setting")
@@ -166,17 +173,21 @@ class RuntimeSettings:
                     index_elements=[RuntimeSetting.key],
                     set_={"value": stmt.excluded.value, "updated_at": now, "updated_by": by},
                 ))
+            if audit_as:
+                await record(s, audit_as(before, copy.deepcopy(values)), table=audit.TABLE)
             await s.commit()
         await self.load()
         return before, self.current(values)
 
-    async def reset(self, key: str) -> tuple[dict, dict]:
+    async def reset(self, key: str, audit_as: Audit | None = None) -> tuple[dict, dict]:
         """Back to the env value. Returns the value before and after."""
         if key not in BY_KEY:
             raise KeyError(key)
         before = self.current([key])
         async with get_sessionmaker()() as s:
             await s.execute(delete(RuntimeSetting).where(RuntimeSetting.key == key))
+            if audit_as:
+                await record(s, audit_as(before, {key: copy.deepcopy(self.env[key])}), table=audit.TABLE)
             await s.commit()
         await self.load()
         return before, self.current([key])

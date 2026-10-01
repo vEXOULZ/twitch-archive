@@ -215,6 +215,13 @@ def vod_fields(body: dict) -> dict[str, Any]:
     return out
 
 
+def check_fits(chapters: Any, games_end: float, seconds: float) -> None:
+    """A new duration must still hold the VOD's chapters and games rows (ValueError otherwise)."""
+    for what, end in (("chapters", content_end(chapters)), ("games rows", games_end)):
+        if end > seconds + DURATION_SLACK:
+            raise ValueError(f"The {what} run to {end:g}s, past the new duration ({seconds:g}s); shorten them first")
+
+
 def content_end(chapters: Any) -> float:
     """Where the last chapter ends, in seconds (``end`` holds each chapter's length)."""
     ends = [c["start"] + c["end"] for c in chapters or []

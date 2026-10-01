@@ -39,7 +39,7 @@ from archive_common.models import Emote, Game, Log, Stream, Vod
 from archive_common.serialize import EMOTES, GAMES, box_art_template, duration_seconds, vod_json
 from archive_common.timeutil import hhmmss_to_seconds, parse_helix_duration
 
-from . import api_v2, jobs, splices, vod_edits, youtube
+from . import api_v2, api_v2_routes, jobs, splices, vod_edits, youtube
 from .admin_auth import (
     CSRF_HEADER,
     SESSION_COOKIE,
@@ -892,10 +892,7 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
         """A new duration must still hold the VOD's chapters and games rows."""
         async with get_sessionmaker()() as s:
             games_end = (await s.execute(select(func.max(Game.end_time)).where(Game.vod_id == vod.id))).scalar()
-        for what, end in (("chapters", vod_edits.content_end(vod.chapters)), ("games rows", float(games_end or 0))):
-            if end > seconds + vod_edits.DURATION_SLACK:
-                raise AdminError(400, f"The {what} run to {end:g}s, past the new duration ({seconds:g}s); "
-                                      f"shorten them first")
+        edited(vod_edits.check_fits, vod.chapters, float(games_end or 0), seconds)
 
     async def games_json(vod_id: str) -> list[dict]:
         async with get_sessionmaker()() as s:
@@ -1224,6 +1221,9 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
 
     # ── /api/v2 ───────────────────────────────────────────────────────────
 
-    api_v2.mount(app, auth=verify_v2, runtime=service.runtime, vod_exists=vod_exists, twitch_steps=TWITCH_STEPS)
+    api_v2.mount(app, auth=verify_v2, runtime=service.runtime, vod_exists=vod_exists, twitch_steps=TWITCH_STEPS,
+                 routers=[api_v2_routes.settings_router(runtime, service.apply_settings, verify_v2),
+                          api_v2_routes.storage_router(storage, verify_v2),
+                          api_v2_routes.vods_router(verify_v2)])
 
     return app
