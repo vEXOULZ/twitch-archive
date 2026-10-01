@@ -157,6 +157,13 @@ class JobContext:
         else:
             await execute(update(Job).where(Job.id == self.job_id).values(payload=self.payload, vod_id=self.vod_id))
 
+    async def enqueue(self, kind: str, vod_id: str | None, payload: dict[str, Any] | None = None,
+                      **options: Any) -> int:
+        """Queue a child run of this one (GET /jobs/{id}/related shows them together); its id."""
+        if self.run is None:
+            raise StepError("only a runtime job can queue other jobs")
+        return (await self.run.enqueue(kind, subject_of(vod_id), payload, **options)).run.id
+
     async def get_vod(self) -> Vod:
         async with get_sessionmaker()() as s:
             vod = await s.get(Vod, self.require_vod_id())

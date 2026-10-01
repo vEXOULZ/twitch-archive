@@ -70,7 +70,7 @@ KINDS: dict[str, list[str]] = {
     "describe": ["describe"],
     # Chat from doomtp-bot into bot_logs, beside the archive job of the same VOD.
     "bot_chat": ["bot_chat"],
-    # One job for all VODs without bot chat (or the given ones), newest first.
+    # Queues a bot_chat run per VOD without bot chat (or per given VOD), newest first; they run one at a time.
     "bot_chat_backfill": ["bot_chat_backfill"],
 }
 
@@ -89,7 +89,10 @@ def check_steps(kind: str, steps: list[str]) -> None:
 
 def _lock(run: JobRun) -> str | None:
     # One job per (vod, video type) at a time; the live recording and the VOD
-    # capture of the same stream run side by side, and bot chat beside the archive steps.
+    # capture of the same stream run side by side, and bot chat beside the archive steps. A backfill's
+    # bot_chat runs share one lock, so they go one at a time and live jobs never wait behind many.
+    if run.kind == "bot_chat" and run.payload.get("backfill"):
+        return "bot_chat_backfill"
     vod_id = vod_of(run.subject)
     if vod_id is None:
         return None

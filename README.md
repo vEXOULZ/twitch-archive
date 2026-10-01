@@ -303,7 +303,7 @@ Job kinds and their steps:
 | `chat`, `logs_manual`, `chapters`, `emotes`, `describe` | one step each | the matching admin routes |
 | `global_emotes_backfill` | one step | `/admin/emotes/backfill` |
 | `bot_chat` | one step | monitor (stream ended, `DOOMTP_URL` set; separate from `archive`), `/admin/bot-chat` |
-| `bot_chat_backfill` | one step | `/admin/bot-chat/backfill` |
+| `bot_chat_backfill` | one step: queues a `bot_chat` job per VOD | `/admin/bot-chat/backfill` |
 
 `ensure_source` uses `path` if one was given, otherwise the MP4 already on disk. With neither, `fetch_vod` downloads the whole VOD from Twitch again (only while Twitch still has it) and `finalize` converts it; both do nothing when there is a source already.
 
@@ -403,7 +403,7 @@ curl -s "${H[@]}" -X POST "$A/admin/emotes/backfill"
 curl -s "${H[@]}" -X POST "$A/admin/emotes/backfill" -d '{"vodIds":["2375792832"]}'   # only these VODs
 ```
 
-**Bot chat** comes from doomtp-bot's v2 log API (`/api/v2/channels/{login}/log`; entries are stored with epoch ms times, as before) into its own table, `bot_logs`, next to the replay chat in `logs`, which is never touched. The bot records the chat live, so like the replay chat it is read once, when the stream ends: the monitor then starts a `bot_chat` job with the VOD's final length from Twitch. Reading again (from the admin API) only adds rows or updates them (a message removed since). Gaps in the bot's coverage are logged as warnings on the job, and `vods.bot_chat` records the last read. Merged or split VODs are refused, like the other steps that fetch by VOD id. To read one VOD, or every VOD that has no bot chat yet (newest first, skipping merged or split ones):
+**Bot chat** comes from doomtp-bot's v2 log API (`/api/v2/channels/{login}/log`; entries are stored with epoch ms times, as before) into its own table, `bot_logs`, next to the replay chat in `logs`, which is never touched. The bot records the chat live, so like the replay chat it is read once, when the stream ends: the monitor then starts a `bot_chat` job with the VOD's final length from Twitch. Reading again (from the admin API) only adds rows or updates them (a message removed since). Gaps in the bot's coverage are logged as warnings on the job, and `vods.bot_chat` records the last read. Merged or split VODs are refused, like the other steps that fetch by VOD id. To read one VOD, or every VOD that has no bot chat yet (newest first, skipping merged or split ones and VODs with a `bot_chat` job already queued or running). The backfill queues one `bot_chat` job per VOD, each retrying on its own and shown under the backfill as related jobs; they share one lock, so they run one at a time beside the live jobs:
 
 ```bash
 curl -s "${H[@]}" -X POST "$A/admin/bot-chat" -d '{"vodId":"2703890458"}'

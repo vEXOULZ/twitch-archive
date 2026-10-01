@@ -35,6 +35,7 @@ RUNS = Table(
     Column("pause_next", Boolean),
     Column("created_at", DateTime(timezone=True)),
     Column("updated_at", DateTime(timezone=True)),
+    Column("parent_id", BigInteger),
 )
 
 

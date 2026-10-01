@@ -5,18 +5,21 @@ import base64
 import datetime as dt
 import json
 import uuid
+from types import SimpleNamespace
 
 import httpx
 import pytest
 import respx
 from pydantic import SecretStr
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 
 from archive_common.config import Settings
 from archive_common.db import get_sessionmaker
 from archive_common.models import BotLog, Job, Log, Stream, Vod, VodSplice
 from archive_worker.context import StepError, StepRefused
+from archive_worker import jobs
 from archive_worker.doomtp import Doomtp, v1_coverage, v1_entry
+from archive_worker.job_rows import RUNS, subject_of
 from archive_worker.monitor import Monitor
 from archive_worker.steps import bot_chat as step
 from archive_worker.steps.metadata import DEFAULT_COLOR
@@ -156,6 +159,10 @@ async def test_client_pages_and_sends_the_key_only_when_set(settings):
 async def _clean():
     async with get_sessionmaker()() as s:
         await s.execute(delete(Job).where(Job.vod_id.in_((VOD, VOD2))))
+        await s.execute(delete(RUNS).where(RUNS.c.subject.in_((subject_of(VOD), subject_of(VOD2)))))
+        await s.execute(text("SET LOCAL search_path TO jobs, public"))  # procrastinate's SQL is unqualified
+        await s.execute(text("DELETE FROM procrastinate_jobs WHERE lock LIKE :vod OR lock = 'bot_chat_backfill'"),
+                        {"vod": "vod:test-bot-chat%"})
         await s.execute(delete(VodSplice).where(VodSplice.vod_id.in_((VOD, VOD2))))
         for model in (BotLog, Log):
             await s.execute(delete(model).where(model.vod_id.in_((VOD, VOD2))))
@@ -257,16 +264,47 @@ async def test_refusals_and_off(vod, make_ctx, settings):
 
 
 @respx.mock
-async def test_backfill_skips_done_and_spliced_vods(vod, make_ctx):
+async def test_backfill_queues_a_child_per_vod(vod, make_service, wait_job):
     respx.get(f"{LOG_URL}/coverage").mock(return_value=httpx.Response(200, json={}))
     route = respx.get(LOG_URL).mock(return_value=httpx.Response(200, json={"items": []}))
     async with get_sessionmaker()() as s:
         (await s.get(Vod, VOD2)).merged_into = {"id": VOD, "offset": 100}
         await s.commit()
-    await step.bot_chat_backfill(make_ctx("bot_chat_backfill", None, {"vod_ids": [VOD, VOD2]}))
-    assert [dict(c.request.url.params)["since"] for c in route.calls] == ["2001-03-04T20:00:00.000Z"]  # only VOD
-    async with get_sessionmaker()() as s:
-        assert (await s.get(Vod, VOD)).bot_chat is not None and (await s.get(Vod, VOD2)).bot_chat is None
+    service = await make_service()
+    parent = await service.enqueue("bot_chat_backfill", None, {"vod_ids": [VOD, VOD2]})
+    try:
+        await wait_job(parent.id, "done")
+        async with get_sessionmaker()() as s:
+            children = (await s.execute(select(RUNS).where(RUNS.c.parent_id == parent.id))).all()
+        # The merged VOD is skipped; the other gets its own run, which reads the chat.
+        assert [(c.kind, c.subject, c.payload) for c in children] == [("bot_chat", f"vod:{VOD}", {"backfill": True})]
+        await wait_job(children[0].id, "done")
+        assert [dict(c.request.url.params)["since"] for c in route.calls] == ["2001-03-04T20:00:00.000Z"]
+        async with get_sessionmaker()() as s:
+            assert (await s.get(Vod, VOD)).bot_chat is not None and (await s.get(Vod, VOD2)).bot_chat is None
+
+        # A VOD whose bot_chat run is still queued (here held paused) gets no second one.
+        await service.enqueue("bot_chat", VOD2, paused=True)
+        async with get_sessionmaker()() as s:
+            (await s.get(Vod, VOD2)).merged_into = None
+            await s.commit()
+        again = await service.enqueue("bot_chat_backfill", None, {"vod_ids": [VOD2]})
+        await wait_job(again.id, "done")
+        async with get_sessionmaker()() as s:
+            assert (await s.execute(select(RUNS.c.id).where(RUNS.c.parent_id == again.id))).all() == []
+    finally:
+        async with get_sessionmaker()() as s:
+            await s.execute(delete(RUNS).where(RUNS.c.kind == "bot_chat_backfill"))
+            await s.commit()
+
+
+def test_backfill_runs_share_one_lock():
+    def run(kind, vod_id, payload):
+        return SimpleNamespace(kind=kind, subject=subject_of(vod_id), payload=payload)
+
+    assert jobs._lock(run("bot_chat", VOD, {"backfill": True})) == "bot_chat_backfill"
+    assert jobs._lock(run("bot_chat", VOD, {})) == f"vod:{VOD}:bot_chat"
+    assert jobs._lock(run("archive", VOD, {"type": "live"})) == f"vod:{VOD}:live"
 
 
 # ── Comments API (dev DB) ─────────────────────────────────────────────────
