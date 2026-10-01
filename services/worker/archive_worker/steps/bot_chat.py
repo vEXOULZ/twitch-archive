@@ -232,13 +232,16 @@ async def bot_chat(ctx: JobContext) -> None:
 
 
 async def bot_chat_backfill(ctx: JobContext) -> None:
-    """One-shot bot chat for VODs that never had it (``payload.vod_ids``: only those), newest first.
+    """Bot chat for VODs that never had it (``payload.vod_ids``: only those), newest first.
 
-    One job for all of them, so a long backfill never holds up the live jobs. Only adds
-    ``bot_logs`` rows; the replay chat is not touched. Merged or split VODs are skipped.
+    Queues one ``bot_chat`` run per VOD, its children (``payload.backfill``): each retries and
+    fails on its own, and they share one lock (``jobs._lock``), so they run one at a time beside
+    the live jobs. Only adds ``bot_logs`` rows; the replay chat is not touched. Merged or split
+    VODs, and VODs with a ``bot_chat`` run already queued or running, are skipped.
     """
     if not ctx.deps.doomtp.configured:
         raise StepError("ARCHIVE_DOOMTP_URL is not set")
+    from .. import jobs  # jobs imports the steps
     stmt = select(Vod).where(Vod.merged_into.is_(None)).order_by(Vod.created_at.desc())
     if ctx.payload.get("vod_ids"):
         stmt = stmt.where(Vod.id.in_([str(v) for v in ctx.payload["vod_ids"]]))
@@ -246,19 +249,18 @@ async def bot_chat_backfill(ctx: JobContext) -> None:
         stmt = stmt.where(Vod.bot_chat.is_(None))
     async with get_sessionmaker()() as s:
         vods = list((await s.execute(stmt)).scalars())
-    done = failed = 0
+    queued = 0
     for i, vod in enumerate(vods):
         ctx.progress(100 * i / len(vods), 100, "percent", f"bot chat backfill: {vod.id} ({i + 1}/{len(vods)})")
         reason = await splice_reason(vod.id)
         if reason:
             ctx.log.info("skipping %s: %s", vod.id, reason)
             continue
-        try:
-            await read_vod(ctx, vod)
-        except (httpx.HTTPError, ValueError) as exc:
-            failed += 1
-            ctx.log.warning("bot chat for %s failed: %s", vod.id, exc)
+        if await jobs.find_active("bot_chat", vod_id=vod.id):
+            ctx.log.info("skipping %s: a bot_chat job is already queued or running", vod.id)
             continue
-        done += 1
-    ctx.progress(100, 100, "percent", "bot chat backfill done")
-    ctx.log.info("bot chat backfill: %d VOD(s) read, %d failed", done, failed)
+        job_id = await ctx.enqueue("bot_chat", vod.id, {"backfill": True})
+        ctx.log.info("queued bot chat for %s: job %d", vod.id, job_id)
+        queued += 1
+    ctx.progress(100, 100, "percent", "bot chat backfill queued")
+    ctx.log.info("bot chat backfill: %d job(s) queued for %d VOD(s)", queued, len(vods))
