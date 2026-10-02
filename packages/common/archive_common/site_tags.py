@@ -1,9 +1,10 @@
 """How each VOD tag shows on the site (vods.vexoulz.net's /manage/tags), as both services read it.
 
 The worker's admin routes write it (archive_worker/site_tags.py), archive-api serves it at
-``/v1/site/tags``. A tag is ``{name, label, drawn, color, shape, width, height}``; ``shape`` is not
-stored with the list but made from ``site_tag_shapes``: the path of the tag's SVG relative to the
-public API, versioned by its content's hash.
+``/v1/site/tags``. A tag is ``{name, label, drawn, color, shape, width, height}``, then the text drawn
+on it (``TEXT_FIELDS``) and its pattern (``PATTERN_FIELDS``); ``shape`` is not stored with the list
+but made from ``site_tag_shapes``: the path of the tag's SVG relative to the public API, versioned by
+its content's hash. A list saved before a field existed reads it as null.
 """
 
 from __future__ import annotations
@@ -18,7 +19,9 @@ KEY = "tags"  # the site_settings row
 AUTO_TAGS = ("new", "updated", "compilation")  # set by the site or the archive: every list keeps them
 MAX_TAGS = 32
 SHAPE_MAX_BYTES = 64 * 1024
-FIELDS = ("name", "label", "drawn", "color", "width", "height")  # stored, in this order
+TEXT_FIELDS = ("text", "textColor", "textSize", "textX", "textY", "textRotate")  # all null without text
+PATTERN_FIELDS = ("pattern", "patternColor", "patternSize")  # all null without a pattern
+FIELDS = ("name", "label", "drawn", "color", "width", "height", *TEXT_FIELDS, *PATTERN_FIELDS)  # stored, in this order
 
 
 def shape_path(name: str, digest: str) -> str:
@@ -32,7 +35,7 @@ def with_shapes(tags: list[dict[str, Any]], hashes: dict[str, str]) -> list[dict
         digest = hashes.get(tag["name"])
         shown = {k: tag.get(k) for k in ("name", "label", "drawn", "color")}
         shown["shape"] = shape_path(tag["name"], digest) if digest else None
-        shown.update(width=tag.get("width"), height=tag.get("height"))
+        shown.update({k: tag.get(k) for k in FIELDS[4:]})
         out.append(shown)
     return out
 

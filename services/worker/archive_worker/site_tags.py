@@ -20,16 +20,58 @@ from .events import iso_utc
 from .svg_clean import digest
 from .vod_edits import KNOWN_TAGS
 
-NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")  # fullmatch: "$" would let a trailing newline through
 LABEL_MAX = 40
-SIZE_MIN, SIZE_MAX = 8, 200
+SIZE = (8, 200)
+TEXT_MAX = 24
+TEXT_SIZE = (6, 48)
+TEXT_NUDGE = (-100, 100)
+TEXT_ROTATE = (-180, 180)
+PATTERNS = ("stripes", "checks")
+PATTERN_SIZE = (2, 40)
 COMPUTED = ("new", "updated")  # the site works these out (from dates): never stored on a VOD
-COLOR = re.compile(
-    r"^(#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
-    r"|var\(--vx-[a-z0-9-]+\)"
-    r"|[a-zA-Z]{3,20}"
-    r"|(?:rgba?|hsla?|oklch)\([0-9a-zA-Z.,%/ ]{1,60}\))$"
-)
+
+# The site's isTagColor (vexoulz-vods src/lib/vodTags.ts): it goes into CSS custom properties, so
+# nothing that could load or run something (url(), image-set(), quotes, escapes, ";", ":", braces).
+COLOR_MAX = 160
+COLOR_FUNCS = {"rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color", "color-mix"}
+MATH_FUNCS = {"calc", "min", "max", "clamp"}
+COLOR_DEPTH = 4
+_I = re.I | re.A  # re.A: [a-z] under re.I would also take "ſ" and the Kelvin sign
+_COLOR_CHARS = re.compile(r"[#0-9a-z.,%\s/()*+-]+", _I)
+_HEX_OR_NAME = re.compile(r"#[0-9a-f]{3,8}|[a-z]{3,20}", _I)
+_TOKEN = re.compile(r"var\(--vx-[a-z0-9-]+\)", _I)
+_LEFTOVER = re.compile(r"--|var\(", _I)
+_OUTER = re.compile(r"([a-z-]+)\(", _I)
+_BRACKET = re.compile(r"([a-z-]*)\(|\)", _I)
+
+
+def is_color(value: Any) -> bool:
+    """A hex, a color name, a theme token (``var(--vx-…)``), or one color function around the whole
+    value, holding only theme tokens, color and math functions (at most 4 deep)."""
+    if not isinstance(value, str) or len(value) > COLOR_MAX or not _COLOR_CHARS.fullmatch(value):
+        return False
+    if _HEX_OR_NAME.fullmatch(value):
+        return True
+    rest = _TOKEN.sub("v", value)  # theme tokens are the only var() and the only "--"
+    if _LEFTOVER.search(rest):
+        return False
+    if rest == "v":
+        return True
+    outer = _OUTER.match(rest)
+    if not outer or outer[1].lower() not in COLOR_FUNCS or not rest.endswith(")"):
+        return False
+    depth = 0
+    for m in _BRACKET.finditer(rest):
+        if m[0] == ")":
+            depth -= 1
+            if depth < 0 or (depth == 0 and m.end() != len(rest)):
+                return False
+        else:
+            depth += 1
+            if not m[1] or m[1].lower() not in COLOR_FUNCS | MATH_FUNCS or depth > COLOR_DEPTH:
+                return False
+    return depth == 0
 
 
 class SiteTagError(Exception):
@@ -42,8 +84,42 @@ def _refuse(index: int, name: Any, field: str, msg: str) -> SiteTagError:
     return SiteTagError(400, f"tags[{index}]{f' ({named})' if named else ''}.{field}: {msg}", named, field)
 
 
-def _size(value: Any) -> bool:
-    return value is None or (type(value) is int and SIZE_MIN <= value <= SIZE_MAX)
+def _within(value: Any, bounds: tuple[int, int]) -> bool:
+    return value is None or (type(value) is int and bounds[0] <= value <= bounds[1])
+
+
+COLOR_RULE = "null or a color: a hex, a color name, var(--vx-…), or a color function (rgb() … oklch(), color-mix())"
+NUMBERS = {
+    "width": (SIZE, "px"), "height": (SIZE, "px"), "textSize": (TEXT_SIZE, "px"), "textX": (TEXT_NUDGE, "px"),
+    "textY": (TEXT_NUDGE, "px"), "textRotate": (TEXT_ROTATE, "degrees"), "patternSize": (PATTERN_SIZE, "px"),
+}
+
+
+def _fields(i: int, name: str, tag: dict[str, Any]) -> dict[str, Any]:
+    """The tag's stored fields past ``drawn``, checked; the text and pattern fields null without
+    text or a pattern."""
+    out: dict[str, Any] = {}
+    for field in ("color", "textColor", "patternColor"):
+        if tag.get(field) is not None and not is_color(tag[field]):
+            raise _refuse(i, name, field, COLOR_RULE)
+        out[field] = tag.get(field)
+    for field, (bounds, unit) in NUMBERS.items():
+        if not _within(tag.get(field), bounds):
+            raise _refuse(i, name, field, f"null or a whole number of {unit}, {bounds[0]} to {bounds[1]}")
+        out[field] = tag.get(field)
+    text = tag.get("text")
+    if text is not None:
+        text = text.strip() if isinstance(text, str) else ""
+        if not 1 <= len(text) <= TEXT_MAX:
+            raise _refuse(i, name, "text", f"null or 1-{TEXT_MAX} characters")
+    pattern = tag.get("pattern")
+    if pattern is not None and pattern not in PATTERNS:
+        raise _refuse(i, name, "pattern", f"null, {' or '.join(map(repr, PATTERNS))}")
+    out.update(text=text, pattern=pattern)
+    for gate, fields in (("text", site_tags.TEXT_FIELDS), ("pattern", site_tags.PATTERN_FIELDS)):
+        if out[gate] is None:
+            out.update(dict.fromkeys(fields))
+    return out
 
 
 def validate(body: Any) -> list[dict[str, Any]]:
@@ -59,7 +135,7 @@ def validate(body: Any) -> list[dict[str, Any]]:
         if not isinstance(tag, dict):
             raise SiteTagError(400, f"tags[{i}] must be an object", field="tags")
         name = tag.get("name")
-        if not isinstance(name, str) or not NAME.match(name):
+        if not isinstance(name, str) or not NAME.fullmatch(name):
             raise _refuse(i, name, "name", "lowercase letters, digits and dashes, 1-32, not starting with a dash")
         if name in seen:
             raise _refuse(i, name, "name", "listed twice")
@@ -69,13 +145,8 @@ def validate(body: Any) -> list[dict[str, Any]]:
             raise _refuse(i, name, "label", f"1-{LABEL_MAX} characters")
         if not isinstance(tag.get("drawn"), bool):
             raise _refuse(i, name, "drawn", "must be true or false")
-        color = tag.get("color")
-        if color is not None and not (isinstance(color, str) and COLOR.match(color)):
-            raise _refuse(i, name, "color", "null, a hex color, var(--vx-…), a color name, or rgb()/hsl()/oklch()")
-        for field in ("width", "height"):
-            if not _size(tag.get(field)):
-                raise _refuse(i, name, field, f"null or a whole number of px, {SIZE_MIN}-{SIZE_MAX}")
-        out.append({k: tag.get(k) for k in site_tags.FIELDS})
+        checked = {"name": name, "label": label, "drawn": tag["drawn"], **_fields(i, name, tag)}
+        out.append({k: checked[k] for k in site_tags.FIELDS})
     for auto in site_tags.AUTO_TAGS:
         if auto not in seen:
             raise SiteTagError(400, f"the {auto!r} tag is set automatically and must stay in the list", auto, "name")
