@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import math
+import re
 from typing import Any
 
 import httpx
@@ -43,9 +44,34 @@ def _from_ms(ms: int | float | None) -> dt.datetime | None:
 # ── Bot entry -> replay shape ─────────────────────────────────────────────
 
 
+# A GIF from Twitch's GIF picker is a GIPHY one: only GIPHY's own CDN is linked, as with emotes.
+_GIPHY_ID = re.compile(r"[A-Za-z0-9]{1,64}")
+_GIPHY_URL = re.compile(r"https://(?:media[0-9]?|i)\.giphy\.com/media/(?:v1\.[A-Za-z0-9_=.-]+/)?([A-Za-z0-9]{1,64})/"
+                        r"[A-Za-z0-9_.-]+\.(?:gif|webp)")
+
+
+def replay_gif(frag: dict) -> dict | None:
+    """A ``gif`` fragment's ``{id, url, still, title}``: the GIPHY id, the animated GIF, its still
+    first frame, and the text Twitch shows for it without the brackets. None without a GIPHY id."""
+    gif = frag.get("gif") if isinstance(frag.get("gif"), dict) else {}
+    url = gif.get("url") if isinstance(gif.get("url"), str) else ""
+    linked = _GIPHY_URL.fullmatch(url)
+    gif_id = gif.get("id") if isinstance(gif.get("id"), str) and _GIPHY_ID.fullmatch(gif["id"]) else None
+    gif_id = gif_id or (linked[1] if linked else None)
+    if gif_id is None:
+        return None
+    media = f"https://media.giphy.com/media/{gif_id}"
+    title = (frag.get("text") or "").strip()
+    if title.startswith("[") and title.endswith("]"):
+        title = title[1:-1].strip()
+    return {"id": gif_id, "url": url if linked and linked[1] == gif_id else f"{media}/giphy.gif",
+            "still": f"{media}/giphy_s.gif", "title": title or None}
+
+
 def replay_fragments(fragments: list[dict] | None, fallback_text: str = "") -> list[dict]:
-    """Bot fragments as the replay stores them: text, or text plus an embedded emote.
-    Mentions and cheermotes are plain text there (their details stay in ``data``)."""
+    """Bot fragments as the replay stores them: text, or text plus an embedded emote; a GIF adds
+    ``gif`` (``replay_gif``), which the replay never has. Mentions and cheermotes are plain text there
+    (their details stay in ``data``)."""
     out: list[dict] = []
     pos = 0
     for frag in fragments or [{"type": "text", "text": fallback_text}]:
@@ -55,7 +81,9 @@ def replay_fragments(fragments: list[dict] | None, fallback_text: str = "") -> l
             emote_id = frag["emote_id"]
             emote = {"id": f"{emote_id};{pos};{pos + len(frag_text) - 1}", "from": pos, "emoteID": emote_id,
                      "__typename": "EmbeddedEmote"}
-        out.append({"text": frag_text, "emote": emote, "__typename": "VideoCommentMessageFragment"})
+        gif = replay_gif(frag) if frag.get("type") == "gif" else None
+        out.append({"text": frag_text, "emote": emote, **({"gif": gif} if gif else {}),
+                    "__typename": "VideoCommentMessageFragment"})
         pos += len(frag_text)
     return out
 
