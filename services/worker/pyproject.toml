@@ -9,6 +9,7 @@ dependencies = [
   "google-api-python-client>=2.140",
   "google-auth>=2.34",
   "google-auth-oauthlib>=1.2",
+  "yt-dlp[default]>=2025.11.12",  # seek-bar previews backfill (steps/previews.py)
 ]
 
 [project.scripts]

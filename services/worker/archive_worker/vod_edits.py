@@ -106,8 +106,8 @@ def _video_id(item: dict, where: str) -> str:
 
 
 def youtube(items: Any, existing: list[dict] | None) -> list[dict[str, Any]]:
-    """Admin YouTube list -> vods.youtube. A video already listed keeps its thumbnail
-    (and its duration, unless a new one is given)."""
+    """Admin YouTube list -> vods.youtube. A video already listed keeps its thumbnail and seek-bar
+    previews (and its duration, unless a new one is given)."""
     before = {e.get("id"): e for e in existing or [] if isinstance(e, dict)}
     out: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -134,6 +134,8 @@ def youtube(items: Any, existing: list[dict] | None) -> list[dict[str, Any]]:
             entry["duration"] = planning.num_seconds(duration)
         entry["part"] = part
         entry["thumbnail_url"] = old.get("thumbnail_url") or planning.youtube_thumbnail(video_id)
+        if old.get("preview"):
+            entry["preview"] = old["preview"]
         out.append(entry)
     return out
 

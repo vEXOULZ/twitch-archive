@@ -142,6 +142,9 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_MANUAL_STEPS` † | `{}` | Steps a job pauses before until you resume it, per job kind, e.g. `{"archive":["upload"]}`; see [Manual steps](#manual-steps) |
 | `ARCHIVE_SPLIT_DURATION` † | `10800` | Maximum YouTube part length in seconds |
 | `ARCHIVE_KEEP_HLS` / `ARCHIVE_KEEP_MP4` † | `false` | Keep files after upload |
+| `ARCHIVE_PREVIEWS` † | `true` | Make seek-bar previews of each uploaded part; see [Seek-bar previews](#seek-bar-previews) |
+| `ARCHIVE_PREVIEWS_FETCH_PAUSE_SECONDS` † | `60` | Pause between two YouTube downloads of the previews backfill |
+| `ARCHIVE_PREVIEWS_YTDLP_ARGS` | `[]` | Extra yt-dlp arguments for those downloads, e.g. `["--cookies","/secrets/yt.txt"]` |
 | `ARCHIVE_DRY_RUN` | `false` | Same as `run --dry-run` |
 | `ARCHIVE_RUNNER_CONCURRENCY` † | `3` | Jobs run at once |
 | `ARCHIVE_MAX_ATTEMPTS` † | `3` | Tries of a failing step before its job is marked `failed` |
@@ -293,17 +296,19 @@ Job kinds and their steps:
 
 | Kind | Steps | Started by |
 |---|---|---|
-| `archive` | capture → finalize → chapters → chat → emotes → split → upload → describe → cleanup | monitor (stream went live), `/admin/hls/download` |
-| `download` | ensure_source → fetch_vod → finalize → chapters → split → upload → describe → cleanup | `/admin/download` |
-| `reupload` | ensure_source → fetch_vod → finalize → split → upload → describe → cleanup | `/admin/reupload` |
-| `live` | live_record → resolve_vod → finalize → chapters → split → upload → describe → cleanup | monitor (when `LIVE_RECORD=true`) |
-| `live_file` | ensure_source → chapters → split → upload → describe | `/v2/live` |
-| `dmca` | ensure_source → fetch_vod → finalize → dmca_edit → split → upload → describe → cleanup | `/admin/dmca` |
-| `part_dmca` | ensure_source → fetch_vod → finalize → split → dmca_edit → upload → describe → cleanup | `/admin/part/dmca` |
+| `archive` | capture → finalize → chapters → chat → emotes → split → upload → describe → previews → cleanup | monitor (stream went live), `/admin/hls/download` |
+| `download` | ensure_source → fetch_vod → finalize → chapters → split → upload → describe → previews → cleanup | `/admin/download` |
+| `reupload` | ensure_source → fetch_vod → finalize → split → upload → describe → previews → cleanup | `/admin/reupload` |
+| `live` | live_record → resolve_vod → finalize → chapters → split → upload → describe → previews → cleanup | monitor (when `LIVE_RECORD=true`) |
+| `live_file` | ensure_source → chapters → split → upload → describe → previews | `/v2/live` |
+| `dmca` | ensure_source → fetch_vod → finalize → dmca_edit → split → upload → describe → previews → cleanup | `/admin/dmca` |
+| `part_dmca` | ensure_source → fetch_vod → finalize → split → dmca_edit → upload → describe → previews → cleanup | `/admin/part/dmca` |
 | `chat`, `logs_manual`, `chapters`, `emotes`, `describe` | one step each | the matching admin routes |
 | `global_emotes_backfill` | one step | `/admin/emotes/backfill` |
 | `bot_chat` | one step | monitor (stream ended, `DOOMTP_URL` set; separate from `archive`), `/admin/bot-chat` |
 | `bot_chat_backfill` | one step: queues a `bot_chat` job per VOD | `/admin/bot-chat/backfill` |
+| `previews_fetch` | one step | `/admin/previews` |
+| `previews_backfill` | one step: queues a `previews_fetch` job per VOD | `/admin/previews/backfill` |
 
 `ensure_source` uses `path` if one was given, otherwise the MP4 already on disk. With neither, `fetch_vod` downloads the whole VOD from Twitch again (only while Twitch still has it) and `finalize` converts it; both do nothing when there is a source already.
 
@@ -410,6 +415,23 @@ curl -s "${H[@]}" -X POST "$A/admin/bot-chat" -d '{"vodId":"2703890458"}'
 curl -s "${H[@]}" -X POST "$A/admin/bot-chat/backfill"
 curl -s "${H[@]}" -X POST "$A/admin/bot-chat/backfill" -d '{"vodIds":["2703890458"]}'   # only these VODs
 ```
+
+#### Seek-bar previews
+
+The sites show a frame of the video when you hover the timeline. The worker makes these as sprite sheets per YouTube upload, in that upload's own time, and keeps them in `<data dir>/previews/<youtube id>/<k>.jpg`. Each sheet has 10×10 tiles of 160×90. Frame `i` is the picture at `i × 10` s (or the keyframe just before), on sheet `i // 100`, column `i % 10`, row `(i // 10) % 10`. Once its sheets exist, the upload's `youtube` entry gets `preview: {v: 1, interval: 10, w: 160, h: 90, cols: 10, rows: 10, count}`, where `count` is the number of frames. An admin edit keeps it as long as the video id stays.
+
+The `previews` step comes after `upload` in every kind that uploads, and works from the part files it just uploaded. Only keyframes are decoded, so a 3-hour 1080p part takes a minute or two. A part that fails is logged and skipped; previews never fail a job. A `--dry-run` writes the sheets to `<work dir>/previews/<part>` so you can look at them.
+
+Uploads made before the step existed get their previews from `previews_fetch`. It downloads the upload's smallest video-only stream from YouTube with yt-dlp (240p or less, deno as its JavaScript runtime in the image), makes the sheets and deletes the download. The backfill queues one per VOD that has uploads without previews, newest first, skipping VODs that already have one queued. These jobs share one lock, so YouTube gets one download at a time, `ARCHIVE_PREVIEWS_FETCH_PAUSE_SECONDS` apart. A job fails, and is retried with the usual backoff, only when none of its uploads worked. If YouTube asks yt-dlp to sign in, give it cookies through `ARCHIVE_PREVIEWS_YTDLP_ARGS`.
+
+```bash
+curl -s "${H[@]}" -X POST "$A/admin/previews" -d '{"vodId":"2703890458"}'
+curl -s "${H[@]}" -X POST "$A/admin/previews" -d '{"vodId":"2703890458","youtubeIds":["abcdefghijk"]}'   # only these
+curl -s "${H[@]}" -X POST "$A/admin/previews/backfill"
+curl -s "${H[@]}" -X POST "$A/admin/previews/backfill" -d '{"vodIds":["2703890458"]}'   # only these VODs
+```
+
+Sheets left behind by a replaced upload are not deleted. They are small, about 1–2 MB per hour of video.
 
 `/admin/youtube/chapters` does the same as `/admin/youtube/parts`. Both rewrite every part's description from scratch: links to the other parts, the chat replay link, and the chapters inside that part.
 
@@ -578,6 +600,8 @@ This is what the frontend uses. The output is compatible with the old Feathers A
 | `GET /v1/games-played` | `[{name, gameId, image, imageTemplate, vods, chapters, seconds, watchableSeconds, lastPlayed}]`, one entry per game across all VODs' chapters. `vods` counts VODs (not chapters), `chapters` counts chapters, `seconds` is the game's total streamed time (the sum of its chapters' `end`, rounded to whole seconds; an `end` that is missing or not a number counts as 0), `watchableSeconds` the same without restricted (DMCA-cut) chapters, `lastPlayed` is the `createdAt` of the newest VOD with the game; `name`, `gameId` and `image` come from its most recent chapter. Grouped by `gameId`, else by name; chapters without a category are one entry named `No category` with `gameId: null`. Sorted by `vods` desc, `lastPlayed` desc, `name`. Cached like `/vods`. |
 | `GET /v1/status` | `{live, stream, vod}`. Live: `stream` is `{id, started_at, title, game: {name, gameId, image, imageTemplate} \| null}` and `vod` is the VOD row of that stream (`null` until the worker has created it). Offline: `stream` is `null` and `vod` is the latest VOD. `vod` has the usual `/vods` fields. Live state comes from `streams.is_live`; title and category from Helix when credentials are set, else from the VOD's title and last chapter. Cached for 45 s. |
 | `GET /v1/emotes/third-party` | `{"7tv": [...], "bttv": [...], "ffz": [...], "failed": [...]}`, each item `{id, code, provider}`: global plus channel emotes for `ARCHIVE_TWITCH_ID` from the providers' APIs (a channel emote replaces a global one with the same code). Build image URLs from the CDNs: `cdn.7tv.app/emote/{id}/1x.webp`, `cdn.betterttv.net/emote/{id}/1x`, `cdn.frankerfacez.com/emote/{id}/1`. A provider that failed is named in `failed` (its list holds whatever part loaded). Cached for 6 h, or 5 min when something failed. |
+| `GET /v1/previews/:youtubeId/:k.jpg` | Sheet `k` of an upload's seek-bar previews (see [Seek-bar previews](#seek-bar-previews); the layout is in the upload's `youtube[].preview`). 404 unless a VOD the API shows lists that upload. `Cache-Control: public, max-age=31536000, immutable`. Not rate limited. The api container reads the sheets from the data dir, mounted read-only. |
+| `youtube[].preview` | On uploads that have seek-bar previews: `{v, interval, w, h, cols, rows, count}`; absent otherwise. |
 | `chapters[].imageTemplate` | On every chapter in `/vods` (and in `vod`s embedded elsewhere): the box art with `{width}x{height}` in place of the stored `40x53`, like Helix's `box_art_url`. `image` is unchanged. |
 | `chapters[].length` | Same value as `end`, which holds the chapter's length in seconds, not its end time. |
 | `duration_seconds` | On each VOD next to `duration` (`"HH:MM:SS"`), as a number. Only present when `duration` is. |
@@ -592,7 +616,7 @@ Examples: `/vods?$limit=20&$sort[createdAt]=-1`, `/vods?title[$iLike]=%25zelda%2
 
 **Differences from the old API:** `$select` now works (it used to return a 500), `/v2/badges` now works, and the `chapters[name]` input is escaped and combines with other filters.
 
-Rate limit: 20 requests per 5 s per IP on `/vods`, `/v1/*` and `/v2/*`. Responses carry `X-RateLimit-*` headers, and a request over the limit gets a 429.
+Rate limit: 20 requests per 5 s per IP on `/vods`, `/v1/*` (except `/v1/previews/*`) and `/v2/*`. Responses carry `X-RateLimit-*` headers, and a request over the limit gets a 429.
 
 ---
 

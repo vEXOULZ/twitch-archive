@@ -1162,6 +1162,25 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
             raise AdminError(500, "ARCHIVE_DOOMTP_URL is not set")
         return await backfill("bot_chat_backfill", "bot chat", body)
 
+    @app.post("/admin/previews", dependencies=auth)
+    async def previews(body: dict = Body(...)) -> dict:
+        """Seek-bar previews for the VOD's uploads that have none (optionally only ``youtubeIds``), downloaded
+        from YouTube."""
+        _require(body, "vodId")
+        vod = await require_vod(body["vodId"])
+        ids = body.get("youtubeIds")
+        if ids is not None and not (isinstance(ids, list) and ids and all(isinstance(i, str) for i in ids)):
+            raise AdminError(400, "youtubeIds must be a non-empty list of video ids")
+        if await jobs.find_active("previews_fetch", vod_id=vod.id):
+            raise AdminError(409, f"A previews job for {vod.id} is already running")
+        job = await enqueue("previews_fetch", vod.id, {"youtube_ids": ids} if ids else None)
+        return _ok(f"Making previews for {vod.id}..", job)
+
+    @app.post("/admin/previews/backfill", dependencies=auth)
+    async def previews_backfill(body: dict | None = Body(None)) -> dict:
+        """Seek-bar previews for every VOD with uploads that have none (optionally only ``vodIds``)."""
+        return await backfill("previews_backfill", "previews", body)
+
     @app.post("/admin/youtube/parts", dependencies=auth)
     @app.post("/admin/youtube/chapters", dependencies=auth)
     async def youtube_describe(body: dict = Body(...)) -> dict:

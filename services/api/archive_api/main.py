@@ -14,15 +14,18 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import Response
-from sqlalchemy import text
+from fastapi.responses import FileResponse, Response
+from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from archive_common import logs
+from archive_common import previews as pv
 from archive_common.config import Settings, get_settings
 from archive_common.db import get_engine
 from archive_common.http import close_client
+from archive_common.models import Vod
+from archive_common.serialize import not_hidden
 from archive_common.twitch.helix import Helix
 
 from .comments import Comments
@@ -38,6 +41,8 @@ log = logging.getLogger("archive_api")
 
 # Legacy: the limiter covered /vods and the custom routes, not /games /emotes /streams.
 RATE_LIMITED_PREFIXES = ("/vods", "/v1/", "/v2/")
+# Seek-bar sheets are static and cached for good; hovering a long VOD's bar asks for many at once.
+UNLIMITED_PREFIXES = ("/v1/previews/",)
 SERVICES = ("vods", "games", "emotes", "streams")
 
 
@@ -71,7 +76,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def rate_limit(request: Request, call_next):
-        if request.url.path.startswith(RATE_LIMITED_PREFIXES):
+        path = request.url.path
+        if path.startswith(RATE_LIMITED_PREFIXES) and not path.startswith(UNLIMITED_PREFIXES):
             allowed, headers = limiter.hit(client_ip(request))
             if not allowed:
                 resp = legacy_error(429, "Too Many Requests")
@@ -176,6 +182,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body = JsonBody(value)
             (emotes_partial_cache if value["failed"] else emotes_cache).set("emotes", body)
         return body.response(request)
+
+    # ── Seek-bar previews ─────────────────────────────────────────────────
+
+    @app.get("/v1/previews/{youtube_id}/{name}")
+    async def preview_sheet(youtube_id: str, name: str):
+        """Sheet ``name`` of an upload's previews (archive_common.previews), made by the worker; the upload must
+        be on a VOD the API shows."""
+        if not pv.YOUTUBE_ID.match(youtube_id) or not pv.SHEET.match(name):
+            raise LegacyError(404, "Not found")
+        path = pv.directory(settings.previews_dir, youtube_id) / name
+        if not await asyncio.to_thread(path.is_file):
+            raise LegacyError(404, "Not found")
+        async with engine.connect() as conn:
+            listed = await conn.scalar(
+                select(Vod.id).where(not_hidden(), Vod.youtube.contains([{"id": youtube_id}])).limit(1)
+            )
+        if listed is None:
+            raise LegacyError(404, "Not found")
+        return FileResponse(path, media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
     # ── Chat replay ───────────────────────────────────────────────────────
 

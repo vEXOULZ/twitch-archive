@@ -65,3 +65,15 @@ async def test_failure_leaves_no_output(tmp_path):
     with pytest.raises(ffmpeg.FfmpegError):
         await ffmpeg.cut(tmp_path / "missing.mp4", tmp_path / "x.mp4", 0, 1)
     assert not (tmp_path / "x.mp4").exists()
+
+
+async def test_preview_sheets(clip, tmp_path):
+    out = tmp_path / "previews" / "abcdefghijk"
+    out.mkdir(parents=True)
+    (out / "stale.jpg").write_bytes(b"old")
+    assert await ffmpeg.preview_sheets(clip, out) == 2  # frames at 0 and 10 s of 12 s
+    assert sorted(p.name for p in out.iterdir()) == ["0.jpg"]  # replaced whole
+    assert not out.with_name(out.name + ".part").exists()
+    size = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                           str(out / "0.jpg")], check=True, capture_output=True, text=True).stdout.strip()
+    assert size == "1600,900"  # 10×10 tiles of 160×90

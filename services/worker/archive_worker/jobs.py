@@ -49,16 +49,16 @@ __all__ = [
 
 KINDS: dict[str, list[str]] = {
     # Stream went live (or /admin/hls/download): follow the VOD playlist, then process.
-    "archive": ["capture", "finalize", "chapters", "chat", "emotes", "split", "upload", "describe", "cleanup"],
+    "archive": ["capture", "finalize", "chapters", "chat", "emotes", "split", "upload", "describe", "previews", "cleanup"],
     # /admin/download: full VOD (or a given file), split + upload, optional part range.
-    "download": ["ensure_source", "fetch_vod", "finalize", "chapters", "split", "upload", "describe", "cleanup"],
-    "reupload": ["ensure_source", "fetch_vod", "finalize", "split", "upload", "describe", "cleanup"],
+    "download": ["ensure_source", "fetch_vod", "finalize", "chapters", "split", "upload", "describe", "previews", "cleanup"],
+    "reupload": ["ensure_source", "fetch_vod", "finalize", "split", "upload", "describe", "previews", "cleanup"],
     # Recording of the live stream itself (unmuted), uploaded as type "live".
-    "live": ["live_record", "resolve_vod", "finalize", "chapters", "split", "upload", "describe", "cleanup"],
+    "live": ["live_record", "resolve_vod", "finalize", "chapters", "split", "upload", "describe", "previews", "cleanup"],
     # /v2/live callback from an external recorder.
-    "live_file": ["ensure_source", "chapters", "split", "upload", "describe"],
-    "dmca": ["ensure_source", "fetch_vod", "finalize", "dmca_edit", "split", "upload", "describe", "cleanup"],
-    "part_dmca": ["ensure_source", "fetch_vod", "finalize", "split", "dmca_edit", "upload", "describe", "cleanup"],
+    "live_file": ["ensure_source", "chapters", "split", "upload", "describe", "previews"],
+    "dmca": ["ensure_source", "fetch_vod", "finalize", "dmca_edit", "split", "upload", "describe", "previews", "cleanup"],
+    "part_dmca": ["ensure_source", "fetch_vod", "finalize", "split", "dmca_edit", "upload", "describe", "previews", "cleanup"],
     "chat": ["chat"],
     "logs_manual": ["logs_manual"],
     "chapters": ["chapters"],
@@ -72,6 +72,10 @@ KINDS: dict[str, list[str]] = {
     "bot_chat": ["bot_chat"],
     # Queues a bot_chat run per VOD without bot chat (or per given VOD), newest first; they run one at a time.
     "bot_chat_backfill": ["bot_chat_backfill"],
+    # Seek-bar previews for a VOD's uploads that have none, from a small download of each (steps/previews.py).
+    "previews_fetch": ["previews_fetch"],
+    # Queues a previews_fetch run per VOD with uploads without previews, newest first; they run one at a time.
+    "previews_backfill": ["previews_backfill"],
 }
 
 # The old runner waited 60·2^n seconds after the n-th failure; the runtime waits base·2^(n-1).
@@ -93,6 +97,8 @@ def _lock(run: JobRun) -> str | None:
     # bot_chat runs share one lock, so they go one at a time and live jobs never wait behind many.
     if run.kind == "bot_chat" and run.payload.get("backfill"):
         return "bot_chat_backfill"
+    if run.kind == "previews_fetch":
+        return "previews_fetch"  # one YouTube download at a time, whatever the VOD
     vod_id = vod_of(run.subject)
     if vod_id is None:
         return None
