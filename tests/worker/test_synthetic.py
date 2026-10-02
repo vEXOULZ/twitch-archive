@@ -297,3 +297,46 @@ async def test_changed_at(admin):
     assert P in await synthetic.recompose_stale()
     _, changed4, last4 = await stamps()
     assert changed4 > changed3 and last4 == "2001-03-04T23:35:00.000Z"
+
+
+async def test_live_span_filters(admin):
+    """``firstLiveAt``/``lastLiveAt``: a synthetic VOD's span, a real VOD's ``createdAt``, filtered in the
+    query so totals and paging hold. A starts 20:00, B 22:05; their merge AB spans 20:00-23:05."""
+    assert (await admin.post(f"/api/v2/vods/{A}/merge", headers=KEY, json={"source": B})).status_code == 201
+
+    async def live(q: str) -> dict:
+        r = await public(f"/vods?{ALL}&$superseded=true&{q}")
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    assert _ids(await live("lastLiveAt[$gte]=2001-03-04T23:00:00Z")) == {AB}
+    assert _ids(await live("firstLiveAt[$gte]=2001-03-04T20:00:00Z&firstLiveAt[$lt]=2001-03-04T20:00:01Z")) == {A, AB}
+    assert _ids(await live("firstLiveAt[$gt]=2001-03-04T20:00:00Z")) == {B}
+    assert _ids(await live("firstLiveAt[$lt]=2001-03-04T21:00:00Z&lastLiveAt[$gt]=2001-03-04T23:00:00Z")) == {AB}
+    assert _ids(await live("lastLiveAt[$lte]=2001-03-04T23:05:00.000Z")) == {A, B, AB}
+    assert _ids(await live("lastLiveAt[$lt]=2001-03-04T20:00:00")) == set()  # naive is UTC
+
+    # With the other filters, and paged: the total counts what matched, not the page.
+    assert _ids(await live("firstLiveAt[$lt]=2001-03-04T21:00:00Z&$tag=*")) == {A, AB}
+    assert _ids(await live("firstLiveAt[$lt]=2001-03-04T21:00:00Z&createdAt[$gt]=2001-03-04T19:00:00Z")) == {A, AB}
+    page = await live("lastLiveAt[$gte]=2001-03-04T22:00:00Z&$limit=1&$sort[createdAt]=-1")
+    assert (page["total"], len(page["data"]), page["data"][0]["id"]) == (2, 1, B)
+    page = await live("lastLiveAt[$gte]=2001-03-04T22:00:00Z&$limit=1&$skip=1&$sort[createdAt]=-1")
+    assert (page["total"], [v["id"] for v in page["data"]]) == (2, [AB])
+
+    for q in ("firstLiveAt=2001-03-04", "firstLiveAt[$ne]=2001-03-04", "lastLiveAt[$gte]=yesterday",
+              "lastLiveAt[$gte][]=2001-03-04"):
+        r = await public(f"/vods?{ALL}&{q}")
+        assert r.status_code == 400, (q, r.text)
+
+
+def test_live_span_without_a_start():
+    """A synthetic VOD none of whose sources has a start has no span, so no live filter matches it."""
+    from archive_api.services import _live_filter
+    from archive_common.serialize import Segment, live_span
+
+    seg = Segment(source_id=A, start=0, end=60, at=0, label=None)
+    assert live_span([seg], {A: None}) is None and live_span([], {}) is None
+    clause = _live_filter("firstLiveAt", 0, {AB: None, P: (START, START)})({"$gte": "2001-01-01"})
+    assert P in str(clause.compile(compile_kwargs={"literal_binds": True})) and AB not in str(
+        clause.compile(compile_kwargs={"literal_binds": True}))
