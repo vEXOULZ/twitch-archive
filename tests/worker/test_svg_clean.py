@@ -113,3 +113,19 @@ def test_editor_metadata_dropped():
 def test_digest_follows_the_content():
     a, b = clean(svg('<path d="M0 0"/>')), clean(svg('<path d="M1 1"/>'))
     assert digest(a) == digest(a) and digest(a) != digest(b) and len(digest(a)) == 16
+
+
+def test_colors_kept():
+    """The site draws the file in its own colors, recoloring only currentColor (or black) parts."""
+    raw = svg(
+        '<defs><linearGradient id="g"><stop offset="0" stop-color="#ff0"/><stop offset="1" style="stop-color: red"/>'
+        '</linearGradient></defs>'
+        '<path d="M0 0" fill="currentColor" stroke="#12345678"/><path d="M1 1" style="fill: currentColor; stroke: '
+        'rgb(0, 0, 0)"/><g color="blue"><rect width="1" height="1" fill="url(#g)"/></g>'
+        "<style>.a { fill: currentColor } .b { stroke: hsl(10 50% 50%) }</style>"
+    )
+    out = clean(raw)
+    for kept in ('fill="currentColor"', 'stroke="#12345678"', 'stop-color="#ff0"', 'style="stop-color: red"',
+                 'style="fill: currentColor; stroke: rgb(0, 0, 0)"', 'color="blue"', 'fill="url(#g)"',
+                 ".a { fill: currentColor } .b { stroke: hsl(10 50% 50%) }"):
+        assert kept in out, kept

@@ -13,7 +13,7 @@ from archive_common.db import get_sessionmaker
 from archive_common.models import SiteSetting, SiteTagShape, Vod
 from archive_worker import jobs
 from archive_worker.admin import create_admin_app
-from archive_worker.site_tags import SiteTagError, validate
+from archive_worker.site_tags import SiteTagError, is_color, validate
 
 KEY = {"Authorization": "Bearer k"}
 SVG = {"content-type": "image/svg+xml", **KEY}
@@ -38,15 +38,56 @@ def test_validate_keeps_order_and_known_fields():
     out = validate(body)
     assert [t["name"] for t in out] == ["speedrun", "new", "updated", "compilation"]
     assert out[0] == {"name": "speedrun", "label": "Speedrun!", "drawn": True, "color": "#ff8800cc",
-                      "width": 24, "height": 200}
+                      "width": 24, "height": 200, **dict.fromkeys(TEXT + PATTERN)}
+
+
+TEXT = ("text", "textColor", "textSize", "textX", "textY", "textRotate")
+PATTERN = ("pattern", "patternColor", "patternSize")
+
+
+def test_text_and_pattern_kept():
+    fields = {"text": "  100%  ", "textColor": "white", "textSize": 6, "textX": -100, "textY": 100,
+              "textRotate": -180, "pattern": "checks", "patternColor": "var(--vx-bg)", "patternSize": 40}
+    [out, *_] = validate({"tags": [tag("x", **fields), *AUTO]})
+    assert list(out) == ["name", "label", "drawn", "color", "width", "height", *TEXT, *PATTERN]
+    assert out == {**tag("x", **fields), "text": "100%"}  # trimmed
+    [out, *_] = validate({"tags": [tag("x", pattern="stripes", textRotate=180, textSize=48), *AUTO]})
+    assert (out["pattern"], out["textRotate"]) == ("stripes", None)
+
+
+def test_without_text_or_pattern_the_rest_is_dropped():
+    fields = {"text": None, "textColor": "red", "textSize": 12, "textX": 1, "textY": 2, "textRotate": 90,
+              "pattern": None, "patternColor": "blue", "patternSize": 4}
+    [out, *_] = validate({"tags": [tag("x", **fields), *AUTO]})
+    assert all(out[k] is None for k in TEXT + PATTERN)
 
 
 @pytest.mark.parametrize("color", [
-    None, "#abc", "#abcd", "#aabbcc", "#aabbccdd", "var(--vx-accent)", "red", "rebeccapurple",
-    "rgb(1, 2, 3)", "rgba(1 2 3 / 50%)", "hsl(120deg 50% 50%)", "oklch(70% 0.1 200)",
+    None, "#abc", "#abcd", "#aabbcc", "#aabbccdd", "var(--vx-accent)", "red", "rebeccapurple", "currentColor",
+    "rgb(1, 2, 3)", "rgba(1 2 3 / 50%)", "hsl(120deg 50% 50%)", "oklch(70% 0.1 200)", "hwb(120 10% 20%)",
+    "oklch(from var(--vx-accent) calc(l - 0.15) c h)", "color-mix(in oklch, var(--vx-ok) 60%, white)",
+    "color(display-p3 1 0 0)", "rgb(calc(255 * 0.5) max(1, 2) clamp(0, 3, 9))",
+    "color-mix(in srgb, color-mix(in srgb, red, blue), rgb(calc(min(1, 2))))",  # 4 deep
+    "RGB(1 2 3)", "VAR(--vx-accent)",
 ])
 def test_colors_allowed(color):
-    validate({"tags": [tag("x", color=color), *AUTO]})
+    for field in ("color", "textColor", "patternColor"):
+        validate({"tags": [tag("x", text="t", pattern="stripes", **{field: color}), *AUTO]})
+
+
+@pytest.mark.parametrize("color", [
+    "#ab", "#abcdef012", "re", "", " red", "red\n", "red; background: blue", "url(http://x)", "image-set(x)",
+    "rgb(1;x:expression(1))", "rgb(1, 2, 3", "rgb(1, 2, 3))", "rgb(1)(2)", "rgb(1) red", "red rgb(1)",
+    "calc(1 + 2)", "var(--other)", "var(--vx-a, red)", "rgb(var(--x))", "rgb(1 -- 2)", "rgb(v(1))",
+    "rgb(" + "1" * 156 + ")", "color-mix(in srgb, rgb(calc(min(max(1)))), red)",  # 5 deep
+    "rgb(1 2 3 / 'x')", "ſſſ", "rgb(1 2 3)\n", 5, True, ["red"],
+])
+def test_colors_refused(color):
+    assert not is_color(color)
+    for field in ("color", "textColor", "patternColor"):
+        with pytest.raises(SiteTagError) as err:
+            validate({"tags": [tag("x", text="t", pattern="checks", **{field: color}), *AUTO]})
+        assert err.value.field == field
 
 
 @pytest.mark.parametrize("fields, field", [
@@ -54,23 +95,41 @@ def test_colors_allowed(color):
     ({"name": "-dash"}, "name"),
     ({"name": "a" * 33}, "name"),
     ({"name": 5}, "name"),
+    ({"name": "ok\n"}, "name"),
     ({"label": ""}, "label"),
     ({"label": "x" * 41}, "label"),
     ({"label": None}, "label"),
     ({"drawn": "yes"}, "drawn"),
     ({"drawn": None}, "drawn"),
-    ({"color": "#abcde"}, "color"),
+    ({"color": "#ggg"}, "color"),
     ({"color": "var(--other)"}, "color"),
     ({"color": "re"}, "color"),
     ({"color": "url(http://x)"}, "color"),
     ({"color": "rgb(1;x:expression(1))"}, "color"),
-    ({"color": "rgb(" + "1" * 61 + ")"}, "color"),
     ({"color": "red; background: blue"}, "color"),
     ({"width": 7}, "width"),
     ({"width": 201}, "width"),
     ({"width": 24.5}, "width"),
     ({"width": True}, "width"),
     ({"height": "24"}, "height"),
+    ({"text": ""}, "text"),
+    ({"text": "   "}, "text"),
+    ({"text": "x" * 25}, "text"),
+    ({"text": 5}, "text"),
+    ({"text": "t", "textSize": 5}, "textSize"),
+    ({"text": "t", "textSize": 49}, "textSize"),
+    ({"text": "t", "textX": -101}, "textX"),
+    ({"text": "t", "textY": 101}, "textY"),
+    ({"text": "t", "textY": 1.5}, "textY"),
+    ({"text": "t", "textRotate": 181}, "textRotate"),
+    ({"text": "t", "textRotate": False}, "textRotate"),
+    ({"text": "t", "textColor": "url(x)"}, "textColor"),
+    ({"textColor": "url(x)"}, "textColor"),  # checked even when dropped
+    ({"pattern": "dots"}, "pattern"),
+    ({"pattern": ""}, "pattern"),
+    ({"pattern": "stripes", "patternSize": 1}, "patternSize"),
+    ({"pattern": "stripes", "patternSize": 41}, "patternSize"),
+    ({"pattern": "stripes", "patternColor": "var(--x)"}, "patternColor"),
 ])
 def test_refused_field_named(fields, field):
     with pytest.raises(SiteTagError) as err:
@@ -164,7 +223,7 @@ async def test_save_shape_and_serve(app, api, clean):
         body = r.json()
         assert [t["name"] for t in body["tags"]] == ["speedrun", "new", "updated", "compilation"]
         assert body["updatedBy"] == "api-key" and body["updatedAt"]
-        assert list(body["tags"][0]) == ["name", "label", "drawn", "color", "shape", "width", "height"]
+        assert list(body["tags"][0]) == ["name", "label", "drawn", "color", "shape", "width", "height", *TEXT, *PATTERN]
         assert body["tags"][0]["shape"] is None
         assert (await c.get("/admin/site/tags", headers=KEY)).json() == body
 
@@ -189,6 +248,15 @@ async def test_save_shape_and_serve(app, api, clean):
         assert stale.status_code == 200 and stale.headers["cache-control"] == "public, max-age=60"
         for missing in ("new.svg", "speedrun", "speedrun.png", "Speedrun.svg", "..%2Fx.svg"):
             assert (await api.get(f"/v1/site/tags/{missing}")).status_code == 404, missing
+
+
+async def test_older_list_reads_new_fields_as_null(app, api, clean):
+    async with get_sessionmaker()() as s:  # as saved before the text and pattern fields
+        s.add(SiteSetting(key="tags", value=[tag("old", color="red")] + AUTO, updated_by="api-key"))
+        await s.commit()
+    async with api:
+        [old, *_] = (await api.get("/v1/site/tags")).json()["tags"]
+    assert old == {**tag("old", color="red"), "shape": None, **dict.fromkeys(TEXT + PATTERN)}
 
 
 async def test_shape_refusals(app, clean):

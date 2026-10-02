@@ -47,7 +47,7 @@ RATE_LIMITED_PREFIXES = ("/vods", "/v1/", "/v2/")
 # many sheets at once, and a page can show up to 32 tag shapes.
 UNLIMITED_PREFIXES = ("/v1/previews/", "/v1/site/tags/")
 SITE_TAGS_TTL = 60  # /v1/site/tags; an admin's change shows within this
-SITE_TAG_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+SITE_TAG_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")  # fullmatch
 SERVICES = ("vods", "games", "emotes", "streams")
 
 
@@ -229,7 +229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """A tag's shape, cleaned by the worker when uploaded. Served so that even opened on its own it can't
         run or load anything; immutable when asked for by its current hash (the list's ``shape``)."""
         name = file.removesuffix(".svg")
-        if name == file or not SITE_TAG_NAME.match(name):
+        if name == file or not SITE_TAG_NAME.fullmatch(name):
             raise LegacyError(404, "Not found")
         async with engine.connect() as conn:
             found = await site_tags.shape(conn, name)
