@@ -20,6 +20,10 @@ services:
     build: { context: ., dockerfile: docker/api.Dockerfile }
     image: twitch-archive-api:latest
     env_file: [.env, secrets/api.env]
+    volumes:
+      # Read-only, for the seek-bar previews the worker makes (GET /v1/previews/...). The whole data dir, not
+      # just previews/: Docker would create a missing previews/ owned by root, which the worker can't write.
+      - ${ARCHIVE_HOST_DATA_DIR:-./data}:/data:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('ARCHIVE_API_PORT','3030'), timeout=5)\""]
       interval: 30s

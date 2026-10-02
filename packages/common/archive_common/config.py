@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     runner_concurrency: int = 3  # jobs run at once
     max_attempts: int = 3  # tries of a failing step before its job fails
 
+    # Seek-bar previews (archive_common.previews): made from each uploaded part after the upload; the
+    # previews_backfill job downloads older uploads from YouTube (video only, lowest sizes) for them.
+    previews: bool = True
+    previews_fetch_pause_seconds: int = 60  # between two backfill downloads
+    previews_ytdlp_args: list[str] = []  # extra yt-dlp arguments, e.g. ["--cookies", "/secrets/yt.txt"]
+
     # Chat from doomtp-bot's /log API into bot_logs (the bot_chat job); empty URL = off.
     doomtp_url: str = ""  # the bot's base URL, e.g. https://bot.example.net
     doomtp_login: str = ""  # channel login on the bot; empty = twitch_username
@@ -124,6 +130,10 @@ class Settings(BaseSettings):
     @property
     def live_dir(self) -> Path:
         return self.data_dir / "live"
+
+    @property
+    def previews_dir(self) -> Path:
+        return self.data_dir / "previews"
 
 
 @lru_cache

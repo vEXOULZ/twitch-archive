@@ -6,6 +6,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /bin/uv
+# yt-dlp (seek-bar previews backfill) needs a JavaScript runtime for YouTube.
+COPY --from=denoland/deno:bin-2.5.6 /deno /usr/local/bin/deno
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONUNBUFFERED=1
 
 WORKDIR /app

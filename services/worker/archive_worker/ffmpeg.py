@@ -10,7 +10,10 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
+
+from archive_common import previews as pv
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +109,29 @@ async def cut(src: Path, out: Path, start: float, duration: float | None = None,
             *(["-movflags", "+faststart"] if faststart else []),
         ],
     )
+
+
+async def preview_sheets(src: Path, out_dir: Path) -> int:
+    """Seek-bar sprite sheets of ``src`` into ``out_dir`` (``archive_common.previews`` has the layout); the
+    number of frames. Only keyframes are decoded (Twitch has one every 2 s), so a 1080p part takes a minute or
+    two. ``round=up`` takes, for each tile, the last frame at or before its time (``near`` would take one up to
+    half an interval late). The sheets go to ``<out_dir>.part`` first and replace ``out_dir`` whole."""
+    frames = pv.frame_count(await probe_duration(src))
+    tmp = out_dir.with_name(out_dir.name + ".part")
+    await asyncio.to_thread(shutil.rmtree, tmp, True)
+    tmp.mkdir(parents=True)
+    w, h = pv.WIDTH, pv.HEIGHT
+    vf = (f"fps=1/{pv.INTERVAL}:round=up,scale={w}:{h}:force_original_aspect_ratio=decrease,"
+          f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,tile={pv.COLS}x{pv.ROWS}")
+    try:
+        await _run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-skip_frame", "nokey",
+                    "-i", str(src), "-map", "0:v:0", "-vf", vf, "-frames:v", str(pv.sheet_count(frames)),
+                    "-q:v", "5", "-start_number", "0", str(tmp / "%d.jpg")])
+        await asyncio.to_thread(shutil.rmtree, out_dir, True)
+        os.replace(tmp, out_dir)
+    finally:
+        await asyncio.to_thread(shutil.rmtree, tmp, True)
+    return frames
 
 
 async def mute(src: Path, out: Path, ranges: list[tuple[float, float]]) -> Path:
