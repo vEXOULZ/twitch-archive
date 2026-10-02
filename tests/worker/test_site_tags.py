@@ -1,6 +1,8 @@
 """How the site shows VOD tags: the worker's admin routes save them, archive-api serves them (the routes
 need the dev DB)."""
 
+import datetime as dt
+
 import httpx
 import pytest
 from pydantic import SecretStr
@@ -8,7 +10,7 @@ from sqlalchemy import delete, func, select
 
 from archive_common.audit import AUDIT_LOG
 from archive_common.db import get_sessionmaker
-from archive_common.models import SiteSetting, SiteTagShape
+from archive_common.models import SiteSetting, SiteTagShape, Vod
 from archive_worker import jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.site_tags import SiteTagError, validate
@@ -261,3 +263,53 @@ async def test_session_needs_csrf(app, clean):
         r = await c.put("/admin/site/tags/new/shape", headers={"content-type": "image/svg+xml"}, content=STAR)
         assert r.status_code == 403
         assert (await c.delete("/admin/site/tags/new/shape")).status_code == 403
+
+
+# ── Tagging a VOD with the site's tags ────────────────────────────────────
+
+TAGGED = "site-tags-test"
+
+
+@pytest.fixture
+async def vod(clean):
+    async def drop():
+        async with get_sessionmaker()() as s:
+            await s.execute(delete(Vod).where(Vod.id == TAGGED))
+            await s.commit()
+
+    await drop()
+    async with get_sessionmaker()() as s:
+        s.add(Vod(id=TAGGED, title="t", created_at=dt.datetime.now(dt.timezone.utc), duration="01:00:00"))
+        await s.commit()
+    yield TAGGED
+    await drop()
+
+
+async def test_vod_takes_the_sites_tags(app, vod):
+    async def patch(c, tags, v2=False):
+        if v2:
+            return await c.patch(f"/api/v2/vods/{vod}", headers=KEY, json={"tags": tags})
+        return await c.patch(f"/admin/vods/{vod}", headers=KEY, json={"tags": tags})
+
+    async with client(app) as c:
+        # Never saved: only the built-in compilation.
+        r = await patch(c, ["complete"])
+        assert r.status_code == 400 and r.json()["msg"] == "unknown tag(s) complete; known: compilation"
+        assert (await patch(c, ["compilation"])).status_code == 200
+
+        await c.put("/admin/site/tags", headers=KEY, json={"tags": [tag("complete"), tag("speedrun"), *AUTO]})
+        r = await patch(c, ["Complete", "compilation"])
+        assert r.status_code == 200, r.text
+        assert (await c.get(f"/admin/vods/{vod}", headers=KEY)).json()["tags"] == ["compilation", "complete"]
+        r = await patch(c, ["speedrun"], v2=True)
+        assert r.status_code == 200 and r.json()["tags"] == ["speedrun"]
+        for computed in ("new", "updated"):  # the site works these out; a VOD never stores them
+            r = await patch(c, [computed])
+            assert r.status_code == 400 and "unknown tag(s)" in r.json()["msg"]
+        r = await patch(c, ["nope"], v2=True)
+        assert r.status_code == 422 and "known: compilation, complete, speedrun" in r.json()["detail"]
+
+        # A tag the site's list drops stays allowed on the VOD that has it, and only there.
+        await c.put("/admin/site/tags", headers=KEY, json={"tags": AUTO})
+        assert (await patch(c, ["speedrun", "compilation"])).status_code == 200
+        assert (await patch(c, ["complete"])).status_code == 400

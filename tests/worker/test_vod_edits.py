@@ -46,6 +46,9 @@ def test_vod_fields_refused(body, message):
 def test_tags():
     assert vod_edits.vod_fields({"tags": [" Compilation", "compilation"]}) == {"tags": ["compilation"]}
     assert vod_edits.vod_fields({"tags": []}) == {"tags": []}
+    assert vod_edits.tags(["Complete", "x"], ("x", "complete")) == ["complete", "x"]
+    with pytest.raises(ValueError, match=re.escape("unknown tag(s) compilation; known: complete")):
+        vod_edits.vod_fields({"tags": ["compilation"]}, ("complete",))
     for value, message in (("compilation", "list of strings"), ([1], "list of strings"),
                            (["nope"], "unknown tag(s) nope; known: compilation")):
         with pytest.raises(ValueError, match=re.escape(message)):

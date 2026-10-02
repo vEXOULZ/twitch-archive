@@ -897,6 +897,7 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
             "stream_id": vod.stream_id,
             "hidden": vod.hidden,
             "merged_into": vod.merged_into,
+            "tags": list(vod.tags or []),
         }
 
     def fields_json(vod: Vod, keys) -> dict:
@@ -932,10 +933,11 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
 
     @app.patch("/admin/vods/{vod_id}", dependencies=auth)
     async def patch_vod(vod_id: str, request: Request, body: dict = Body(...)) -> dict:
-        """Any of ``title``, ``hidden``, ``thumbnailUrl`` (null: the default), ``duration`` (HH:MM:SS) and
-        ``createdAt`` (ISO). A merged VOD takes only ``hidden``. Audited with the fields before and after."""
-        values = edited(vod_edits.vod_fields, body)
+        """Any of ``title``, ``hidden``, ``thumbnailUrl`` (null: the default), ``duration`` (HH:MM:SS),
+        ``createdAt`` (ISO) and ``tags`` (the site's, site_tags.vod_tags). A merged VOD takes only ``hidden``
+        and ``tags``. Audited with the fields before and after."""
         vod = await require_vod(vod_id)
+        values = edited(vod_edits.vod_fields, body, await known_tags(vod) if "tags" in body else ())
         if set(body) - vod_edits.MERGED_EDITABLE:
             refuse_merged(vod, "contents")
         if "duration" in values:
@@ -946,6 +948,10 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
         after = await admin_vod(vod.id)
         request.state.audit_detail = {"before": before, "after": fields_json(await require_vod(vod.id), body)}
         return after
+
+    async def known_tags(vod: Vod) -> tuple[str, ...]:
+        async with get_sessionmaker()() as s:
+            return await site_tags.vod_tags(s, vod.tags)
 
     async def check_fits(vod: Vod, seconds: float) -> None:
         """A new duration must still hold the VOD's chapters and games rows."""
