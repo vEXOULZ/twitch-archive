@@ -24,9 +24,12 @@ from archive_common.models import BotLog, Vod
 from ..context import JobContext, StepError
 from ..events import iso_utc
 from ..vods import notify_rows_moved, resequence_bot_logs, splice_reason
-from .metadata import CHAT_BATCH, DEFAULT_COLOR, vod_duration
+from .metadata import DEFAULT_COLOR, vod_duration
 
 REDEMPTION_MATCH_S = 10  # a redeem's message and its redemption notice, this close together
+# _upsert inlines every value of every row as a bind parameter, and one statement takes at most
+# 32767 of them. (The chat step's executemany has no such limit, so CHAT_BATCH is too big here.)
+BOT_BATCH = 32767 // len(BotLog.__table__.columns)
 
 
 def _ms(value: dt.datetime) -> int:
@@ -207,8 +210,8 @@ async def read_vod(ctx: JobContext, vod: Vod) -> None:
 
     inserted = changed = 0
     async with get_sessionmaker()() as s:
-        for i in range(0, len(rows), CHAT_BATCH):
-            written = (await s.execute(_upsert(rows[i : i + CHAT_BATCH]))).scalars().all()
+        for i in range(0, len(rows), BOT_BATCH):
+            written = (await s.execute(_upsert(rows[i : i + BOT_BATCH]))).scalars().all()
             changed += len(written)
             inserted += sum(written)
         if changed:

@@ -410,6 +410,16 @@ async def test_monitor_starts_bot_chat_when_the_stream_ends(vod, settings):
             await s.commit()
 
 
+async def test_a_full_batch_fits_in_one_statement(vod):
+    # Job 1067: a long VOD's 2500-row batch was ~37,500 bind parameters, past Postgres' 32767.
+    looks: dict = {}
+    rows = [step.to_row(_message(f"m{i}", i), VOD, START, looks) for i in range(step.BOT_BATCH)]
+    async with get_sessionmaker()() as s:
+        written = (await s.execute(step._upsert(rows))).scalars().all()
+        await s.commit()
+    assert len(written) == step.BOT_BATCH and all(written)
+
+
 @respx.mock
 async def test_payload_duration_bounds_the_read(vod, make_ctx):
     respx.get(f"{LOG_URL}/coverage").mock(return_value=httpx.Response(200, json={}))
