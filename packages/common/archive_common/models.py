@@ -322,3 +322,27 @@ class RuntimeSetting(Base):
     value: Mapped[Any] = mapped_column(JSONB, nullable=False)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_by: Mapped[str | None] = mapped_column(Text)  # the Twitch login, or password / api-key
+
+
+class SiteSetting(Base):
+    """A setting of the site (vods.vexoulz.net) edited from its admin pages (Alembic 0018); ``tags``:
+    how each VOD tag shows (see site_tags)."""
+
+    __tablename__ = "site_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_by: Mapped[str | None] = mapped_column(Text)  # the Twitch login, or password / api-key
+
+
+class SiteTagShape(Base):
+    """A site tag's uploaded SVG, cleaned (Alembic 0018). Goes with its tag's name: a tag no longer
+    listed loses it."""
+
+    __tablename__ = "site_tag_shapes"
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    svg: Mapped[str] = mapped_column(Text, nullable=False)
+    hash: Mapped[str] = mapped_column(Text, nullable=False)  # of ``svg``, the shape URL's ?v=
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

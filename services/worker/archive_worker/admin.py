@@ -32,6 +32,7 @@ from vex_platform.actor import SYSTEM, Actor
 from vex_platform.api import ApiError
 
 from archive_common import http
+from archive_common import site_tags as site_tags_common
 from archive_common.audit import AUDIT_LOG, actor_of, legacy_actor, route_entry
 from archive_common.audit import write as write_audit
 from archive_common.db import get_sessionmaker
@@ -39,7 +40,7 @@ from archive_common.models import Emote, Game, Log, Stream, Vod
 from archive_common.serialize import EMOTES, GAMES, box_art_template, duration_seconds, vod_json
 from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds, parse_helix_duration
 
-from . import api_v2, api_v2_routes, jobs, splices, vod_edits, youtube
+from . import api_v2, api_v2_routes, jobs, site_tags, splices, svg_clean, vod_edits, youtube
 from .admin_auth import (
     CSRF_HEADER,
     SESSION_COOKIE,
@@ -318,8 +319,10 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
         if isinstance(body, dict):
             body = {k: v for k, v in body.items() if k != "password"}
         detail = getattr(request.state, "audit_detail", None)
-        target = None
-        if "vod_id" in params:
+        target = getattr(request.state, "audit_target", None)  # set by routes whose params don't say it
+        if target is not None:
+            pass
+        elif "vod_id" in params:
             target = f"vod:{params['vod_id']}"
         elif "job_id" in params:
             target = f"job:{params['job_id']}"
@@ -623,6 +626,62 @@ def create_admin_app(deps: Deps, service: jobs.JobService, signin: AuthClient | 
         request.state.audit_detail = {"before": before, "after": after}
         service.apply_settings()
         return settings_json()
+
+    # ── Site tags (how vods.vexoulz.net shows each VOD tag; archive-api serves them) ──
+
+    async def site_tags_view() -> dict:
+        async with get_sessionmaker()() as s:
+            return site_tags.view(await site_tags_common.load(s))
+
+    async def site_tags_change(pending) -> tuple[dict, dict]:
+        """The audit detail (before and after; never the SVG) and the GET body."""
+        try:
+            before, after, view = await pending
+        except site_tags.SiteTagError as exc:
+            raise AdminError(exc.status, exc.msg, extra={"tag": exc.tag, "field": exc.field}
+                             if exc.status == 400 else None) from None
+        return {"before": before, "after": after}, view
+
+    @app.get("/admin/site/tags", dependencies=auth)
+    async def get_site_tags() -> dict:
+        """The tags in display order, with when and by whom they were last saved."""
+        return await site_tags_view()
+
+    @app.put("/admin/site/tags", dependencies=auth)
+    async def put_site_tags(request: Request, body: Any = Body(...)) -> dict:
+        """``{"tags": [...]}``: the whole list, or nothing when a tag is refused. A tag no longer listed
+        loses its shape; ``shape`` in the body is ignored (PUT .../{tag}/shape sets it)."""
+        try:
+            tags = site_tags.validate(body)
+        except site_tags.SiteTagError as exc:
+            raise AdminError(400, exc.msg, extra={"tag": exc.tag, "field": exc.field}) from None
+        request.state.audit_target = "site:tags"
+        request.state.audit_detail, view = await site_tags_change(site_tags.save(tags, changed_by(request)))
+        return view
+
+    @app.put("/admin/site/tags/{tag}/shape", dependencies=auth)
+    async def put_site_tag_shape(tag: str, request: Request) -> dict:
+        """The tag's shape: the raw SVG (``content-type: image/svg+xml``), cleaned (svg_clean.py)."""
+        media = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if media != "image/svg+xml":
+            raise AdminError(415, "Send the SVG as content-type: image/svg+xml")
+        raw = await request.body()
+        if len(raw) > site_tags_common.SHAPE_MAX_BYTES:
+            raise AdminError(413, f"The SVG is over {site_tags_common.SHAPE_MAX_BYTES // 1024} KB")
+        try:
+            svg = svg_clean.clean(raw)
+        except svg_clean.UnsafeSvg as exc:
+            raise AdminError(400, f"Refused SVG: {exc}") from None
+        request.state.audit_target = f"site-tag:{tag}"
+        request.state.audit_detail, view = await site_tags_change(site_tags.set_shape(tag, svg))
+        return view
+
+    @app.delete("/admin/site/tags/{tag}/shape", dependencies=auth)
+    async def delete_site_tag_shape(tag: str, request: Request) -> dict:
+        """No shape: the site draws the tag's label only."""
+        request.state.audit_target = f"site-tag:{tag}"
+        request.state.audit_detail, view = await site_tags_change(site_tags.set_shape(tag, None))
+        return view
 
     # ── Storage ───────────────────────────────────────────────────────────
 

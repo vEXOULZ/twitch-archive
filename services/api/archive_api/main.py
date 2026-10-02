@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 
 import httpx
@@ -21,6 +22,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from archive_common import logs
 from archive_common import previews as pv
+from archive_common import site_tags
 from archive_common.config import Settings, get_settings
 from archive_common.db import get_engine
 from archive_common.http import close_client
@@ -41,8 +43,11 @@ log = logging.getLogger("archive_api")
 
 # Legacy: the limiter covered /vods and the custom routes, not /games /emotes /streams.
 RATE_LIMITED_PREFIXES = ("/vods", "/v1/", "/v2/")
-# Seek-bar sheets are static and cached for good; hovering a long VOD's bar asks for many at once.
-UNLIMITED_PREFIXES = ("/v1/previews/",)
+# Seek-bar sheets and tag shapes are static and cached for good; hovering a long VOD's bar asks for
+# many sheets at once, and a page can show up to 32 tag shapes.
+UNLIMITED_PREFIXES = ("/v1/previews/", "/v1/site/tags/")
+SITE_TAGS_TTL = 60  # /v1/site/tags; an admin's change shows within this
+SITE_TAG_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 SERVICES = ("vods", "games", "emotes", "streams")
 
 
@@ -55,6 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     badges_cache = ResponseCache(3600, maxsize=4)
     status_cache = ResponseCache(45, maxsize=1)
     # A complete emote list is kept for hours; one with a failed provider is retried sooner.
+    site_tags_cache = ResponseCache(SITE_TAGS_TTL if settings.cache_ttl_seconds else 0, maxsize=1)
     emotes_cache, emotes_partial_cache = ResponseCache(6 * 3600, maxsize=1), ResponseCache(300, maxsize=1)
     limiter = RateLimiter(settings.rate_limit_points, settings.rate_limit_window_seconds)
     helix = Helix(settings)
@@ -202,6 +208,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise LegacyError(404, "Not found")
         return FileResponse(path, media_type="image/jpeg",
                             headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+    # ── Site tags (how vods.vexoulz.net shows each VOD tag; the worker's admin routes save them) ──
+
+    @app.get("/v1/site/tags")
+    async def site_tag_list(request: Request):
+        async def fetch() -> dict:
+            async with engine.connect() as conn:
+                loaded = await site_tags.load(conn)
+            if loaded is None:
+                raise LegacyError(404, "The site tags were never saved")
+            return {"tags": loaded["tags"]}
+
+        response = (await site_tags_cache.get_or_render("tags", fetch)).response(request)
+        response.headers["Cache-Control"] = f"public, max-age={SITE_TAGS_TTL}"
+        return response
+
+    @app.get("/v1/site/tags/{file}")
+    async def site_tag_shape(file: str, v: str | None = None):
+        """A tag's shape, cleaned by the worker when uploaded. Served so that even opened on its own it can't
+        run or load anything; immutable when asked for by its current hash (the list's ``shape``)."""
+        name = file.removesuffix(".svg")
+        if name == file or not SITE_TAG_NAME.match(name):
+            raise LegacyError(404, "Not found")
+        async with engine.connect() as conn:
+            found = await site_tags.shape(conn, name)
+        if found is None:
+            raise LegacyError(404, "Not found")
+        svg, digest = found
+        cache = "public, max-age=31536000, immutable" if v == digest else f"public, max-age={SITE_TAGS_TTL}"
+        return Response(svg, media_type="image/svg+xml", headers={
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": cache,
+        })
 
     # ── Chat replay ───────────────────────────────────────────────────────
 

@@ -25,14 +25,15 @@ GRANT USAGE ON SCHEMA public TO archive_api, archive_worker;
 
 -- archive-api: read only, and only the tables the public API serves.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM archive_api;
-GRANT SELECT ON vods, games, emotes, logs, bot_logs, streams, vod_segments TO archive_api;
+GRANT SELECT ON vods, games, emotes, logs, bot_logs, streams, vod_segments, site_settings, site_tag_shapes
+    TO archive_api;
 
 -- archive-worker: DML on the app tables (no DDL).
 GRANT SELECT, INSERT, UPDATE, DELETE ON vods, games, emotes, logs, bot_logs, streams, jobs, app_state, job_events,
     vod_splices, vod_splice_logs, vod_splice_bot_logs, vod_segments TO archive_worker;
 -- The audit log is append-only for the worker.
 GRANT SELECT, INSERT ON admin_audit TO archive_worker;
-GRANT SELECT, INSERT, UPDATE, DELETE ON admin_sessions, settings TO archive_worker;
+GRANT SELECT, INSERT, UPDATE, DELETE ON admin_sessions, settings, site_settings, site_tag_shapes TO archive_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO archive_worker;
 
 -- vex-platform (Alembic 0012). audit_log is append-only too. The jobs schema is procrastinate's queue

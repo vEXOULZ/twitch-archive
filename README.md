@@ -327,6 +327,22 @@ curl -s "${H[@]}" -X DELETE "$A/admin/settings/keep_hls"   # back to the env val
 - **`applies`:** `now` settings are read on every use: the monitor's next check (`vod_download`, `live_record`, `monitor_interval_seconds`), the runner's next pick (`runner_concurrency`, `max_attempts`), the next step boundary (`manual_steps`) and the next token refresh (`youtube_keepalive_hours`). `next job` settings are read when a job starts or resumes, so a running job finishes with what it started with.
 - Both changes are audited with `{before, after}`. Secrets, keys, URLs, paths, the channel and the database are never editable here.
 
+### Site tags
+
+How [vods.vexoulz.net](https://vods.vexoulz.net) shows each VOD tag (its `/manage/tags` page edits them; archive-api serves them, [§6](#6-public-api-reference)). They are kept in the database (`site_settings`, `site_tag_shapes`).
+
+```bash
+curl -s "${H[@]}" "$A/admin/site/tags"                  # {tags, updatedAt, updatedBy}; never saved: tags [] and nulls
+curl -s "${H[@]}" -X PUT "$A/admin/site/tags" -d @tags.json   # {"tags": [...]}: the whole list, in order, all or none
+curl -s "${H[@]}" -X PUT "$A/admin/site/tags/speedrun/shape" -H 'Content-Type: image/svg+xml' --data-binary @speedrun.svg
+curl -s "${H[@]}" -X DELETE "$A/admin/site/tags/speedrun/shape"
+```
+
+- A tag is `{name, label, drawn, color, shape, width, height}`. `name`: `^[a-z0-9][a-z0-9-]{0,31}$`, unique. `label`: 1–40 characters. `drawn`: `true`/`false`. `color`: `null`, `#rgb` to `#rrggbbaa`, `var(--vx-…)`, a color name (3–20 letters) or `rgb()`/`rgba()`/`hsl()`/`hsla()`/`oklch()` (up to 60 characters inside). `width`/`height`: `null` or a whole number of px, 8–200. `shape` is `v1/site/tags/{name}.svg?v=<hash>` or `null`; it is ignored in a `PUT` (the shape routes set it). Unknown fields are dropped.
+- At most 32 tags, and `new`, `updated` and `compilation` (set automatically) must stay in the list. A refused list changes nothing: `400 {error, msg, tag, field}` names the first refused tag and field. A tag no longer in the list loses its shape.
+- **Shapes:** the raw SVG, at most 64 KB (`413`), as `Content-Type: image/svg+xml` (`415`), for a tag of the saved list (`404`). It is parsed with [defusedxml](https://pypi.org/project/defusedxml/) and rebuilt from an allow-list of shape elements and attributes. A `400` refuses `<script>`, `<foreignObject>`, `<iframe>`, `<image>` (embedded or linked rasters), `<a>`, animations, `on*` handlers, DOCTYPE and entities, an `href` that isn't `#id`, `url()` that isn't `url(#id)`, `@import` and `javascript:`. Editor metadata, other namespaces and comments are dropped.
+- Every route answers like `GET`. Changes are audited with `{before, after}` (the tag list, or the tag with its `shape` path; never the SVG) on target `site:tags` or `site-tag:<name>`.
+
 ### Storage
 
 Every job works in one folder of the data directory: `vods/<vodId>`, or `live/<streamId>` for a live recording. Files are normally deleted after upload; what is left is what `ARCHIVE_KEEP_HLS`/`KEEP_MP4` keep, jobs still in progress, and leftovers of failed jobs or deleted VODs.
@@ -601,6 +617,8 @@ This is what the frontend uses. The output is compatible with the old Feathers A
 | `GET /v1/status` | `{live, stream, vod}`. Live: `stream` is `{id, started_at, title, game: {name, gameId, image, imageTemplate} \| null}` and `vod` is the VOD row of that stream (`null` until the worker has created it). Offline: `stream` is `null` and `vod` is the latest VOD. `vod` has the usual `/vods` fields. Live state comes from `streams.is_live`; title and category from Helix when credentials are set, else from the VOD's title and last chapter. Cached for 45 s. |
 | `GET /v1/emotes/third-party` | `{"7tv": [...], "bttv": [...], "ffz": [...], "failed": [...]}`, each item `{id, code, provider}`: global plus channel emotes for `ARCHIVE_TWITCH_ID` from the providers' APIs (a channel emote replaces a global one with the same code). Build image URLs from the CDNs: `cdn.7tv.app/emote/{id}/1x.webp`, `cdn.betterttv.net/emote/{id}/1x`, `cdn.frankerfacez.com/emote/{id}/1`. A provider that failed is named in `failed` (its list holds whatever part loaded). Cached for 6 h, or 5 min when something failed. |
 | `GET /v1/previews/:youtubeId/:k.jpg` | Sheet `k` of an upload's seek-bar previews (see [Seek-bar previews](#seek-bar-previews); the layout is in the upload's `youtube[].preview`). 404 unless a VOD the API shows lists that upload. `Cache-Control: public, max-age=31536000, immutable`. Not rate limited. The api container reads the sheets from the data dir, mounted read-only. |
+| `GET /v1/site/tags` | `{tags: [{name, label, drawn, color, shape, width, height}]}`: how the site shows each VOD tag, in order (see [Site tags](#site-tags)); 404 until it was saved once (the site then uses its defaults). `Cache-Control: public, max-age=60`. |
+| `GET /v1/site/tags/:name.svg` | A tag's shape: the cleaned SVG as `image/svg+xml`, with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox` and `X-Content-Type-Options: nosniff`. `Cache-Control: public, max-age=31536000, immutable` when `?v=` is the current hash (as in the list's `shape`), `max-age=60` otherwise. 404 when the tag has no shape. Not rate limited. |
 | `youtube[].preview` | On uploads that have seek-bar previews: `{v, interval, w, h, cols, rows, count}`; absent otherwise. |
 | `chapters[].imageTemplate` | On every chapter in `/vods` (and in `vod`s embedded elsewhere): the box art with `{width}x{height}` in place of the stored `40x53`, like Helix's `box_art_url`. `image` is unchanged. |
 | `chapters[].length` | Same value as `end`, which holds the chapter's length in seconds, not its end time. |
@@ -616,7 +634,7 @@ Examples: `/vods?$limit=20&$sort[createdAt]=-1`, `/vods?title[$iLike]=%25zelda%2
 
 **Differences from the old API:** `$select` now works (it used to return a 500), `/v2/badges` now works, and the `chapters[name]` input is escaped and combines with other filters.
 
-Rate limit: 20 requests per 5 s per IP on `/vods`, `/v1/*` (except `/v1/previews/*`) and `/v2/*`. Responses carry `X-RateLimit-*` headers, and a request over the limit gets a 429.
+Rate limit: 20 requests per 5 s per IP on `/vods`, `/v1/*` (except `/v1/previews/*` and `/v1/site/tags/*`) and `/v2/*`. Responses carry `X-RateLimit-*` headers, and a request over the limit gets a 429.
 
 ---
 
