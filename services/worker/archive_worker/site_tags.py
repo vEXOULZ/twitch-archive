@@ -18,10 +18,12 @@ from archive_common.models import SiteSetting, SiteTagShape
 
 from .events import iso_utc
 from .svg_clean import digest
+from .vod_edits import KNOWN_TAGS
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 LABEL_MAX = 40
 SIZE_MIN, SIZE_MAX = 8, 200
+COMPUTED = ("new", "updated")  # the site works these out (from dates): never stored on a VOD
 COLOR = re.compile(
     r"^(#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
     r"|var\(--vx-[a-z0-9-]+\)"
@@ -133,3 +135,12 @@ async def set_shape(name: str, svg: str | None) -> tuple[Any, Any, dict[str, Any
         after = await site_tags.load(s)
         await s.commit()
     return before, _tag(after, name), view(after)
+
+
+async def vod_tags(s, keep: Any = ()) -> tuple[str, ...]:
+    """The tags a VOD can be given: the site's list, less the ones it works out itself (``new``,
+    ``updated``), or ``vod_edits.KNOWN_TAGS`` while the list was never saved. ``keep``: the VOD's own
+    tags, which stay allowed after the site's list drops them."""
+    loaded = await site_tags.load(s)
+    names = KNOWN_TAGS if loaded is None else [t["name"] for t in loaded["tags"] if t["name"] not in COMPUTED]
+    return tuple(sorted({*names, *(keep or ())}))

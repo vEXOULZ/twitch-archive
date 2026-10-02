@@ -34,6 +34,7 @@ from archive_common.timeutil import hhmmss_to_seconds
 
 from . import compose
 from .compose import ComposeError, Source
+from .site_tags import vod_tags
 from .vod_edits import tags as check_tags
 
 log = logging.getLogger(__name__)
@@ -163,8 +164,8 @@ async def create(vod_id: str, segments: list[Segment], *, title: str | None = No
                  tags: Any = ()) -> dict[str, Any]:
     """A new synthetic VOD; ``title`` defaults to the first source's."""
     _composed(compose.check_id, vod_id)
-    tags = _composed(check_tags, list(tags))
     async with get_sessionmaker()() as s, s.begin():
+        tags = _composed(check_tags, list(tags), await vod_tags(s))
         if await s.get(Vod, vod_id) is not None:
             raise SyntheticError(409, f"There is already a VOD {vod_id}", vodId=vod_id)
         sources = await _checked(s, vod_id, segments, supersedes)
@@ -182,10 +183,10 @@ async def create(vod_id: str, segments: list[Segment], *, title: str | None = No
 async def change(vod_id: str, *, segments: list[Segment] | None = None, title: str | None = None,
                  supersedes: bool | None = None, tags: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Change what is given; returns the synthetic VOD (as ``synthetic_json``) before and after."""
-    if tags is not None:
-        tags = _composed(check_tags, tags)
     async with get_sessionmaker()() as s, s.begin():
         vod = await _locked(s, vod_id)
+        if tags is not None:
+            tags = _composed(check_tags, tags, await vod_tags(s, vod.tags))
         old = await _segments(s, vod_id)
         before = synthetic_json(vod, old)
         new = old if segments is None else segments

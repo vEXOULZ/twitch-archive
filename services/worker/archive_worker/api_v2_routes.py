@@ -43,7 +43,7 @@ from archive_common.segments import Segment
 from archive_common.serialize import duration_seconds, not_hidden, not_merged_away, real, tagged
 from archive_common.timeutil import hhmmss_to_seconds
 
-from . import compose, splices, synthetic, vod_edits
+from . import compose, site_tags, splices, synthetic, vod_edits
 from .runtime_settings import RuntimeSettings
 from .storage import Storage, StorageError
 from .vods import notify_rows_moved
@@ -318,14 +318,15 @@ def vods_router(auth: Auth) -> APIRouter:
     async def update_vod(request: Request, vod_id: str, patch: VodPatch) -> VodDetail:
         """Audited as ``vod.update`` with the fields sent, before and after."""
         sent = patch.model_dump(include=patch.model_fields_set)
-        try:
-            values = vod_edits.vod_fields({_V1_FIELDS.get(k, k): v for k, v in sent.items()})
-        except ValueError as exc:
-            raise ApiError(422, "invalid_vod", str(exc)) from None
         async with get_sessionmaker()() as s:
             vod = await s.get(Vod, vod_id, with_for_update=True)
             if vod is None:
                 raise ApiError(404, "vod_not_found", f"no VOD {vod_id}")
+            known = await site_tags.vod_tags(s, vod.tags) if "tags" in sent else ()
+            try:
+                values = vod_edits.vod_fields({_V1_FIELDS.get(k, k): v for k, v in sent.items()}, known)
+            except ValueError as exc:
+                raise ApiError(422, "invalid_vod", str(exc)) from None
             if vod.merged_into is not None and set(sent) - vod_edits.MERGED_EDITABLE:
                 raise ApiError(409, "vod_merged", f"{vod.id} was merged into {vod.merged_into.get('id')}; its "
                                                   "contents are that VOD's now. Undo the merge first")
