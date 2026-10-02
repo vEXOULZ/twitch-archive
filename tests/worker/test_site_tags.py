@@ -1,0 +1,263 @@
+"""How the site shows VOD tags: the worker's admin routes save them, archive-api serves them (the routes
+need the dev DB)."""
+
+import httpx
+import pytest
+from pydantic import SecretStr
+from sqlalchemy import delete, func, select
+
+from archive_common.audit import AUDIT_LOG
+from archive_common.db import get_sessionmaker
+from archive_common.models import SiteSetting, SiteTagShape
+from archive_worker import jobs
+from archive_worker.admin import create_admin_app
+from archive_worker.site_tags import SiteTagError, validate
+
+KEY = {"Authorization": "Bearer k"}
+SVG = {"content-type": "image/svg+xml", **KEY}
+STAR = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+        b'<path d="M12 2L15 9H22L16 14L18 21L12 17L6 21L8 14L2 9H9Z"/></svg>')
+
+
+def tag(name: str, **fields) -> dict:
+    return {"name": name, "label": name.title(), "drawn": False, "color": None, "width": None, "height": None,
+            **fields}
+
+
+AUTO = [tag("new"), tag("updated"), tag("compilation")]
+
+
+# ── Validation ────────────────────────────────────────────────────────────
+
+
+def test_validate_keeps_order_and_known_fields():
+    body = {"tags": [tag("speedrun", label="Speedrun!", drawn=True, color="#ff8800cc", width=24, height=200,
+                         shape="v1/site/tags/speedrun.svg?v=x", extra=1), *AUTO]}
+    out = validate(body)
+    assert [t["name"] for t in out] == ["speedrun", "new", "updated", "compilation"]
+    assert out[0] == {"name": "speedrun", "label": "Speedrun!", "drawn": True, "color": "#ff8800cc",
+                      "width": 24, "height": 200}
+
+
+@pytest.mark.parametrize("color", [
+    None, "#abc", "#abcd", "#aabbcc", "#aabbccdd", "var(--vx-accent)", "red", "rebeccapurple",
+    "rgb(1, 2, 3)", "rgba(1 2 3 / 50%)", "hsl(120deg 50% 50%)", "oklch(70% 0.1 200)",
+])
+def test_colors_allowed(color):
+    validate({"tags": [tag("x", color=color), *AUTO]})
+
+
+@pytest.mark.parametrize("fields, field", [
+    ({"name": "Upper"}, "name"),
+    ({"name": "-dash"}, "name"),
+    ({"name": "a" * 33}, "name"),
+    ({"name": 5}, "name"),
+    ({"label": ""}, "label"),
+    ({"label": "x" * 41}, "label"),
+    ({"label": None}, "label"),
+    ({"drawn": "yes"}, "drawn"),
+    ({"drawn": None}, "drawn"),
+    ({"color": "#abcde"}, "color"),
+    ({"color": "var(--other)"}, "color"),
+    ({"color": "re"}, "color"),
+    ({"color": "url(http://x)"}, "color"),
+    ({"color": "rgb(1;x:expression(1))"}, "color"),
+    ({"color": "rgb(" + "1" * 61 + ")"}, "color"),
+    ({"color": "red; background: blue"}, "color"),
+    ({"width": 7}, "width"),
+    ({"width": 201}, "width"),
+    ({"width": 24.5}, "width"),
+    ({"width": True}, "width"),
+    ({"height": "24"}, "height"),
+])
+def test_refused_field_named(fields, field):
+    with pytest.raises(SiteTagError) as err:
+        validate({"tags": [*AUTO, {**tag("speedrun"), **fields}]})
+    assert (err.value.status, err.value.field) == (400, field)
+    named = fields.get("name", "speedrun")
+    assert err.value.tag == (named if isinstance(named, str) else None)
+    assert err.value.msg.startswith("tags[3]") and f".{field}:" in err.value.msg
+
+
+@pytest.mark.parametrize("missing", ["new", "updated", "compilation"])
+def test_auto_tags_required(missing):
+    with pytest.raises(SiteTagError, match=missing) as err:
+        validate({"tags": [t for t in AUTO if t["name"] != missing]})
+    assert (err.value.tag, err.value.field) == (missing, "name")
+
+
+@pytest.mark.parametrize("body", [None, [], {"tags": "x"}, {"tags": [*AUTO, "x"]}, {}])
+def test_not_a_list_of_tags(body):
+    with pytest.raises(SiteTagError):
+        validate(body)
+
+
+def test_limits():
+    validate({"tags": [*AUTO, *(tag(f"t{i}") for i in range(29))]})  # 32
+    with pytest.raises(SiteTagError, match="at most 32"):
+        validate({"tags": [*AUTO, *(tag(f"t{i}") for i in range(30))]})
+    with pytest.raises(SiteTagError, match="listed twice") as err:
+        validate({"tags": [*AUTO, tag("new")]})
+    assert (err.value.tag, err.value.field) == ("new", "name")
+
+
+# ── The routes ────────────────────────────────────────────────────────────
+
+
+async def _clear():
+    async with get_sessionmaker()() as s:
+        await s.execute(delete(SiteTagShape))
+        await s.execute(delete(SiteSetting).where(SiteSetting.key == "tags"))
+        await s.commit()
+
+
+@pytest.fixture
+async def clean(db):
+    await _clear()
+    async with get_sessionmaker()() as s:
+        audit_after = (await s.execute(select(func.max(AUDIT_LOG.c.id)))).scalar() or 0
+    yield audit_after
+    await _clear()
+    async with get_sessionmaker()() as s:
+        await s.execute(delete(AUDIT_LOG).where(AUDIT_LOG.c.id > audit_after))
+        await s.commit()
+
+
+@pytest.fixture
+def app(deps, clean):
+    deps.settings.admin_api_key = SecretStr("k")
+    deps.settings.admin_password = SecretStr("pw")
+    return create_admin_app(deps, jobs.JobService.create(deps))  # never opened: nothing here runs a job
+
+
+def client(app) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://admin")
+
+
+async def _audit(after: int) -> list:
+    c = AUDIT_LOG.c
+    async with get_sessionmaker()() as s:
+        return (await s.execute(
+            select(AUDIT_LOG).where(c.id > after, c.action.like("site.%")).order_by(c.id)
+        )).all()
+
+
+async def test_never_saved(app, api, clean):
+    async with client(app) as c:
+        assert (await c.get("/admin/site/tags")).status_code == 403
+        assert (await c.get("/admin/site/tags", headers=KEY)).json() == {"tags": [], "updatedAt": None,
+                                                                         "updatedBy": None}
+        r = await c.put("/admin/site/tags/new/shape", headers=SVG, content=STAR)
+        assert r.status_code == 404 and r.json()["error"] is True
+    async with api:
+        assert (await api.get("/v1/site/tags")).status_code == 404
+        assert (await api.get("/v1/site/tags/new.svg")).status_code == 404
+
+
+async def test_save_shape_and_serve(app, api, clean):
+    tags = [tag("speedrun", drawn=True, color="var(--vx-gold)", width=20, height=20), *AUTO]
+    async with client(app) as c:
+        r = await c.put("/admin/site/tags", headers=KEY, json={"tags": tags})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [t["name"] for t in body["tags"]] == ["speedrun", "new", "updated", "compilation"]
+        assert body["updatedBy"] == "api-key" and body["updatedAt"]
+        assert list(body["tags"][0]) == ["name", "label", "drawn", "color", "shape", "width", "height"]
+        assert body["tags"][0]["shape"] is None
+        assert (await c.get("/admin/site/tags", headers=KEY)).json() == body
+
+        r = await c.put("/admin/site/tags/speedrun/shape", headers=SVG, content=STAR)
+        assert r.status_code == 200, r.text
+        shape = r.json()["tags"][0]["shape"]
+        assert shape.startswith("v1/site/tags/speedrun.svg?v=") and len(shape.split("=")[1]) == 16
+
+    async with api:
+        r = await api.get("/v1/site/tags")
+        assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=60"
+        assert r.json() == {"tags": [{**body["tags"][0], "shape": shape}, *body["tags"][1:]]}
+
+        r = await api.get("/" + shape)
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/svg+xml"
+        assert r.headers["content-security-policy"] == "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+        assert r.headers["x-content-type-options"] == "nosniff"
+        assert r.headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert r.text.startswith('<svg xmlns="http://www.w3.org/2000/svg"') and "M12 2" in r.text
+        stale = await api.get("/v1/site/tags/speedrun.svg?v=old")
+        assert stale.status_code == 200 and stale.headers["cache-control"] == "public, max-age=60"
+        for missing in ("new.svg", "speedrun", "speedrun.png", "Speedrun.svg", "..%2Fx.svg"):
+            assert (await api.get(f"/v1/site/tags/{missing}")).status_code == 404, missing
+
+
+async def test_shape_refusals(app, clean):
+    async with client(app) as c:
+        await c.put("/admin/site/tags", headers=KEY, json={"tags": AUTO})
+        r = await c.put("/admin/site/tags/new/shape", headers={**KEY, "content-type": "text/xml"}, content=STAR)
+        assert r.status_code == 415
+        r = await c.put("/admin/site/tags/new/shape", headers=SVG, content=STAR[:-6] + b" " * 65536 + b"</svg>")
+        assert r.status_code == 413
+        r = await c.put("/admin/site/tags/new/shape", headers=SVG,
+                        content=STAR.replace(b"<path", b"<script>alert(1)</script><path"))
+        assert r.status_code == 400 and "<script>" in r.json()["msg"]
+        r = await c.put("/admin/site/tags/nope/shape", headers=SVG, content=STAR)
+        assert r.status_code == 404
+        r = await c.put("/admin/site/tags/new/shape", headers={**SVG, "content-type": "image/svg+xml; charset=utf-8"},
+                        content=STAR)
+        assert r.status_code == 200
+        assert (await c.delete("/admin/site/tags/nope/shape", headers=KEY)).status_code == 404
+
+
+async def test_put_refused_changes_nothing(app, clean):
+    async with client(app) as c:
+        await c.put("/admin/site/tags", headers=KEY, json={"tags": AUTO})
+        r = await c.put("/admin/site/tags", headers=KEY, json={"tags": AUTO[:2]})
+        assert r.status_code == 400
+        assert r.json() == {"error": True, "msg": r.json()["msg"], "tag": "compilation", "field": "name"}
+        r = await c.put("/admin/site/tags", headers=KEY, json={"tags": [*AUTO, tag("x", color="url(http://e)")]})
+        assert (r.status_code, r.json()["tag"], r.json()["field"]) == (400, "x", "color")
+        assert len((await c.get("/admin/site/tags", headers=KEY)).json()["tags"]) == 3
+
+
+async def test_unlisted_tag_loses_its_shape_and_audit(app, api, clean):
+    async with client(app) as c:
+        await c.put("/admin/site/tags", headers=KEY, json={"tags": [tag("speedrun"), *AUTO]})
+        await c.put("/admin/site/tags/speedrun/shape", headers=SVG, content=STAR)
+        await c.put("/admin/site/tags/new/shape", headers=SVG, content=STAR)
+        r = await c.delete("/admin/site/tags/new/shape", headers=KEY)
+        assert r.status_code == 200 and r.json()["tags"][1]["shape"] is None
+        r = await c.put("/admin/site/tags", headers=KEY, json={"tags": AUTO})
+        assert r.status_code == 200
+        r = await c.put("/admin/site/tags", headers=KEY, json={"tags": [tag("speedrun"), *AUTO]})
+        assert r.json()["tags"][0]["shape"] is None  # back in the list, but its old shape is gone
+    async with api:
+        assert (await api.get("/v1/site/tags/speedrun.svg")).status_code == 404
+
+    rows = await _audit(clean)
+    assert [(r.action, r.target) for r in rows] == [
+        ("site.tags.replace", "site:tags"),
+        ("site.tag.shape.set", "site-tag:speedrun"),
+        ("site.tag.shape.set", "site-tag:new"),
+        ("site.tag.shape.clear", "site-tag:new"),
+        ("site.tags.replace", "site:tags"),
+        ("site.tags.replace", "site:tags"),
+    ]
+    first, set_shape, _, cleared, dropped, _ = rows
+    assert first.before is None and [t["name"] for t in first.after] == ["speedrun", "new", "updated",
+                                                                         "compilation"]
+    assert set_shape.before["shape"] is None and set_shape.after["shape"].startswith("v1/site/tags/speedrun.svg")
+    assert cleared.before["shape"] and cleared.after["shape"] is None
+    assert dropped.before[0]["shape"] and [t["name"] for t in dropped.after] == ["new", "updated", "compilation"]
+    for row in rows:
+        assert "<svg" not in str(row.before) + str(row.after) + str(row.detail)
+
+
+async def test_session_needs_csrf(app, clean):
+    async with client(app) as c:
+        session = (await c.post("/admin/session", json={"password": "pw"})).json()
+        assert (await c.get("/admin/site/tags")).status_code == 200
+        assert (await c.put("/admin/site/tags", json={"tags": AUTO})).status_code == 403
+        r = await c.put("/admin/site/tags", headers={"X-CSRF-Token": session["csrf"]}, json={"tags": AUTO})
+        assert r.status_code == 200 and r.json()["updatedBy"] == "password"
+        r = await c.put("/admin/site/tags/new/shape", headers={"content-type": "image/svg+xml"}, content=STAR)
+        assert r.status_code == 403
+        assert (await c.delete("/admin/site/tags/new/shape")).status_code == 403
