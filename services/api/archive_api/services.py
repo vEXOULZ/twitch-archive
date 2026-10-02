@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import operator
 from typing import Any
+from urllib.parse import unquote_plus
 
 from sqlalchemy import ColumnElement, and_, false, func, or_, select, true
 from sqlalchemy.exc import DBAPIError
@@ -10,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from archive_common.config import Settings
 from archive_common.serialize import (
-    EMOTES, GAMES, STREAMS, VODS, Resource, attach_games, attach_segments, not_hidden, not_merged_away,
+    EMOTES, GAMES, STREAMS, VODS, Resource, attach_games, attach_segments, live_spans, not_hidden, not_merged_away,
     not_superseded, of_shown_vod, tagged, vods_json,
 )
 
@@ -39,13 +42,17 @@ class Service:
         """Rows ``find`` considers at all, before the query's own filters."""
         return true()
 
+    async def specials(self, conn: AsyncConnection, qs: str) -> dict[str, fq.Special]:
+        """The filters of this service's own for this query (some need to read first)."""
+        return self.special
+
     async def find(self, conn: AsyncConnection, qs: str) -> dict[str, Any]:
         q = fq.parse(
             self.resource,
             qs,
             default_limit=self.settings.paginate_default,
             max_limit=self.settings.paginate_max,
-            special=self.special,
+            special=await self.specials(conn, qs),
         )
         where = and_(self.shown, self.scope(q.query), q.where)
         total = (await conn.execute(select(func.count()).select_from(self.resource.table).where(where))).scalar_one()
@@ -89,6 +96,13 @@ class VodsService(Service):
         await attach_games(conn, items)
         await attach_segments(conn, items)
 
+    async def specials(self, conn: AsyncConnection, qs: str) -> dict[str, fq.Special]:
+        decoded = unquote_plus(qs)
+        if not any(field in decoded for field in LIVE_FIELDS):
+            return self.special
+        spans = await live_spans(conn)
+        return {**self.special, **{field: _live_filter(field, end, spans) for field, end in LIVE_FIELDS.items()}}
+
     def scope(self, query: dict[str, Any]) -> ColumnElement[bool]:
         """Left out unless asked for (``GET /vods/{id}`` still answers for them all):
 
@@ -109,6 +123,36 @@ class VodsService(Service):
         elif isinstance(tag, str) and tag != "*":
             clauses.append(tagged(tag))
         return and_(true(), *clauses)
+
+
+# When a VOD's footage was live: a synthetic VOD's synthetic.firstLiveAt / lastLiveAt (worked out from its
+# sources, as the response shows them), a real VOD's createdAt for both. The value is which end of the span.
+LIVE_FIELDS = {"firstLiveAt": 0, "lastLiveAt": 1}
+_LIVE_OPS = {"$lt": operator.lt, "$lte": operator.le, "$gt": operator.gt, "$gte": operator.ge}
+
+
+def _when(field: str, op: str, value: Any) -> dt.datetime:
+    try:
+        when = dt.datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        when = None
+    if when is None:
+        raise FeathersError(400, f"Invalid value for '{field}[{op}]'")
+    return when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)
+
+
+def _live_filter(field: str, end: int, spans: dict[str, tuple[dt.datetime, dt.datetime] | None]) -> fq.Special:
+    """``firstLiveAt[$gte]=…&firstLiveAt[$lt]=…`` (``$lt $lte $gt $gte``). The synthetic VODs that match are
+    picked here, by id, so totals and paging stay right; one with no live span matches nothing."""
+    def build(value: Any) -> ColumnElement[bool]:
+        if not isinstance(value, dict) or not value or not set(value) <= set(_LIVE_OPS):
+            raise FeathersError(400, f"Invalid query parameter '{field}'")
+        bounds = [(_LIVE_OPS[op], _when(field, op, v)) for op, v in value.items()]
+        ids = [vod_id for vod_id, span in spans.items() if span and all(cmp(span[end], when) for cmp, when in bounds)]
+        created = VODS.table.c.createdAt
+        real = and_(VODS.table.c.synthetic.is_(None), *(cmp(created, when) for cmp, when in bounds))
+        return or_(real, VODS.table.c.id.in_(ids))
+    return build
 
 
 def _tags_filter(value: Any) -> ColumnElement[bool]:

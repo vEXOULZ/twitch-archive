@@ -372,13 +372,26 @@ async def flat_segments(conn: AsyncConnection, ids: list[str]) -> dict[str, list
     return {k: flatten(resolved[k], resolved, supersedes, supersedes[k]) for k in ids if k in resolved}
 
 
-def _live_span(segs: list[Segment], live: Mapping[str, dt.datetime | None]) -> dict[str, str | None]:
+def live_span(segs: list[Segment], live: Mapping[str, dt.datetime | None]) -> tuple[dt.datetime, dt.datetime] | None:
     """When the earliest and the latest of ``segs``'s footage was live (a source's start plus the
-    seconds into it, as ``createdAt`` counts them)."""
+    seconds into it, as ``createdAt`` counts them); None if no source has a start."""
     at = [(live[x.source_id] + dt.timedelta(seconds=x.start), live[x.source_id] + dt.timedelta(seconds=x.end or x.start))
           for x in segs if live.get(x.source_id)]
-    return {"firstLiveAt": js_iso(min(a for a, _ in at)) if at else None,
-            "lastLiveAt": js_iso(max(b for _, b in at)) if at else None}
+    return (min(a for a, _ in at), max(b for _, b in at)) if at else None
+
+
+def _live_span(segs: list[Segment], live: Mapping[str, dt.datetime | None]) -> dict[str, str | None]:
+    span = live_span(segs, live)
+    return {"firstLiveAt": js_iso(span[0]) if span else None, "lastLiveAt": js_iso(span[1]) if span else None}
+
+
+async def live_spans(conn: AsyncConnection) -> dict[str, tuple[dt.datetime, dt.datetime] | None]:
+    """``live_span`` of every synthetic VOD (what its ``firstLiveAt``/``lastLiveAt`` say), for filtering on them."""
+    ids = list((await conn.execute(select(_vt.c.id).where(_vt.c.synthetic.is_not(None)))).scalars())
+    resolved = await flat_segments(conn, ids)
+    real = list({x.source_id for v in resolved.values() for x in v})
+    live = dict((await conn.execute(select(_vt.c.id, _vt.c.createdAt).where(_vt.c.id.in_(real)))).all()) if real else {}
+    return {vod_id: live_span(resolved.get(vod_id, []), live) for vod_id in ids}
 
 
 async def attach_segments(conn: AsyncConnection, vods: list[dict]) -> None:
