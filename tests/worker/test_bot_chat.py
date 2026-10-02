@@ -75,6 +75,57 @@ def test_fragments_in_the_replay_shape():
         {"text": "plain", "emote": None, "__typename": "VideoCommentMessageFragment"}]
 
 
+GIF_ID = "Xcif4OzprDr4PZ7jY0"
+GIF_URL = f"https://media1.giphy.com/media/{GIF_ID}/giphy.gif"
+
+
+def _gif(gif, text="[Cat GIF by ViralHog]"):
+    [frag] = step.replay_fragments([{"type": "gif", "text": text, "gif": gif}])
+    return frag
+
+
+def test_a_gif_in_the_replay_shape():
+    assert _gif({"id": GIF_ID, "url": GIF_URL}) == {
+        "text": "[Cat GIF by ViralHog]", "emote": None, "__typename": "VideoCommentMessageFragment",
+        "gif": {"id": GIF_ID, "url": GIF_URL, "still": f"https://media.giphy.com/media/{GIF_ID}/giphy_s.gif",
+                "title": "Cat GIF by ViralHog"}}
+    # The live mapping has only the URL: the id comes from it (also behind GIPHY's v1. path).
+    assert _gif({"url": GIF_URL})["gif"]["id"] == GIF_ID
+    signed = f"https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjEx/{GIF_ID}/giphy.webp"
+    assert _gif({"url": signed})["gif"] == {**_gif({"url": GIF_URL})["gif"], "url": signed}
+    assert _gif({"id": GIF_ID}, text="")["gif"] == {
+        "id": GIF_ID, "url": f"https://media.giphy.com/media/{GIF_ID}/giphy.gif",
+        "still": f"https://media.giphy.com/media/{GIF_ID}/giphy_s.gif", "title": None}
+
+
+@pytest.mark.parametrize("url", [
+    f"http://media1.giphy.com/media/{GIF_ID}/giphy.gif", f"https://evil.example/media/{GIF_ID}/giphy.gif",
+    f"https://media1.giphy.com.evil.example/media/{GIF_ID}/giphy.gif",
+    f"https://media1.giphy.com/media/{GIF_ID}/giphy.gif?x=1", f"https://media1.giphy.com/media/{GIF_ID}/giphy.gif\n",
+    "javascript:alert(1)", None, 5,
+])
+def test_only_giphy_urls_are_linked(url):
+    """Anything else is not linked: with an id, GIPHY's own URL for it; without one, plain text."""
+    assert _gif({"id": GIF_ID, "url": url})["gif"]["url"] == f"https://media.giphy.com/media/{GIF_ID}/giphy.gif"
+    assert "gif" not in _gif({"url": url})
+
+
+@pytest.mark.parametrize("gif", [None, {}, "x", {"id": "../x"}, {"id": "a b"}, {"id": 5}, {"id": "x" * 65}])
+def test_a_gif_without_an_id_is_text(gif):
+    assert _gif(gif) == {"text": "[Cat GIF by ViralHog]", "emote": None, "__typename": "VideoCommentMessageFragment"}
+
+
+def test_a_gif_message_row():
+    gif = {"type": "gif", "text": "[Cat GIF]", "gif": {"id": GIF_ID, "url": GIF_URL}}
+    row = step.to_row(_message("m1", 0, "[Cat GIF]", fragments=[gif]), VOD, START, {})
+    assert row["message"][0]["gif"]["url"] == GIF_URL and row["data"]["fragments"] == [gif]
+
+
+def test_a_gif_url_with_another_id_is_not_linked():
+    other = "https://media1.giphy.com/media/Other123/giphy.gif"
+    assert _gif({"id": GIF_ID, "url": other})["gif"]["url"] == f"https://media.giphy.com/media/{GIF_ID}/giphy.gif"
+
+
 def test_badges_in_the_replay_shape():
     got = step.replay_badges([{"set_id": "subscriber", "id": "3012", "info": "14"}, {"set_id": "", "id": "1"}])
     assert got == [{"id": base64.b64encode(b"subscriber;3012;").decode(), "setID": "subscriber", "version": "3012",
