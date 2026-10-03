@@ -7,14 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import update
-from vex_platform.jobs import StepContext, StepError, StepRefused
-
 from archive_common.config import Settings
 from archive_common.db import execute, get_sessionmaker
 from archive_common.models import Job, Vod
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
+from sqlalchemy import update
+from vex_platform.jobs import StepContext, StepError, StepRefused
 
 from .doomtp import Doomtp
 from .events import JOB_LOGGER, UNITS, JobEvents
@@ -46,8 +45,16 @@ class JobContext:
     payload, subject (``vod_id``), step, log, progress and save are the run's. Built directly, it is a
     job of the legacy table (legacy_jobs.py) or a test's."""
 
-    def __init__(self, job_id: int, kind: str, vod_id: str | None, payload: dict[str, Any], deps: Deps,
-                 *, run: StepContext | None = None) -> None:
+    def __init__(
+        self,
+        job_id: int,
+        kind: str,
+        vod_id: str | None,
+        payload: dict[str, Any],
+        deps: Deps,
+        *,
+        run: StepContext | None = None,
+    ) -> None:
         self.job_id = job_id
         self.kind = kind
         self.deps = deps
@@ -94,14 +101,14 @@ class JobContext:
 
     @property
     def step(self) -> str | None:
-        return self.run.step if self.run else self._log.extra["step"]
+        return self.run.step if self.run else self._log.extra["step"]  # type: ignore[index, return-value]
 
     @step.setter
     def step(self, name: str | None) -> None:
         if self.run:
             self.run.step = name
         else:
-            self._log.extra["step"] = name
+            self._log.extra["step"] = name  # type: ignore[index]
 
     def progress(self, done: float, total: float, unit: str, message: str) -> None:
         """Record how far the current step is, for the dashboard (not the process log).
@@ -110,13 +117,12 @@ class JobContext:
         if self.run:
             self.run.progress(done, total, unit, message)
         else:
-            self.deps.events.add(self.job_id, "info", self.step, message,
-                                 {"done": done, "total": total, "unit": unit})
+            self.deps.events.add(self.job_id, "info", self.step, message, {"done": done, "total": total, "unit": unit})
 
     @property
     def video_type(self) -> str:
         """'vod' (Twitch VOD copy) or 'live' (recording of the live stream)."""
-        return self.payload.get("type", "vod")
+        return self.payload.get("type", "vod")  # type: ignore[no-any-return]
 
     def require_vod_id(self) -> str:
         if not self.vod_id:
@@ -157,19 +163,20 @@ class JobContext:
         else:
             await execute(update(Job).where(Job.id == self.job_id).values(payload=self.payload, vod_id=self.vod_id))
 
-    async def enqueue(self, kind: str, vod_id: str | None, payload: dict[str, Any] | None = None,
-                      **options: Any) -> int:
+    async def enqueue(
+        self, kind: str, vod_id: str | None, payload: dict[str, Any] | None = None, **options: Any
+    ) -> int:
         """Queue a child run of this one (GET /jobs/{id}/related shows them together); its id."""
         if self.run is None:
             raise StepError("only a runtime job can queue other jobs")
-        return (await self.run.enqueue(kind, subject_of(vod_id), payload, **options)).run.id
+        return (await self.run.enqueue(kind, subject_of(vod_id), payload, **options)).run.id  # type: ignore[no-any-return]
 
     async def get_vod(self) -> Vod:
         async with get_sessionmaker()() as s:
             vod = await s.get(Vod, self.require_vod_id())
             if vod is None:
                 raise StepError(f"vod {self.vod_id} not found in database")
-            return vod
+            return vod  # type: ignore[no-any-return]
 
     async def update_vod(self, **values: Any) -> None:
         await execute(update(Vod).where(Vod.id == self.require_vod_id()).values(**values))

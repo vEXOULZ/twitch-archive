@@ -16,10 +16,9 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl
 
+from archive_common.serialize import Resource
 from sqlalchemy import Boolean, ColumnElement, Text, and_, cast, func, literal, or_, true
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
-
-from archive_common.serialize import Resource
 
 from .errors import FeathersError
 
@@ -60,7 +59,7 @@ def parse_query_string(qs: str) -> dict[str, Any]:
                 if part not in node or not isinstance(node[part], (dict, list)):
                     node[part] = [] if nxt == "" else {}
                 node = node[part]
-    return _listify(root)
+    return _listify(root)  # type: ignore[no-any-return]
 
 
 def _listify(node: Any) -> Any:
@@ -83,14 +82,14 @@ Special = Callable[[Any], ColumnElement[bool]]
 @dataclass
 class ParsedQuery:
     where: ColumnElement[bool]
-    order_by: list
+    order_by: list[Any]
     limit: int
     skip: int
     select: set[str] | None
     query: dict[str, Any]  # the parsed query string, for filters of a service's own
 
 
-def _as_list(v: Any) -> list:
+def _as_list(v: Any) -> list[Any]:
     if isinstance(v, list):
         return v
     if isinstance(v, dict):
@@ -98,7 +97,7 @@ def _as_list(v: Any) -> list:
     return [v]
 
 
-def typed_value(col, v: Any):
+def typed_value(col, v: Any):  # type: ignore[no-untyped-def]
     """``v`` (a query-string value) as a literal of ``col``'s type; Postgres does the cast."""
     if v is None:
         return None
@@ -109,7 +108,7 @@ def typed_value(col, v: Any):
     return cast(literal(v, Text), col.type)
 
 
-_OPS: dict[str, Callable] = {
+_OPS: dict[str, Callable] = {  # type: ignore[type-arg]
     "$ne": lambda c, v: c.is_not(None) if v is None else c != typed_value(c, v),
     "$lt": lambda c, v: c < typed_value(c, v),
     "$lte": lambda c, v: c <= typed_value(c, v),
@@ -209,7 +208,7 @@ def parse(
 _PG_REGEX_SPECIAL = re.compile(r"([\\.^$|?*+()\[\]{}])")
 
 
-def chapter_filter(chapters_col) -> Special:
+def chapter_filter(chapters_col) -> Special:  # type: ignore[no-untyped-def]
     """``chapters[...]`` filters; each one matches when *any* chapter matches.
 
     * ``chapters[name]=x``: case-insensitive substring of the name (legacy)
@@ -221,7 +220,8 @@ def chapter_filter(chapters_col) -> Special:
     JSONPath: the substring is regex-escaped (as the legacy API should have
     done), the exact matches are passed as JSONPath variables.
     """
-    def jsonpath(path: str) -> ColumnElement:
+
+    def jsonpath(path: str) -> ColumnElement:  # type: ignore[type-arg]
         return cast(literal(path, Text), JSONPATH)
 
     def exists(path: str, value: str) -> ColumnElement[bool]:
@@ -233,8 +233,8 @@ def chapter_filter(chapters_col) -> Special:
     def name(value: Any) -> ColumnElement[bool]:
         if isinstance(value, str):
             pattern = ".*" + _PG_REGEX_SPECIAL.sub(r"\\\1", value) + ".*"
-            path = f"$[*] ? (@.name like_regex {json.dumps(pattern, ensure_ascii=False)} flag \"i\")"
-            return chapters_col.op("@?")(jsonpath(path))
+            path = f'$[*] ? (@.name like_regex {json.dumps(pattern, ensure_ascii=False)} flag "i")'
+            return chapters_col.op("@?")(jsonpath(path))  # type: ignore[no-any-return]
         if isinstance(value, dict) and set(value) == {"$eq"} and isinstance(value["$eq"], str):
             return exists("$[*] ? (@.name == $v)", value["$eq"])
         raise invalid("[name]")
@@ -243,7 +243,7 @@ def chapter_filter(chapters_col) -> Special:
         if not isinstance(value, str) or not value:
             raise invalid("[gameId]")
         if value == "null":
-            return chapters_col.op("@?")(jsonpath("$[*] ? (@.gameId == null)"))
+            return chapters_col.op("@?")(jsonpath("$[*] ? (@.gameId == null)"))  # type: ignore[no-any-return]
         return exists("$[*] ? (@.gameId == $v)", value)
 
     builders = {"name": name, "gameId": game_id}

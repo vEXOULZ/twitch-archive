@@ -11,13 +11,12 @@ import json
 import httpx
 import pytest
 import respx
-from sqlalchemy import delete, select
-
 from archive_common.db import get_sessionmaker
 from archive_common.models import Job, Log, Vod
 from archive_common.twitch.gql import GQL_URL
 from archive_worker import jobs, legacy_jobs
 from archive_worker.steps import metadata
+from sqlalchemy import delete, select
 
 VOD = "test-worker-vod"
 
@@ -46,7 +45,7 @@ def _runner(deps) -> legacy_jobs.Runner:
 async def _vod():
     await _reset()
     async with get_sessionmaker()() as s:
-        s.add(Vod(id=VOD, title="t", created_at=dt.datetime.now(dt.timezone.utc), duration="00:10:00"))
+        s.add(Vod(id=VOD, title="t", created_at=dt.datetime.now(dt.UTC), duration="00:10:00"))
         await s.commit()
 
 
@@ -124,7 +123,7 @@ async def test_runner_resumes_from_failed_step(db, deps, monkeypatch):
 
     monkeypatch.setitem(jobs.KINDS, "test", ["a", "b", "c"])
     for name in "abc":
-        monkeypatch.setitem(jobs.STEPS, name, step(name))
+        monkeypatch.setitem(jobs.STEPS, name, step(name))  # type: ignore[attr-defined]
 
     runner = _runner(deps)
     job = await _legacy_job("test")
@@ -158,8 +157,8 @@ async def test_runner_does_not_repeat_finished_steps_after_interruption(db, deps
             raise asyncio.CancelledError  # worker shut down mid-step
 
     monkeypatch.setitem(jobs.KINDS, "test", ["a", "b"])
-    monkeypatch.setitem(jobs.STEPS, "a", a)
-    monkeypatch.setitem(jobs.STEPS, "b", b)
+    monkeypatch.setitem(jobs.STEPS, "a", a)  # type: ignore[attr-defined]
+    monkeypatch.setitem(jobs.STEPS, "b", b)  # type: ignore[attr-defined]
 
     runner = _runner(deps)
     job = await _legacy_job("test")
@@ -179,17 +178,17 @@ async def test_claim_respects_not_before_and_exclusivity(db, deps):
     runner = _runner(deps)
     later = await _legacy_job("emotes")
     async with get_sessionmaker()() as s:
-        (await s.get(Job, later.id)).not_before = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+        (await s.get(Job, later.id)).not_before = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
         await s.commit()
     assert await runner._claim() is None
     j1 = await _legacy_job("emotes")
     j2 = await _legacy_job("chapters")
     claimed = await runner._claim()
-    assert claimed.id == j1.id
-    runner.running_keys[claimed.id] = legacy_jobs._exclusive_key(claimed)
+    assert claimed.id == j1.id  # type: ignore[union-attr]
+    runner.running_keys[claimed.id] = legacy_jobs._exclusive_key(claimed)  # type: ignore[arg-type, union-attr]
     assert await runner._claim() is None  # same vod + type is busy
     runner.running_keys.clear()
-    assert (await runner._claim()).id == j2.id
+    assert (await runner._claim()).id == j2.id  # type: ignore[union-attr]
     await _reset()
 
 
@@ -197,8 +196,13 @@ async def test_upsert_vod_sets_helix_fields_only_on_insert(db):
     from archive_worker.vods import upsert_vod
 
     await _reset()
-    video = {"id": VOD, "title": "first", "created_at": "2026-02-21T03:00:00Z", "duration": "1h2m3s",
-             "thumbnail_url": "https://thumb/1"}
+    video = {
+        "id": VOD,
+        "title": "first",
+        "created_at": "2026-02-21T03:00:00Z",
+        "duration": "1h2m3s",
+        "thumbnail_url": "https://thumb/1",
+    }
     try:
         await upsert_vod(video)
         await upsert_vod({**video, "title": "renamed", "duration": "9h", "thumbnail_url": ""})

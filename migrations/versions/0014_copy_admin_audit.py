@@ -12,7 +12,6 @@ Create Date: 2026-09-30
 """
 
 from alembic import op
-
 from archive_common.audit import copy_admin_audit_sync
 
 revision = "0014"

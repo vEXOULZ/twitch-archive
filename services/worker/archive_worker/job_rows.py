@@ -8,12 +8,23 @@ not collide: Alembic 0013 started ``job_runs`` above the legacy ids.
 
 from __future__ import annotations
 
+from archive_common.models import Job
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, Integer, MetaData, Table, Text, case, func, literal, select, union_all,
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    Integer,
+    MetaData,
+    Table,
+    Text,
+    case,
+    func,
+    literal,
+    select,
+    union_all,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
-
-from archive_common.models import Job
 
 ACTIVE = ("queued", "running", "paused")
 # The v1 admin API's names; job_runs says "succeeded" for "done".
@@ -47,23 +58,44 @@ def vod_of(subject: str | None) -> str | None:
     return subject[4:] if subject and subject.startswith("vod:") else None
 
 
-def _runs():
+def _runs():  # type: ignore[no-untyped-def]
     r = RUNS.c
     return select(
-        r.id, r.kind,
+        r.id,
+        r.kind,
         case((r.subject.startswith("vod:"), func.substr(r.subject, 5))).label("vod_id"),
         case((r.state == "succeeded", "done"), else_=r.state).label("state"),
-        r.step, r.attempts, r.last_error, r.payload, r.not_before, r.pause_before, r.pause_next,
-        r.created_at, r.updated_at, literal(False).label("legacy"),
+        r.step,
+        r.attempts,
+        r.last_error,
+        r.payload,
+        r.not_before,
+        r.pause_before,
+        r.pause_next,
+        r.created_at,
+        r.updated_at,
+        literal(False).label("legacy"),
     )
 
 
-def _legacy():
+def _legacy():  # type: ignore[no-untyped-def]
     j = Job.__table__.c
     return select(
-        j.id, j.kind, j.vod_id, j.state, j.step, j.attempts, j.last_error, j.payload, j.not_before,
-        j.pause_before, j.pause_next, j.created_at, j.updated_at, literal(True).label("legacy"),
+        j.id,
+        j.kind,
+        j.vod_id,
+        j.state,
+        j.step,
+        j.attempts,
+        j.last_error,
+        j.payload,
+        j.not_before,
+        j.pause_before,
+        j.pause_next,
+        j.created_at,
+        j.updated_at,
+        literal(True).label("legacy"),
     )
 
 
-ALL_JOBS = union_all(_runs(), _legacy()).subquery("all_jobs")
+ALL_JOBS = union_all(_runs(), _legacy()).subquery("all_jobs")  # type: ignore[no-untyped-call]

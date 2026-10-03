@@ -7,29 +7,29 @@ that Twitch cut in two: B started 7500 s after A, so there is a 300 s gap betwee
 import asyncio
 import datetime as dt
 import uuid
+from typing import Any
 
 import asyncpg
 import httpx
 import pytest
-from pydantic import SecretStr
-from sqlalchemy import delete, func, or_, select, text
-
 from archive_api.invalidation import asyncpg_dsn
+from archive_common.audit import AUDIT_LOG
 from archive_common.config import get_settings
 from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_sessionmaker
-from archive_common.audit import AUDIT_LOG
 from archive_common.models import BotLog, Emote, Game, Job, Log, Vod, VodSplice
 from archive_common.timeutil import hhmmss_to_seconds
 from archive_worker.admin import create_admin_app
 from archive_worker.context import StepRefused
 from archive_worker.job_rows import RUNS, subject_of
 from archive_worker.steps import metadata
+from pydantic import SecretStr
+from sqlalchemy import delete, func, or_, select, text
 
 A, B, C = "test-splice-a", "test-splice-b", "test-splice-c"
 A2 = f"{A}-2"
 IDS = (A, B, C, A2)
 KEY = {"Authorization": "Bearer k"}
-START = dt.datetime(2001, 2, 3, 20, 0, tzinfo=dt.timezone.utc)  # before any real VOD
+START = dt.datetime(2001, 2, 3, 20, 0, tzinfo=dt.UTC)  # before any real VOD
 OFFSET = 7500
 
 
@@ -38,20 +38,43 @@ def _yt(vid, part, duration, typ="vod"):
 
 
 def _ch(start, length, name="Just Chatting", restricted=False):
-    return {"gameId": "509658", "name": name, "image": None, "duration": "00:00:00", "start": start, "end": length,
-            "restricted": restricted}
+    return {
+        "gameId": "509658",
+        "name": name,
+        "image": None,
+        "duration": "00:00:00",
+        "start": start,
+        "end": length,
+        "restricted": restricted,
+    }
 
 
 def _log(vod_id, offset, name="viewer"):
-    return Log(id=uuid.uuid4(), vod_id=vod_id, display_name=name, content_offset_seconds=offset,
-               message=[{"text": f"{name} at {offset}"}], user_badges=[], user_color="#fff",
-               created_at=START + dt.timedelta(seconds=offset + (OFFSET if vod_id == B else 0)))
+    return Log(
+        id=uuid.uuid4(),
+        vod_id=vod_id,
+        display_name=name,
+        content_offset_seconds=offset,
+        message=[{"text": f"{name} at {offset}"}],
+        user_badges=[],
+        user_color="#fff",
+        created_at=START + dt.timedelta(seconds=offset + (OFFSET if vod_id == B else 0)),
+    )
 
 
 def _bot_log(vod_id, offset, kind="message"):
     at = START + dt.timedelta(seconds=offset + (OFFSET if vod_id == B else 0))
-    return BotLog(id=f"{vod_id}-bot-{offset}", vod_id=vod_id, kind=kind, at=at, content_offset_seconds=offset,
-                  message=[{"text": f"bot {vod_id} at {offset}"}], user_badges=[], user_color="#fff", data={})
+    return BotLog(
+        id=f"{vod_id}-bot-{offset}",
+        vod_id=vod_id,
+        kind=kind,
+        at=at,
+        content_offset_seconds=offset,
+        message=[{"text": f"bot {vod_id} at {offset}"}],
+        user_badges=[],
+        user_color="#fff",
+        data={},
+    )
 
 
 async def _clean():
@@ -59,8 +82,9 @@ async def _clean():
         await s.execute(delete(Job).where(Job.vod_id.in_(IDS)))
         await s.execute(delete(RUNS).where(RUNS.c.subject.in_([subject_of(i) for i in IDS])))
         await s.execute(text("SET LOCAL search_path TO jobs, public"))  # procrastinate's SQL is unqualified
-        await s.execute(text("DELETE FROM procrastinate_jobs WHERE split_part(lock, ':', 2) = ANY(:ids)"),
-                        {"ids": list(IDS)})
+        await s.execute(
+            text("DELETE FROM procrastinate_jobs WHERE split_part(lock, ':', 2) = ANY(:ids)"), {"ids": list(IDS)}
+        )
         await s.execute(delete(VodSplice).where(or_(VodSplice.vod_id.in_(IDS), VodSplice.other_id.in_(IDS))))
         for model in (Log, BotLog, Emote, Game):
             await s.execute(delete(model).where(model.vod_id.in_(IDS)))
@@ -73,20 +97,54 @@ async def vods(db):
     await _clean()
     async with get_sessionmaker()() as s:
         audit_after = (await s.execute(select(func.max(AUDIT_LOG.c.id)))).scalar() or 0
-        s.add_all([
-            Vod(id=A, title="big stream", created_at=START, duration="02:00:00", stream_id="1001",
-                chapters=[_ch(0, 3600), _ch(3600, 3600, "Minecraft")],
-                youtube=[_yt("a1", 1, 3600), _yt("a2", 2, 3595)], drive=[{"id": "da", "type": "vod"}]),
-            Vod(id=B, title="big stream ", created_at=START + dt.timedelta(seconds=OFFSET), duration="01:00:00",
-                stream_id="1002", chapters=[_ch(0, 3600, "Minecraft")], youtube=[_yt("b1", 1, 3590)]),
-        ])
+        s.add_all(
+            [
+                Vod(
+                    id=A,
+                    title="big stream",
+                    created_at=START,
+                    duration="02:00:00",
+                    stream_id="1001",
+                    chapters=[_ch(0, 3600), _ch(3600, 3600, "Minecraft")],
+                    youtube=[_yt("a1", 1, 3600), _yt("a2", 2, 3595)],
+                    drive=[{"id": "da", "type": "vod"}],
+                ),
+                Vod(
+                    id=B,
+                    title="big stream ",
+                    created_at=START + dt.timedelta(seconds=OFFSET),
+                    duration="01:00:00",
+                    stream_id="1002",
+                    chapters=[_ch(0, 3600, "Minecraft")],
+                    youtube=[_yt("b1", 1, 3590)],
+                ),
+            ]
+        )
         await s.flush()
-        s.add_all([_log(A, 0), _log(A, 3604), _log(A, 4000), _log(A, 7199), _log(B, 0, "b-viewer"), _log(B, 42, "b-viewer"), _log(B, 3599, "b-viewer")])
+        s.add_all(
+            [
+                _log(A, 0),
+                _log(A, 3604),
+                _log(A, 4000),
+                _log(A, 7199),
+                _log(B, 0, "b-viewer"),
+                _log(B, 42, "b-viewer"),
+                _log(B, 3599, "b-viewer"),
+            ]
+        )
         s.add_all([_bot_log(A, 0), _bot_log(A, 4000), _bot_log(B, 42), _bot_log(B, 50, "notice")])
-        s.add_all([Game(vod_id=B, start_time=100, end_time=200, game_name="Minecraft", video_id="g1"),
-                   Emote(vod_id=A, ffz_emotes=[{"id": 1, "code": "a"}], bttv_emotes=[], seventv_emotes=[]),
-                   Emote(vod_id=B, ffz_emotes=[{"id": 1, "code": "a"}, {"id": 2, "code": "b"}], bttv_emotes=[],
-                         seventv_emotes=[{"id": "x", "code": "EZ"}])])
+        s.add_all(
+            [
+                Game(vod_id=B, start_time=100, end_time=200, game_name="Minecraft", video_id="g1"),
+                Emote(vod_id=A, ffz_emotes=[{"id": 1, "code": "a"}], bttv_emotes=[], seventv_emotes=[]),
+                Emote(
+                    vod_id=B,
+                    ffz_emotes=[{"id": 1, "code": "a"}, {"id": 2, "code": "b"}],
+                    bttv_emotes=[],
+                    seventv_emotes=[{"id": "x", "code": "EZ"}],
+                ),
+            ]
+        )
         await s.commit()
     yield
     await _clean()
@@ -104,14 +162,14 @@ async def admin(deps, make_service):
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://admin"), service
 
 
-def site_delay(vod: dict, typ: str = "vod") -> float:
+def site_delay(vod: dict[str, Any], typ: str = "vod") -> float:
     """vods-core: duration − Σ part durations − Σ cut lengths."""
     parts = sum(p["duration"] for p in vod["youtube"] if p["type"] == typ)
     cuts = sum(c["end"] for c in vod["chapters"] if c.get("restricted"))
-    return hhmmss_to_seconds(vod["duration"]) - parts - cuts
+    return hhmmss_to_seconds(vod["duration"]) - parts - cuts  # type: ignore[no-any-return]
 
 
-def site_vod_time(vod: dict, upload_time: float, typ: str = "vod") -> float:
+def site_vod_time(vod: dict[str, Any], upload_time: float, typ: str = "vod") -> float:
     v = upload_time + site_delay(vod, typ)
     for c in sorted((c for c in vod["chapters"] if c.get("restricted")), key=lambda c: c["start"]):
         if c["start"] <= v:
@@ -119,20 +177,43 @@ def site_vod_time(vod: dict, upload_time: float, typ: str = "vod") -> float:
     return v
 
 
-async def _state() -> dict:
+async def _state() -> dict[str, Any]:
     """Every row these tests touch, minus updatedAt (bumped by any write)."""
     async with get_sessionmaker()() as s:
-        vods = {v.id: {k: getattr(v, k) for k in ("title", "duration", "chapters", "youtube", "drive", "stream_id",
-                                                  "chapters_locked", "thumbnail_url", "merged_into", "created_at")}
-                for v in (await s.execute(select(Vod).where(Vod.id.in_(IDS)))).scalars()}
-        logs = sorted((str(r.id), r.vod_id, r.content_offset_seconds, r.seq) for r in
-                      (await s.execute(select(Log).where(Log.vod_id.in_(IDS)))).scalars())
-        bot_logs = sorted((r.id, r.vod_id, r.content_offset_seconds, r.seq) for r in
-                          (await s.execute(select(BotLog).where(BotLog.vod_id.in_(IDS)))).scalars())
-        games = sorted((g.id, g.vod_id, g.start_time, g.end_time) for g in
-                       (await s.execute(select(Game).where(Game.vod_id.in_(IDS)))).scalars())
-        emotes = {e.vod_id: (e.ffz_emotes, e.bttv_emotes, e.seventv_emotes, e.global_emotes) for e in
-                  (await s.execute(select(Emote).where(Emote.vod_id.in_(IDS)))).scalars()}
+        vods = {
+            v.id: {
+                k: getattr(v, k)
+                for k in (
+                    "title",
+                    "duration",
+                    "chapters",
+                    "youtube",
+                    "drive",
+                    "stream_id",
+                    "chapters_locked",
+                    "thumbnail_url",
+                    "merged_into",
+                    "created_at",
+                )
+            }
+            for v in (await s.execute(select(Vod).where(Vod.id.in_(IDS)))).scalars()
+        }
+        logs = sorted(
+            (str(r.id), r.vod_id, r.content_offset_seconds, r.seq)
+            for r in (await s.execute(select(Log).where(Log.vod_id.in_(IDS)))).scalars()
+        )
+        bot_logs = sorted(
+            (r.id, r.vod_id, r.content_offset_seconds, r.seq)
+            for r in (await s.execute(select(BotLog).where(BotLog.vod_id.in_(IDS)))).scalars()
+        )
+        games = sorted(
+            (g.id, g.vod_id, g.start_time, g.end_time)
+            for g in (await s.execute(select(Game).where(Game.vod_id.in_(IDS)))).scalars()
+        )
+        emotes = {
+            e.vod_id: (e.ffz_emotes, e.bttv_emotes, e.seventv_emotes, e.global_emotes)
+            for e in (await s.execute(select(Emote).where(Emote.vod_id.in_(IDS)))).scalars()
+        }
     return {"vods": vods, "logs": logs, "bot_logs": bot_logs, "games": games, "emotes": emotes}
 
 
@@ -160,8 +241,8 @@ async def test_merge_keeps_chat_and_video_in_sync(vods, admin, api):
 
     # A comment at B's x is now at A's offset + x ...
     after = await _comments(A)
-    for text, x in before_b.items():
-        assert after[text] == OFFSET + x
+    for message, x in before_b.items():
+        assert after[message] == OFFSET + x
     # ... and so is the frame it was shown against: B's first uploaded frame lands at offset + B's delay.
     assert site_delay(vod) == 5  # A's own delay, as before
     a_uploads = 3600 + 3595
@@ -170,7 +251,8 @@ async def test_merge_keeps_chat_and_video_in_sync(vods, admin, api):
 
     gap = [ch for ch in vod["chapters"] if ch.get("kind") == "gap"]
     assert [(g["name"], g["start"], g["end"], g["restricted"]) for g in gap] == [
-        ("Technical difficulties", 7200, 310, True)]
+        ("Technical difficulties", 7200, 310, True)
+    ]
     assert vod["duration"] == "03:05:00" and vod["chaptersLocked"] is True
     assert [(p["id"], p["part"]) for p in vod["youtube"]] == [("a1", 1), ("a2", 2), ("b1", 3)]
     assert [g["start_time"] for g in vod["games"]] == ["7600"]
@@ -182,10 +264,12 @@ async def test_merge_keeps_chat_and_video_in_sync(vods, admin, api):
         emotes = await s.get(Emote, A)
         assert emotes.ffz_emotes == [{"id": 1, "code": "a"}, {"id": 2, "code": "b"}]
         assert emotes.seventv_emotes == [{"id": "x", "code": "EZ"}]
-        audit = (await s.execute(select(AUDIT_LOG).where(AUDIT_LOG.c.action == "vod.merge")
-                                 .order_by(AUDIT_LOG.c.id.desc()).limit(1))).one()
-        assert (audit.action, audit.target, audit.detail) == ("vod.merge", f"vod:{A}",
-                                                               {"source": B})
+        audit = (
+            await s.execute(
+                select(AUDIT_LOG).where(AUDIT_LOG.c.action == "vod.merge").order_by(AUDIT_LOG.c.id.desc()).limit(1)
+            )
+        ).one()
+        assert (audit.action, audit.target, audit.detail) == ("vod.merge", f"vod:{A}", {"source": B})
 
     # What the site sees
     async with api:
@@ -199,8 +283,11 @@ async def test_merge_keeps_chat_and_video_in_sync(vods, admin, api):
         assert "b-viewer at 42" in [cm["message"][0]["text"] for cm in page["comments"]]
         page = (await api.get(f"/v1/vods/{A}/comments?content_offset_seconds=0&source=bot")).json()
         assert [(cm["message"][0]["text"], cm["content_offset_seconds"]) for cm in page["comments"]] == [
-            (f"bot {A} at 0", 0), (f"bot {A} at 4000", 4000), (f"bot {B} at 42", OFFSET + 42),
-            (f"bot {B} at 50", OFFSET + 50)]
+            (f"bot {A} at 0", 0),
+            (f"bot {A} at 4000", 4000),
+            (f"bot {B} at 42", OFFSET + 42),
+            (f"bot {B} at 50", OFFSET + 50),
+        ]
         assert [cm["_id"] for cm in page["comments"]] == sorted(cm["_id"] for cm in page["comments"])
         emotes = (await api.get(f"/emotes?vod_id={A}")).json()["data"][0]
         assert [e["id"] for e in emotes["ffz_emotes"]] == [1, 2]
@@ -234,7 +321,7 @@ async def test_merge_and_unmerge_tell_the_api_rows_moved(vods, admin):
         async with c:
             for route in ("merge", "unmerge"):
                 assert (await c.post(f"/admin/vods/{A}/{route}", headers=KEY, json={"source": B})).status_code == 200
-                moved = set()
+                moved = set()  # type: ignore[var-annotated]
                 while moved != {ROWS_MOVED + A, ROWS_MOVED + B}:
                     payload = await asyncio.wait_for(heard.get(), 5)
                     if payload.startswith(ROWS_MOVED):
@@ -293,10 +380,15 @@ async def test_refresh_jobs_refuse_a_merged_vod(vods, admin, make_ctx, monkeypat
     c, service = admin
     async with c:
         assert (await c.post(f"/admin/vods/{A}/merge", headers=KEY, json={"source": B})).status_code == 200
-        for route, body in (("/admin/logs", {"vodId": A}), ("/admin/chapters", {"vodId": A, "force": True}),
-                            ("/admin/emotes", {"vodId": A}), ("/admin/duration", {"vodId": A}),
-                            ("/admin/download", {"vodId": A}), ("/admin/logs", {"vodId": B}),
-                            ("/admin/jobs", {"kind": "chat", "vodId": A})):
+        for route, body in (
+            ("/admin/logs", {"vodId": A}),
+            ("/admin/chapters", {"vodId": A, "force": True}),
+            ("/admin/emotes", {"vodId": A}),
+            ("/admin/duration", {"vodId": A}),
+            ("/admin/download", {"vodId": A}),
+            ("/admin/logs", {"vodId": B}),
+            ("/admin/jobs", {"kind": "chat", "vodId": A}),
+        ):
             r = await c.post(route, headers=KEY, json=body)
             assert r.status_code == 409, route
             assert "merged" in r.json()["msg"]
@@ -386,8 +478,17 @@ async def test_merge_candidates(vods, admin):
     async with c:
         got = (await c.get(f"/admin/vods/{A}/merge-candidates", headers=KEY)).json()
         assert got["withinMinutes"] == 30 and got["vod"]["endsAt"] == "2001-02-03T22:00:00+00:00"
-        assert got["candidates"] == [{"id": B, "streamId": "1002", "title": "big stream ", "duration": "01:00:00",
-                                      "createdAt": "2001-02-03T22:05:00+00:00", "gap": 300, "overlaps": False,
-                                      "titlesMatch": True}]
+        assert got["candidates"] == [
+            {
+                "id": B,
+                "streamId": "1002",
+                "title": "big stream ",
+                "duration": "01:00:00",
+                "createdAt": "2001-02-03T22:05:00+00:00",
+                "gap": 300,
+                "overlaps": False,
+                "titlesMatch": True,
+            }
+        ]
         assert (await c.get(f"/admin/vods/{B}/merge-candidates", headers=KEY)).json()["candidates"] == []
         assert (await c.get("/admin/vods/nope/merge-candidates", headers=KEY)).status_code == 404

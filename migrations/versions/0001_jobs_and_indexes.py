@@ -41,8 +41,7 @@ def upgrade() -> None:
     # The chat endpoint filters by vod_id and orders by (content_offset_seconds, _id).
     with op.get_context().autocommit_block():
         op.execute(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS logs_vod_offset_idx "
-            "ON logs (vod_id, content_offset_seconds, _id)"
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS logs_vod_offset_idx ON logs (vod_id, content_offset_seconds, _id)"
         )
         op.execute("CREATE INDEX CONCURRENTLY IF NOT EXISTS logs_vod_seq_idx ON logs (vod_id, _id)")
 

@@ -2,11 +2,12 @@
 name = "twitch-archive"
 version = "0.1.0"
 description = "Twitch stream archiver (worker) + read-only VOD API, Python rewrite of the Feathers archive backend"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = ["archive-common", "archive-api", "archive-worker"]
 
 [tool.uv]
 package = false
+required-version = ">=0.5"
 
 [tool.uv.workspace]
 members = ["packages/common", "services/api", "services/worker"]
@@ -17,10 +18,40 @@ archive-api = { workspace = true }
 archive-worker = { workspace = true }
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "respx>=0.21", "psycopg2-binary>=2.9"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "respx>=0.21", "psycopg2-binary>=2.9", "ruff>=0.6", "mypy>=1.11"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+
+[tool.ruff]
+extend = ".conventions/ruff.toml"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["packages/common", "services/api", "services/worker", "migrations", "tests"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI declares dependencies and parameters as default values.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header", "fastapi.Body", "fastapi.Cookie", "fastapi.File", "fastapi.Form", "fastapi.Security"]
+
+[[tool.mypy.overrides]]
+# No type information: vex-platform v0.6.0 ships no py.typed, and these have no stubs installed.
+module = ["vex_platform.*", "asyncpg.*", "defusedxml.*", "googleapiclient.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Tests are typed where it helps; fixtures and fakes don't need full annotations.
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# The response models subclass vex_platform's ApiModel, which is Any until vex-platform ships py.typed.
+module = "archive_worker.api_v2_routes"
+disallow_subclassing_any = false

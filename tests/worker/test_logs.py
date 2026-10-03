@@ -4,7 +4,6 @@ import re
 
 import pytest
 import structlog
-
 from archive_common import logs
 
 
@@ -27,7 +26,10 @@ def test_setup_adds_job_fields_and_quiets_libraries(capsys, restore_logging):
     structlog.get_logger("archive_api").info("api.started", port=8080)
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [(r["logger"], r["event"]) for r in lines] == [
-        ("archive_worker.job", "step split"), ("archive_worker", "plain"), ("archive_api", "api.started")]
+        ("archive_worker.job", "step split"),
+        ("archive_worker", "plain"),
+        ("archive_api", "api.started"),
+    ]
     assert (lines[0]["job"], lines[0]["level"]) == (42, "info")
     assert lines[2]["port"] == 8080
 

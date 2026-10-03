@@ -1,0 +1,11 @@
+**/.venv
+**/__pycache__
+**/*.dump
+.git
+.claude
+.env
+secrets
+data
+tests
+docs
+graphify-out

@@ -1,8 +1,8 @@
 """archive-worker entrypoint.
 
-    archive-worker run [--dry-run]            monitor + jobs + admin API
-    archive-worker import-youtube-token FILE  import youtube.auth from a legacy config.json
-    archive-worker enqueue KIND VOD_ID [JSON] queue a job without the admin API
+archive-worker run [--dry-run]            monitor + jobs + admin API
+archive-worker import-youtube-token FILE  import youtube.auth from a legacy config.json
+archive-worker enqueue KIND VOD_ID [JSON] queue a job without the admin API
 """
 
 from __future__ import annotations
@@ -15,12 +15,11 @@ import signal
 from pathlib import Path
 
 import uvicorn
-from vex_platform.actor import Actor
-
 from archive_common import audit, http, logs
 from archive_common.config import get_settings
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
+from vex_platform.actor import Actor
 
 from . import jobs, youtube
 from .admin import create_admin_app
@@ -54,7 +53,7 @@ async def serve(dry_run: bool = False) -> None:
             proxy_headers=False,
         )
     )
-    admin.install_signal_handlers = lambda: None  # we handle signals below
+    admin.install_signal_handlers = lambda: None  # type: ignore[attr-defined]  # we handle signals below
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -66,8 +65,11 @@ async def serve(dry_run: bool = False) -> None:
 
     log.info(
         "worker starting: channel=%s live_record=%s vod_download=%s youtube_upload=%s dry_run=%s",
-        settings.twitch_username, settings.live_record, settings.vod_download,
-        settings.youtube_upload, settings.dry_run,
+        settings.twitch_username,
+        settings.live_record,
+        settings.vod_download,
+        settings.youtube_upload,
+        settings.dry_run,
     )
     copied = await audit.copy_admin_audit()  # what the previous release audited while it was replaced
     if copied:
@@ -75,7 +77,7 @@ async def serve(dry_run: bool = False) -> None:
     await service.runtime.open()
     await service.runtime.start()  # new jobs; the legacy runner below finishes the old table's
     tasks = [
-        asyncio.create_task(service.legacy.run_forever(), name="legacy-runner"),
+        asyncio.create_task(service.legacy.run_forever(), name="legacy-runner"),  # type: ignore[union-attr]
         asyncio.create_task(monitor.run_forever(), name="monitor"),
         asyncio.create_task(events.run_forever(), name="job-events"),  # flushes on cancel
     ]
@@ -85,7 +87,7 @@ async def serve(dry_run: bool = False) -> None:
         tasks.append(asyncio.create_task(deps.youtube.keepalive(), name="youtube-keepalive"))
     tasks.append(asyncio.create_task(admin.serve(), name="admin"))  # keep last: shutdown awaits it
     stopper = asyncio.create_task(stop.wait())
-    pending: set[asyncio.Task] = {*tasks, stopper}
+    pending: set[asyncio.Task] = {*tasks, stopper}  # type: ignore[type-arg]
     while True:
         done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
         crashed = [t for t in done if t is not stopper and t.exception()]
@@ -98,7 +100,7 @@ async def serve(dry_run: bool = False) -> None:
     log.info("shutting down; interrupted jobs resume on next start")
     admin.should_exit = True  # uvicorn stops on its own; cancelling it logs a spurious traceback
     await service.runtime.stop()
-    await service.legacy.shutdown()
+    await service.legacy.shutdown()  # type: ignore[union-attr]
     admin_task, others = tasks[-1], tasks[:-1]
     for t in others:
         t.cancel()
@@ -116,8 +118,9 @@ async def _enqueue(kind: str, vod_id: str, payload: str | None) -> None:
     service = jobs.JobService.create(Deps(settings, Helix(settings), Gql(settings), youtube.YouTube(settings)))
     await service.runtime.open()
     try:
-        job = await service.enqueue(kind, vod_id, json.loads(payload) if payload else {},
-                                    actor=Actor("system", via="cli"))
+        job = await service.enqueue(
+            kind, vod_id, json.loads(payload) if payload else {}, actor=Actor("system", via="cli")
+        )
     finally:
         await service.runtime.close()
     print(f"queued job {job.id} ({kind} {vod_id}, {job.state}); a running worker picks it up at once")

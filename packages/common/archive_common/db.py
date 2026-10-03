@@ -32,7 +32,7 @@ def get_engine() -> AsyncEngine:
 
 
 @lru_cache
-def get_sessionmaker() -> async_sessionmaker:
+def get_sessionmaker() -> async_sessionmaker:  # type: ignore[type-arg]
     return async_sessionmaker(get_engine(), expire_on_commit=False)
 
 

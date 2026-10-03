@@ -22,8 +22,7 @@ _TIMES = ("at", "received_at", "deleted_at", "cleared_at")
 
 
 def _iso(ms: int) -> str:
-    return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z")
+    return dt.datetime.fromtimestamp(ms / 1000, dt.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _ms(value: Any) -> Any:
@@ -32,7 +31,7 @@ def _ms(value: Any) -> Any:
         return value
     when = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     if when.tzinfo is None:
-        when = when.replace(tzinfo=dt.timezone.utc)
+        when = when.replace(tzinfo=dt.UTC)
     return round(when.timestamp() * 1000)
 
 
@@ -49,14 +48,21 @@ def v1_coverage(body: dict[str, Any]) -> dict[str, Any]:
     """v2's coverage in v1's shape: ms times, gaps as ``from``/``to``."""
     out = {k: _ms(body[k]) for k in ("since", "until") if k in body}
     if "sessions" in body:
-        out["sessions"] = [{**s, "started_at": _ms(s.get("started_at")), "ended_at": _ms(s.get("ended_at"))}
-                           for s in body["sessions"]]
+        out["sessions"] = [  # type: ignore[index]
+            {**s, "started_at": _ms(s.get("started_at")), "ended_at": _ms(s.get("ended_at"))} for s in body["sessions"]
+        ]
     if "gaps" in body:
-        out["gaps"] = [{"from": _ms(g.get("start")), "to": _ms(g.get("end")),
-                        **{k: v for k, v in g.items() if k not in ("start", "end")}} for g in body["gaps"]]
+        out["gaps"] = [  # type: ignore[index]
+            {
+                "from": _ms(g.get("start")),
+                "to": _ms(g.get("end")),
+                **{k: v for k, v in g.items() if k not in ("start", "end")},
+            }
+            for g in body["gaps"]
+        ]
     if "complete" in body:
-        out["complete"] = body["complete"]
-    return out
+        out["complete"] = body["complete"]  # type: ignore[index]
+    return out  # type: ignore[return-value]
 
 
 class Doomtp:
@@ -81,8 +87,7 @@ class Doomtp:
 
     async def log(self, since_ms: int, until_ms: int) -> AsyncIterator[dict[str, Any]]:
         """Entries with ``since_ms <= at < until_ms``, oldest first, in v1's shape."""
-        params: dict[str, Any] = {"since": _iso(since_ms), "until": _iso(until_ms), "order": "asc",
-                                  "limit": PAGE_LIMIT}
+        params: dict[str, Any] = {"since": _iso(since_ms), "until": _iso(until_ms), "order": "asc", "limit": PAGE_LIMIT}
         while True:
             body = (await http.request("GET", self._url(), params=params, headers=self._headers())).json()
             for entry in body.get("items") or []:
@@ -94,6 +99,10 @@ class Doomtp:
 
     async def coverage(self, since_ms: int, until_ms: int) -> dict[str, Any]:
         """When the bot was listening between the two times, and the gaps, in v1's shape."""
-        resp = await http.request("GET", self._url("/coverage"),
-                                  params={"since": _iso(since_ms), "until": _iso(until_ms)}, headers=self._headers())
+        resp = await http.request(
+            "GET",
+            self._url("/coverage"),
+            params={"since": _iso(since_ms), "until": _iso(until_ms)},
+            headers=self._headers(),
+        )
         return v1_coverage(resp.json())

@@ -1,12 +1,15 @@
 #!/bin/sh
 # The one place branch rules are written down. The pre-commit hook calls it for the branch you are on,
-# and CI calls it for the branch a pull request comes from, so both say the same thing.
+# and CI calls it (through check-pr-branches.sh) for the branch a pull request comes from, so both say
+# the same thing.
 #
-#     .githooks/check-branch-name.sh feature/archive-clips
+#     .conventions/githooks/check-branch-name.sh feature/add-quotes
 #
 # Conventional Branch (https://conventional-branch.github.io/): <type>/<description>, where the
 # description is lowercase words joined by single hyphens. A ticket number is just another word:
-# `bugfix/issue-42-chat-offset-drift`.
+# `bugfix/issue-42-cooldown-off-by-one`.
+#
+# Synced from vEXOULZ/conventions: change it there, not here.
 set -eu
 
 branch=${1:-}
@@ -17,9 +20,10 @@ if [ -z "$branch" ]; then
     exit 2
 fi
 
-# Committing on the trunk is what this is here to stop: it lands on main through a merge, not directly.
+# Committing on a long-lived branch is what this is here to stop: work reaches main (and dev, in a repo
+# with flow = "dev") through a merge, not directly.
 case "$branch" in
-    main | master | develop)
+    main | master | dev | develop)
         cat >&2 <<EOF
 Refusing to commit on '$branch'.
 
@@ -42,9 +46,9 @@ if ! printf '%s' "$branch" | grep -Eq "^($types)/[a-z0-9]+(-[a-z0-9]+)*$"; then
 The description is lowercase letters, digits and single hyphens — no spaces, underscores, capitals,
 double hyphens or a trailing one. For example:
 
-    feature/archive-clips
-    bugfix/issue-42-chat-offset-drift
-    chore/bump-httpx
+    feature/publish-packs-globally
+    bugfix/issue-42-cooldown-off-by-one
+    chore/bump-dependencies
 
     git branch -m <new-name>    renames the branch you are on
 EOF

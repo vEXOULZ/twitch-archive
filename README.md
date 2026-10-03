@@ -58,7 +58,7 @@ flowchart LR
 
 ## 1. Quick start (local development)
 
-You need Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker, and ffmpeg/ffprobe on `PATH` (the worker only).
+You need Python 3.13, [uv](https://docs.astral.sh/uv/), Docker, and ffmpeg/ffprobe on `PATH` (the worker only).
 
 ```bash
 uv sync                                        # creates .venv with all three packages
@@ -700,7 +700,7 @@ Running jobs are interrupted by the restart and resume from their current step. 
 
 Migrations must stay **additive**: the old containers keep running against the migrated schema until the new ones start, and a code rollback leaves the schema migrated.
 
-Pushes and pull requests run CI (`.github/workflows/tests.yml`): the unit tests and both image builds. The database and contract tests skip there because they need a copy of a real database; run them locally (§9) before merging anything that touches queries.
+Pushes and pull requests run CI (`.github/workflows/ci.yml`): lint (ruff, mypy), the unit tests and both image builds. Pushes to `dev` and `main` and `vX.Y.Z` tags also publish the images to GHCR. Changes merge into `dev` and reach production in a release from `dev` into `main` (docs/adr/0001). The database and contract tests skip there because they need a copy of a real database; run them locally (§9) before merging anything that touches queries.
 
 ---
 
@@ -739,13 +739,18 @@ migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_s
 tests/api_contract/               golden responses from the legacy API + replay tests
 tests/worker/                     HLS parsing, planning, capture (respx), ffmpeg, DB-backed steps/runner
 deploy/                           roles.sql, example secrets
-docker/                           api.Dockerfile, worker.Dockerfile
+Dockerfile                        both images, as targets: --target api, --target worker
+docs/adr/                         architecture decisions
 ```
 
 ```bash
 uv run pytest                     # all tests; DB tests skip without Postgres, ffmpeg tests skip without ffmpeg
 uv run pytest tests/worker -q
+uv run ruff check && uv run ruff format --check && uv run mypy   # what CI's lint job runs
 ```
+
+mypy runs in strict mode. The code written before it was turned on still has inline
+`# type: ignore[...]` comments for each error it found then; remove one when you touch that code.
 
 The DB-backed tests use `ARCHIVE_DATABASE_URL`. The default is the `compose.dev.yaml` database. They expect `alembic upgrade head` to have been run, and no other queued jobs in that database.
 

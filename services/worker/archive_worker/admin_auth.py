@@ -100,7 +100,7 @@ class MemorySessionStore:
 
 
 def _utc(ts: float) -> dt.datetime:
-    return dt.datetime.fromtimestamp(ts, dt.timezone.utc)
+    return dt.datetime.fromtimestamp(ts, dt.UTC)
 
 
 class DbSessionStore:
@@ -108,9 +108,17 @@ class DbSessionStore:
 
     async def add(self, key: str, session: Session) -> None:
         async with get_sessionmaker()() as s:
-            s.add(AdminSession(token_hash=key, csrf=session.csrf, actor=session.actor, twitch_user=session.user,
-                               sid=session.sid, expires_at=_utc(session.expires_at),
-                               checked_at=_utc(session.checked_at)))
+            s.add(
+                AdminSession(
+                    token_hash=key,
+                    csrf=session.csrf,
+                    actor=session.actor,
+                    twitch_user=session.user,
+                    sid=session.sid,
+                    expires_at=_utc(session.expires_at),
+                    checked_at=_utc(session.checked_at),
+                )
+            )
             await s.commit()
 
     async def get(self, key: str) -> Session | None:
@@ -118,8 +126,9 @@ class DbSessionStore:
             row = await s.get(AdminSession, key)
         if row is None:
             return None
-        return Session("", row.csrf, row.expires_at.timestamp(), row.actor, row.twitch_user, row.sid,
-                       row.checked_at.timestamp())
+        return Session(
+            "", row.csrf, row.expires_at.timestamp(), row.actor, row.twitch_user, row.sid, row.checked_at.timestamp()
+        )
 
     async def remove(self, key: str) -> None:
         async with get_sessionmaker()() as s:
@@ -141,8 +150,13 @@ class AdminAuth:
     """Password check plus session bookkeeping. ``enabled`` is False when no password is configured.
     Only the scrypt hash of the password is kept. Sessions go to ``store`` (memory by default)."""
 
-    def __init__(self, password: str | None = None, ttl_s: float = SESSION_TTL_S,
-                 clock: Callable[[], float] = time.time, store: SessionStore | None = None) -> None:
+    def __init__(
+        self,
+        password: str | None = None,
+        ttl_s: float = SESSION_TTL_S,
+        clock: Callable[[], float] = time.time,
+        store: SessionStore | None = None,
+    ) -> None:
         self.ttl_s = ttl_s
         self.clock = clock
         self._salt, self._digest = hash_password(password) if password else (b"", b"")
@@ -158,12 +172,12 @@ class AdminAuth:
         _, digest = hash_password(attempt, self._salt)
         return hmac.compare_digest(digest, self._digest)
 
-    async def login(self, actor: str = "password", user: dict[str, Any] | None = None,
-                    sid: str | None = None) -> Session:
+    async def login(
+        self, actor: str = "password", user: dict[str, Any] | None = None, sid: str | None = None
+    ) -> Session:
         now = self.clock()
         await self.store.sweep(now)
-        session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), now + self.ttl_s,
-                          actor, user, sid, now)
+        session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), now + self.ttl_s, actor, user, sid, now)
         await self.store.add(token_hash(session.token), session)
         return session
 
@@ -239,12 +253,12 @@ def parse_password_networks(values: list[str]) -> list[ipaddress.IPv4Network | i
     return parse_networks(values)
 
 
-def password_allowed(address: str, networks) -> bool:
+def password_allowed(address: str, networks) -> bool:  # type: ignore[no-untyped-def]
     """Whether the password may be used from ``address`` (see parse_password_networks)."""
     return networks is None or _in(address, networks)
 
 
-def _in(address: str, networks) -> bool:
+def _in(address: str, networks) -> bool:  # type: ignore[no-untyped-def]
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:
@@ -252,7 +266,7 @@ def _in(address: str, networks) -> bool:
     return any(ip in net for net in networks)
 
 
-def client_address(request: Request, trusted_proxies) -> str:
+def client_address(request: Request, trusted_proxies) -> str:  # type: ignore[no-untyped-def]
     """The address a login attempt counts against.
 
     The connecting address, unless it is a trusted proxy: then the nearest
@@ -269,7 +283,7 @@ def client_address(request: Request, trusted_proxies) -> str:
     return request.headers.get("x-real-ip", "").strip() or peer
 
 
-def plain_http(request: Request, trusted_proxies) -> bool:
+def plain_http(request: Request, trusted_proxies) -> bool:  # type: ignore[no-untyped-def]
     """Whether the browser reached us over plain HTTP.
 
     The connection's own scheme, unless it comes from a trusted proxy: then the
@@ -281,4 +295,4 @@ def plain_http(request: Request, trusted_proxies) -> bool:
         forwarded = [p.strip() for p in request.headers.get("x-forwarded-proto", "").split(",") if p.strip()]
         if forwarded:
             scheme = forwarded[-1]
-    return scheme.lower() == "http"
+    return scheme.lower() == "http"  # type: ignore[no-any-return]

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from archive_common.timeutil import parse_helix_duration, parse_ts
 from archive_common.twitch.helix import Helix
@@ -80,7 +81,7 @@ class Monitor:
             log.info("stream %s ended without a VOD; no bot chat", stream_id)
             return
         await upsert_vod(video)
-        payload: dict = {"stream_id": stream_id}
+        payload: dict[str, Any] = {"stream_id": stream_id}
         if duration := parse_helix_duration(video.get("duration", "")):
             payload["duration"] = duration  # final now; the vods row may still hold the live one
         log.info("stream %s -> vod %s ended; starting bot chat job", stream_id, video["id"])

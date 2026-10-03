@@ -13,7 +13,6 @@ import logging
 from typing import Any
 
 import httpx
-
 from archive_common import emote_providers as providers
 from archive_common import http
 
@@ -45,9 +44,9 @@ async def fetch_third_party_emotes(twitch_id: str) -> dict[str, Any]:
     flat = [(provider, url, parse) for provider, ps in parts.items() for url, parse in ps]
     results = await asyncio.gather(*(_fetch_part(url, parse) for _, url, parse in flat), return_exceptions=True)
 
-    by_code: dict[str, dict[str, dict]] = {p: {} for p in parts}
+    by_code: dict[str, dict[str, dict[str, Any]]] = {p: {} for p in parts}
     failed: list[str] = []
-    for (provider, url, _), result in zip(flat, results):
+    for (provider, url, _), result in zip(flat, results, strict=True):
         if isinstance(result, BaseException):
             if not isinstance(result, Exception):
                 raise result

@@ -2,11 +2,10 @@
 
 import httpx
 import pytest
+from archive_api.middleware import GZIP_MIN_SIZE, JsonBody
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-
-from archive_api.middleware import GZIP_MIN_SIZE, JsonBody
 
 VALUES = {
     "small": {"total": 1, "data": [{"id": "1", "title": "é ✓"}]},

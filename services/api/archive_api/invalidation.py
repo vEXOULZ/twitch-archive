@@ -1,8 +1,8 @@
 """Drop cached responses as soon as a VOD (or its games) changes.
 
 Database triggers (migration 0006) send ``NOTIFY vods_changed, '<vod id>'`` when
-any write to ``vods`` or ``games`` commits; this LISTENs on its own connection. While the connection is down nothing is heard, so every
-(re)connect clears the caches outright.
+any write to ``vods`` or ``games`` commits; this LISTENs on its own connection. While the connection is down
+nothing is heard, so every (re)connect clears the caches outright.
 
 A merge or split also moves the VOD's chat rows and emotes, and says so with a
 ``ROWS_MOVED`` notice, which drops the chat replay and emotes cached for it.
@@ -18,9 +18,8 @@ import asyncio
 import logging
 
 import asyncpg
-from sqlalchemy.engine import make_url
-
 from archive_common.db import ROWS_MOVED, VOD_CHANGED
+from sqlalchemy.engine import make_url
 
 from .comments import Comments
 from .middleware import ResponseCache
@@ -50,8 +49,13 @@ def _synthetic_vod(key: str) -> bool:
 
 
 class VodInvalidator:
-    def __init__(self, database_url: str, service_cache: ResponseCache, *other_caches: ResponseCache,
-                 comments: Comments | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        service_cache: ResponseCache,
+        *other_caches: ResponseCache,
+        comments: Comments | None = None,
+    ) -> None:
         self.dsn = asyncpg_dsn(database_url)
         self.service_cache = service_cache
         self.other_caches = other_caches  # small ones (e.g. /v1/status): cleared on any change
@@ -59,8 +63,7 @@ class VodInvalidator:
 
     def invalidate(self, vod_id: str) -> None:
         own = f"vods/{vod_id}"
-        self.service_cache.invalidate(
-            lambda key: key == own or key.startswith(_LIST_PREFIXES) or _synthetic_vod(key))
+        self.service_cache.invalidate(lambda key: key == own or key.startswith(_LIST_PREFIXES) or _synthetic_vod(key))
         for cache in self.other_caches:
             cache.clear()
         if self.comments is not None and not vod_id.isdigit():
@@ -77,7 +80,7 @@ class VodInvalidator:
         if self.comments is not None:
             self.comments.clear()
 
-    def _on_notify(self, _conn, _pid: int, _channel: str, payload: str) -> None:
+    def _on_notify(self, _conn, _pid: int, _channel: str, payload: str) -> None:  # type: ignore[no-untyped-def]
         if payload.startswith(ROWS_MOVED):
             log.debug("rows of vod %s moved; dropping its chat and emotes", payload.removeprefix(ROWS_MOVED))
             self.rows_moved(payload.removeprefix(ROWS_MOVED))
@@ -91,7 +94,7 @@ class VodInvalidator:
             try:
                 conn = await asyncpg.connect(self.dsn)
                 lost = asyncio.Event()
-                conn.add_termination_listener(lambda _c: lost.set())
+                conn.add_termination_listener(lambda _c, lost=lost: lost.set())
                 await conn.add_listener(VOD_CHANGED, self._on_notify)
                 self.clear_all()  # anything edited while we were not listening
                 while not lost.is_set():

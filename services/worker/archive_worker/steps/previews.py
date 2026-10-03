@@ -12,18 +12,18 @@ import asyncio
 import shutil
 import sys
 from pathlib import Path
-
-from sqlalchemy import select
+from typing import Any
 
 from archive_common import previews as pv
 from archive_common.db import get_sessionmaker
 from archive_common.models import Vod
+from sqlalchemy import select
 
 from .. import ffmpeg
 from ..context import JobContext, StepError
 
 
-async def _set_preview(vod_id: str, youtube_id: str, preview: dict) -> bool:
+async def _set_preview(vod_id: str, youtube_id: str, preview: dict[str, Any]) -> bool:
     """Put ``preview`` on the VOD's upload ``youtube_id`` (row-locked, like publish's entry upsert); False when
     the upload is no longer listed (replaced or removed meanwhile)."""
     async with get_sessionmaker()() as s:
@@ -75,7 +75,7 @@ async def previews(ctx: JobContext) -> None:
                 continue
             ctx.log.info("dry run: %d preview frames of part %s in %s", frames, part["number"], out)
         return
-    uploaded: dict[str, dict] = ctx.payload.get("uploaded") or {}
+    uploaded: dict[str, dict[str, Any]] = ctx.payload.get("uploaded") or {}
     done = {e.get("id") for e in (await ctx.get_vod()).youtube or [] if e.get("preview")}
     todo = [(p, uploaded[str(p["number"])]["id"]) for p in parts if str(p["number"]) in uploaded]
     todo = [(p, yid) for p, yid in todo if yid not in done]
@@ -89,9 +89,22 @@ async def _download(ctx: JobContext, youtube_id: str, into: Path) -> Path:
     """The upload's smallest useful video-only stream (240p or less), downloaded into ``into``."""
     into.mkdir(parents=True, exist_ok=True)
     args = [
-        sys.executable, "-m", "yt_dlp", "--quiet", "--no-warnings", "--no-progress", "--no-playlist",
-        "-f", "bv[height<=240]/wv/w", "-o", str(into / f"{youtube_id}.%(ext)s"), "--print", "after_move:filepath",
-        *ctx.settings.previews_ytdlp_args, "--", f"https://www.youtube.com/watch?v={youtube_id}",
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--quiet",
+        "--no-warnings",
+        "--no-progress",
+        "--no-playlist",
+        "-f",
+        "bv[height<=240]/wv/w",
+        "-o",
+        str(into / f"{youtube_id}.%(ext)s"),
+        "--print",
+        "after_move:filepath",
+        *ctx.settings.previews_ytdlp_args,
+        "--",
+        f"https://www.youtube.com/watch?v={youtube_id}",
     ]
     proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
@@ -116,9 +129,14 @@ async def previews_fetch(ctx: JobContext) -> None:
     failed (so the runtime retries later); otherwise the failures are logged."""
     vod = await ctx.get_vod()
     only = {str(v) for v in ctx.payload.get("youtube_ids") or []}
-    todo = [e["id"] for e in vod.youtube or []
-            if isinstance(e.get("id"), str) and pv.YOUTUBE_ID.match(e["id"]) and not e.get("preview")
-            and (not only or e["id"] in only)]
+    todo = [
+        e["id"]
+        for e in vod.youtube or []
+        if isinstance(e.get("id"), str)
+        and pv.YOUTUBE_ID.match(e["id"])
+        and not e.get("preview")
+        and (not only or e["id"] in only)
+    ]
     if not todo:
         ctx.log.info("every upload of %s has previews", vod.id)
         return
@@ -162,8 +180,11 @@ async def previews_backfill(ctx: JobContext) -> None:
     if ctx.payload.get("vod_ids"):
         stmt = stmt.where(Vod.id.in_([str(v) for v in ctx.payload["vod_ids"]]))
     async with get_sessionmaker()() as s:
-        vods = [v for v in (await s.execute(stmt)).scalars()
-                if any(isinstance(e, dict) and e.get("id") and not e.get("preview") for e in v.youtube or [])]
+        vods = [
+            v
+            for v in (await s.execute(stmt)).scalars()
+            if any(isinstance(e, dict) and e.get("id") and not e.get("preview") for e in v.youtube or [])
+        ]
     queued = 0
     for i, vod in enumerate(vods):
         ctx.progress(100 * i / len(vods), 100, "percent", f"previews backfill: {vod.id} ({i + 1}/{len(vods)})")

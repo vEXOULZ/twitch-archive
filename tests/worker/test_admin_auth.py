@@ -2,9 +2,6 @@
 
 import httpx
 import pytest
-from pydantic import SecretStr
-from starlette.requests import Request
-
 from archive_worker import jobs, youtube
 from archive_worker.admin import create_admin_app
 from archive_worker.admin_auth import (
@@ -15,6 +12,8 @@ from archive_worker.admin_auth import (
     parse_networks,
     plain_http,
 )
+from pydantic import SecretStr
+from starlette.requests import Request
 
 
 class Clock:
@@ -67,30 +66,34 @@ def test_login_limiter_window():
 
 
 def _request(peer: str, headers: dict[str, str], scheme: str = "http") -> Request:
-    return Request({
-        "type": "http",
-        "scheme": scheme,
-        "client": (peer, 1234),
-        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
-    })
+    return Request(
+        {
+            "type": "http",
+            "scheme": scheme,
+            "client": (peer, 1234),
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        }
+    )
 
 
 def test_client_address_trusts_only_configured_proxies():
-    proxies = parse_networks(["10.0.0.1", "172.16.0.0/12"])
-    xff = {"X-Forwarded-For": "6.6.6.6, 1.2.3.4, 172.16.5.5"}
+    proxies = parse_networks(["10.0.0.1", "172.16.0.0/12"])  # conventions:allow-infra
+    xff = {"X-Forwarded-For": "6.6.6.6, 1.2.3.4, 172.16.5.5"}  # conventions:allow-infra
     # Not a proxy: whatever it claims is ignored.
     assert client_address(_request("9.9.9.9", xff), proxies) == "9.9.9.9"
-    assert client_address(_request("10.0.0.1", xff), []) == "10.0.0.1"
+    assert client_address(_request("10.0.0.1", xff), []) == "10.0.0.1"  # conventions:allow-infra
     # A proxy: the nearest hop that is not one of ours (6.6.6.6 was written by the client).
-    assert client_address(_request("10.0.0.1", xff), proxies) == "1.2.3.4"
-    assert client_address(_request("10.0.0.1", {"X-Real-IP": "5.5.5.5"}), proxies) == "5.5.5.5"
-    assert client_address(_request("10.0.0.1", {}), proxies) == "10.0.0.1"
+    assert client_address(_request("10.0.0.1", xff), proxies) == "1.2.3.4"  # conventions:allow-infra
+    assert (
+        client_address(_request("10.0.0.1", {"X-Real-IP": "5.5.5.5"}), proxies) == "5.5.5.5"  # conventions:allow-infra
+    )
+    assert client_address(_request("10.0.0.1", {}), proxies) == "10.0.0.1"  # conventions:allow-infra
     with pytest.raises(ValueError):
         parse_networks(["not-an-address"])
 
 
 def test_plain_http_believes_x_forwarded_proto_only_from_proxies():
-    proxies = parse_networks(["10.0.0.1"])
+    proxies = parse_networks(["10.0.0.1"])  # conventions:allow-infra
     https = {"X-Forwarded-Proto": "https"}
     assert plain_http(_request("9.9.9.9", {}), proxies)
     assert not plain_http(_request("9.9.9.9", {}, "https"), proxies)
@@ -98,9 +101,12 @@ def test_plain_http_believes_x_forwarded_proto_only_from_proxies():
     assert plain_http(_request("9.9.9.9", https), proxies)
     assert not plain_http(_request("9.9.9.9", {"X-Forwarded-Proto": "http"}, "https"), proxies)
     # A proxy: the value it wrote, the last one.
-    assert not plain_http(_request("10.0.0.1", https), proxies)
-    assert plain_http(_request("10.0.0.1", {"X-Forwarded-Proto": "https, http"}, "https"), proxies)
-    assert plain_http(_request("10.0.0.1", {}), proxies)
+    assert not plain_http(_request("10.0.0.1", https), proxies)  # conventions:allow-infra
+    assert plain_http(
+        _request("10.0.0.1", {"X-Forwarded-Proto": "https, http"}, "https"),  # conventions:allow-infra
+        proxies,
+    )
+    assert plain_http(_request("10.0.0.1", {}), proxies)  # conventions:allow-infra
 
 
 @pytest.fixture
@@ -109,7 +115,7 @@ def admin(deps):
     deps.settings.admin_password = SecretStr("correct horse")
     app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)))
 
-    def client(peer: str = "192.168.1.10") -> httpx.AsyncClient:
+    def client(peer: str = "192.168.1.10") -> httpx.AsyncClient:  # conventions:allow-infra
         # https: the session cookie is Secure, so the client only sends it back over https.
         transport = httpx.ASGITransport(app=app, client=(peer, 1234))
         return httpx.AsyncClient(transport=transport, base_url="https://admin")
@@ -120,8 +126,12 @@ def admin(deps):
 async def test_login_session_and_logout(admin):
     async with admin() as c:
         assert (await c.get("/admin/session")).json() == {
-            "authenticated": False, "csrf": None, "expiresAt": None, "passwordLogin": True,
-            "twitchLogin": False, "user": None,
+            "authenticated": False,
+            "csrf": None,
+            "expiresAt": None,
+            "passwordLogin": True,
+            "twitchLogin": False,
+            "user": None,
         }
         assert (await c.get("/admin/kinds")).status_code == 403
 
@@ -156,7 +166,7 @@ async def test_login_session_and_logout(admin):
 async def test_password_login_over_plain_http_sets_a_cookie_the_browser_keeps(deps):
     deps.settings.admin_api_key = SecretStr("k")
     deps.settings.admin_password = SecretStr("correct horse")
-    deps.settings.admin_trusted_proxies = ["192.168.1.2"]
+    deps.settings.admin_trusted_proxies = ["192.168.1.2"]  # conventions:allow-infra
     app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)))
 
     async def login(base_url: str, peer: str, headers: dict[str, str]) -> tuple[str, str]:
@@ -170,18 +180,26 @@ async def test_password_login_over_plain_http_sets_a_cookie_the_browser_keeps(de
             return r.headers["set-cookie"].lower(), out.headers["set-cookie"].lower()
 
     # Straight to the worker over HTTP, or through the proxy from an HTTP listener: no Secure.
-    for base, peer, headers in (("http://admin", "192.168.1.10", {}),
-                                ("http://admin", "192.168.1.2", {"X-Forwarded-For": "192.168.1.10",
-                                                                 "X-Forwarded-Proto": "http"})):
+    for base, peer, headers in (
+        ("http://admin", "192.168.1.10", {}),  # conventions:allow-infra
+        (
+            "http://admin",
+            "192.168.1.2",  # conventions:allow-infra
+            {"X-Forwarded-For": "192.168.1.10", "X-Forwarded-Proto": "http"},  # conventions:allow-infra
+        ),
+    ):
         cookie, cleared = await login(base, peer, headers)
         assert "httponly" in cookie and "samesite=strict" in cookie and "secure" not in cookie
         assert "max-age=0" in cleared and "secure" not in cleared
     # Through the proxy over HTTPS: Secure, whatever the hop to the worker was.
-    cookie, cleared = await login("http://admin", "192.168.1.2", {"X-Forwarded-For": "192.168.1.10",
-                                                                   "X-Forwarded-Proto": "https"})
+    cookie, cleared = await login(
+        "http://admin",
+        "192.168.1.2",  # conventions:allow-infra
+        {"X-Forwarded-For": "192.168.1.10", "X-Forwarded-Proto": "https"},  # conventions:allow-infra
+    )
     assert "secure" in cookie and "secure" in cleared
     # A client that is not the proxy cannot turn Secure off by claiming HTTP.
-    cookie, _ = await login("https://admin", "192.168.1.10", {"X-Forwarded-Proto": "http"})
+    cookie, _ = await login("https://admin", "192.168.1.10", {"X-Forwarded-Proto": "http"})  # conventions:allow-infra
     assert "secure" in cookie
 
 
@@ -192,13 +210,13 @@ async def test_api_key_still_works_and_wrong_key_is_refused(admin):
 
 
 async def test_failed_logins_are_rate_limited_per_address(admin):
-    async with admin("192.168.1.7") as c:
+    async with admin("192.168.1.7") as c:  # conventions:allow-infra
         for _ in range(5):
             assert (await c.post("/admin/session", json={"password": "nope"})).status_code == 401
         limited = await c.post("/admin/session", json={"password": "correct horse"})
         assert limited.status_code == 429 and limited.json()["error"] is True
         assert 0 < int(limited.headers["Retry-After"]) <= 300
-    async with admin("192.168.1.8") as c:  # someone else is not locked out
+    async with admin("192.168.1.8") as c:  # someone else is not locked out conventions:allow-infra
         assert (await c.post("/admin/session", json={"password": "correct horse"})).status_code == 200
 
 

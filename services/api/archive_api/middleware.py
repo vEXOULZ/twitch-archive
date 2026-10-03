@@ -26,7 +26,7 @@ class JsonBody:
     __slots__ = ("raw", "_gzipped")
 
     def __init__(self, value: Any) -> None:
-        self.raw: bytes = JSONResponse(value).body  # byte-identical to an uncached JSONResponse
+        self.raw: bytes = JSONResponse(value).body  # type: ignore[assignment]  # byte-identical to an uncached JSONResponse
         self._gzipped: bytes | None = None
 
     def response(self, request: Request) -> Response:
@@ -35,8 +35,11 @@ class JsonBody:
                 self._gzipped = gzip.compress(self.raw, compresslevel=9)
             # GZipMiddleware passes responses that already carry Content-Encoding through
             # untouched, so set the headers it would have added.
-            return Response(self._gzipped, media_type="application/json",
-                            headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+            return Response(
+                self._gzipped,
+                media_type="application/json",
+                headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+            )
         return Response(self.raw, media_type="application/json")
 
 
@@ -70,7 +73,7 @@ class ResponseCache:
         even if the request that started it goes away."""
         body = self.get(key)
         if body is not None:
-            return body
+            return body  # type: ignore[no-any-return]
         task = self._rendering.get(key)
         if task is None:
             task = asyncio.ensure_future(self._render(key, factory))

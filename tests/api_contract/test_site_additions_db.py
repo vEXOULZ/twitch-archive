@@ -5,18 +5,18 @@ Like test_contract.py, these run against the local Postgres and skip without it.
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import quote
 
 import httpx
-from sqlalchemy import insert
-
 from archive_api.games_played import games_played
 from archive_common.models import Vod
 from archive_common.serialize import box_art_template
+from sqlalchemy import insert
 
 
-async def _all_vods(client: httpx.AsyncClient, query: str = "") -> list[dict]:
-    vods: list[dict] = []
+async def _all_vods(client: httpx.AsyncClient, query: str = "") -> list[dict[str, Any]]:
+    vods: list[dict[str, Any]] = []
     while True:
         page = (await client.get(f"/vods?$limit=50&$skip={len(vods)}&$sort[id]=1{query}")).json()
         vods += page["data"]
@@ -26,7 +26,7 @@ async def _all_vods(client: httpx.AsyncClient, query: str = "") -> list[dict]:
 
 async def test_games_played_matches_the_client_side_computation(client: httpx.AsyncClient) -> None:
     """The same list the site used to build by paging through /vods."""
-    expected: dict[str, dict] = {}
+    expected: dict[str, dict[str, Any]] = {}
     for vod in sorted(await _all_vods(client), key=lambda v: v["createdAt"]):
         for ch in vod["chapters"] or []:
             if ch.get("kind") == "gap":  # a merge's gap: no game
@@ -45,8 +45,16 @@ async def test_games_played_matches_the_client_side_computation(client: httpx.As
     assert resp.status_code == 200
     got = resp.json()
     assert len(got) == len(expected)
-    by_key = {("none" if g["gameId"] is None and g["name"] == "No category" else
-               f"id:{g['gameId']}" if g["gameId"] else f"n:{g['name']}"): g for g in got}
+    by_key = {
+        (
+            "none"
+            if g["gameId"] is None and g["name"] == "No category"
+            else f"id:{g['gameId']}"
+            if g["gameId"]
+            else f"n:{g['name']}"
+        ): g
+        for g in got
+    }
     for key, e in expected.items():
         g = by_key[key]
         assert g["vods"] == len(e["vods"]), key
@@ -59,7 +67,7 @@ async def test_games_played_matches_the_client_side_computation(client: httpx.As
         assert 0 <= g["watchableSeconds"] <= g["seconds"], key
 
     # vods desc, then lastPlayed desc (name order is the database collation's)
-    for a, b in zip(got, got[1:]):
+    for a, b in zip(got, got[1:], strict=False):
         assert (a["vods"], a["lastPlayed"]) >= (b["vods"], b["lastPlayed"])
 
 
@@ -80,8 +88,8 @@ async def test_games_played_sums_chapter_lengths(client: httpx.AsyncClient) -> N
         got = {g["gameId"]: g for g in await games_played(conn)}
 
     a, b = got["test-gp-a"], got["test-gp-b"]
-    assert (a["chapters"], a["seconds"], a["watchableSeconds"]) == (3, 3000, 1800)
-    assert (b["chapters"], b["seconds"], b["watchableSeconds"]) == (2, 600, 600)
+    assert (a["chapters"], a["seconds"], a["watchableSeconds"]) == (3, 3000, 1800)  # type: ignore[comparison-overlap]
+    assert (b["chapters"], b["seconds"], b["watchableSeconds"]) == (2, 600, 600)  # type: ignore[comparison-overlap]
     assert isinstance(a["seconds"], int) and isinstance(a["watchableSeconds"], int)
 
 

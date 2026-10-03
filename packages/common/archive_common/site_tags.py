@@ -43,19 +43,22 @@ def with_shapes(tags: list[dict[str, Any]], hashes: dict[str, str]) -> list[dict
 async def load(conn: Any) -> dict[str, Any] | None:
     """``{"tags", "updatedAt", "updatedBy"}`` (``updatedAt`` a datetime), or None while the list was
     never saved. ``conn``: an async connection or session."""
-    row = (await conn.execute(
-        select(SiteSetting.value, SiteSetting.updated_at, SiteSetting.updated_by).where(SiteSetting.key == KEY)
-    )).first()
+    row = (
+        await conn.execute(
+            select(SiteSetting.value, SiteSetting.updated_at, SiteSetting.updated_by).where(SiteSetting.key == KEY)
+        )
+    ).first()
     if row is None:
         return None
     hashes = dict((await conn.execute(select(SiteTagShape.name, SiteTagShape.hash))).all())
-    return {"tags": with_shapes(list(row.value or []), hashes), "updatedAt": row.updated_at,
-            "updatedBy": row.updated_by}
+    return {
+        "tags": with_shapes(list(row.value or []), hashes),
+        "updatedAt": row.updated_at,
+        "updatedBy": row.updated_by,
+    }
 
 
 async def shape(conn: Any, name: str) -> tuple[str, str] | None:
     """A tag's cleaned SVG and its hash, or None if it has no shape."""
-    row = (await conn.execute(
-        select(SiteTagShape.svg, SiteTagShape.hash).where(SiteTagShape.name == name)
-    )).first()
+    row = (await conn.execute(select(SiteTagShape.svg, SiteTagShape.hash).where(SiteTagShape.name == name))).first()
     return (row.svg, row.hash) if row else None

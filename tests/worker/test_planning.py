@@ -19,8 +19,13 @@ def test_chapters_keep_legacy_shape():
         [_edge(0, 3_600_000, "Just Chatting"), _edge(3_600_000, 0, "Artifact", "2")], 5000.5, ["Artifact"]
     )
     assert chapters[0] == {
-        "gameId": "1", "name": "Just Chatting", "image": "https://img/1.jpg",
-        "duration": "00:00:00", "start": 0, "end": 3600, "restricted": False,
+        "gameId": "1",
+        "name": "Just Chatting",
+        "image": "https://img/1.jpg",
+        "duration": "00:00:00",
+        "start": 0,
+        "end": 3600,
+        "restricted": False,
     }
     # durationMilliseconds 0 => runs to the end of the VOD; ``end`` is a length
     assert chapters[1]["duration"] == "01:00:00"
@@ -63,7 +68,7 @@ def test_select_parts():
 
 
 def test_titles_use_local_date():
-    created = dt.datetime(2026, 2, 21, 1, 30, tzinfo=dt.timezone.utc)  # 20th in Sao Paulo
+    created = dt.datetime(2026, 2, 21, 1, 30, tzinfo=dt.UTC)  # 20th in Sao Paulo
     assert planning.video_title("vexoulz", "vod", created, "America/Sao_Paulo", 1, 1) == (
         "vexoulz Twitch VOD - 2026-02-20"
     )
