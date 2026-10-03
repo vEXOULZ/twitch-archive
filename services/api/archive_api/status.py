@@ -12,31 +12,38 @@ import logging
 from typing import Any
 
 import httpx
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncConnection
-
 from archive_common.serialize import (
-    STREAMS, VODS, box_art_image, box_art_template, not_hidden, not_merged_away, real, vods_json,
+    STREAMS,
+    VODS,
+    box_art_image,
+    box_art_template,
+    not_hidden,
+    not_merged_away,
+    real,
+    vods_json,
 )
 from archive_common.twitch.helix import Helix
-
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 log = logging.getLogger(__name__)
 
 
-async def _latest_vod(conn: AsyncConnection, stream_id: str | None = None) -> dict | None:
-    where = [not_merged_away(), not_hidden(), real()] + ([VODS.table.c.stream_id == stream_id] if stream_id is not None else [])
+async def _latest_vod(conn: AsyncConnection, stream_id: str | None = None) -> dict[str, Any] | None:
+    where = [not_merged_away(), not_hidden(), real()] + (
+        [VODS.table.c.stream_id == stream_id] if stream_id is not None else []
+    )
     vods = await vods_json(conn, *where, order_by=VODS.table.c.createdAt.desc(), limit=1)
     return vods[0] if vods else None
 
 
-def _game(name: str | None, game_id: str | None, image: str | None) -> dict | None:
+def _game(name: str | None, game_id: str | None, image: str | None) -> dict[str, Any] | None:
     if not name and not game_id:
         return None
     return {"name": name, "gameId": game_id, "image": image, "imageTemplate": box_art_template(image)}
 
 
-async def _helix_stream(helix: Helix, twitch_id: str, stream_id: str) -> dict | None:
+async def _helix_stream(helix: Helix, twitch_id: str, stream_id: str) -> dict[str, Any] | None:
     """{title, game} of the live stream from Helix, or None if unavailable."""
     if not helix.configured or not twitch_id:
         return None
@@ -66,7 +73,7 @@ async def stream_status(conn: AsyncConnection, helix: Helix, twitch_id: str) -> 
     if row is None:
         return {"live": False, "stream": None, "vod": await _latest_vod(conn)}
 
-    live = STREAMS.to_json(row)
+    live = STREAMS.to_json(row)  # type: ignore[arg-type]
     vod, info = await asyncio.gather(_latest_vod(conn, live["id"]), _helix_stream(helix, twitch_id, live["id"]))
     if info is None:
         last = next((c for c in reversed((vod or {}).get("chapters") or []) if isinstance(c, dict)), {})

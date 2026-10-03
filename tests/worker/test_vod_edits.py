@@ -5,22 +5,40 @@ import re
 from decimal import Decimal
 
 import pytest
-
 from archive_worker import vod_edits
 
 TEMPLATE = "https://static-cdn.jtvnw.net/ttv-boxart/509658-{width}x{height}.jpg"
 
 
 def ch(start, length, name="Just Chatting", **extra):
-    return {"name": name, "gameId": "509658", "imageTemplate": TEMPLATE, "start": start, "length": length,
-            "restricted": False, **extra}
+    return {
+        "name": name,
+        "gameId": "509658",
+        "imageTemplate": TEMPLATE,
+        "start": start,
+        "length": length,
+        "restricted": False,
+        **extra,
+    }
 
 
 def test_vod_fields():
-    out = vod_edits.vod_fields({"title": " t ", "hidden": True, "thumbnailUrl": "", "duration": "123:04:05",
-                                "createdAt": "2026-09-30T18:00:00Z"})
-    assert out == {"title": "t", "hidden": True, "thumbnail_url": None, "duration": "123:04:05",
-                   "created_at": dt.datetime(2026, 9, 30, 18, tzinfo=dt.timezone.utc)}
+    out = vod_edits.vod_fields(
+        {
+            "title": " t ",
+            "hidden": True,
+            "thumbnailUrl": "",
+            "duration": "123:04:05",
+            "createdAt": "2026-09-30T18:00:00Z",
+        }
+    )
+    assert out == {
+        "title": "t",
+        "hidden": True,
+        "thumbnail_url": None,
+        "duration": "123:04:05",
+        "created_at": dt.datetime(2026, 9, 30, 18, tzinfo=dt.UTC),
+    }
     assert vod_edits.vod_fields({"duration": "1:02:03"}) == {"duration": "01:02:03"}
     assert vod_edits.vod_fields({}) == {}
 
@@ -49,8 +67,11 @@ def test_tags():
     assert vod_edits.tags(["Complete", "x"], ("x", "complete")) == ["complete", "x"]
     with pytest.raises(ValueError, match=re.escape("unknown tag(s) compilation; known: complete")):
         vod_edits.vod_fields({"tags": ["compilation"]}, ("complete",))
-    for value, message in (("compilation", "list of strings"), ([1], "list of strings"),
-                           (["nope"], "unknown tag(s) nope; known: compilation")):
+    for value, message in (
+        ("compilation", "list of strings"),
+        ([1], "list of strings"),
+        (["nope"], "unknown tag(s) nope; known: compilation"),
+    ):
         with pytest.raises(ValueError, match=re.escape(message)):
             vod_edits.tags(value)
 
@@ -61,12 +82,24 @@ def test_content_end():
 
 
 def test_games_rows():
-    [a, b] = vod_edits.games([
-        {"start_time": "0", "end_time": 60, "game_name": "A", "id": "7", "vodId": "v", "createdAt": "x"},
-        {"start_time": 60, "end_time": 90.5, "game_name": "B", "game_id": "", "chapter_image": "https://c/i.jpg"},
-    ], 91)
-    assert a == {"start_time": Decimal("0"), "end_time": Decimal("60"), "game_id": None, "game_name": "A",
-                 "title": None, "video_provider": None, "video_id": None, "thumbnail_url": None, "chapter_image": None}
+    [a, b] = vod_edits.games(
+        [
+            {"start_time": "0", "end_time": 60, "game_name": "A", "id": "7", "vodId": "v", "createdAt": "x"},
+            {"start_time": 60, "end_time": 90.5, "game_name": "B", "game_id": "", "chapter_image": "https://c/i.jpg"},
+        ],
+        91,
+    )
+    assert a == {
+        "start_time": Decimal("0"),
+        "end_time": Decimal("60"),
+        "game_id": None,
+        "game_name": "A",
+        "title": None,
+        "video_provider": None,
+        "video_id": None,
+        "thumbnail_url": None,
+        "chapter_image": None,
+    }
     assert (b["end_time"], b["game_id"], b["chapter_image"]) == (Decimal("90.5"), None, "https://c/i.jpg")
     assert vod_edits.games([{"start_time": 0, "end_time": 10**6, "game_name": "A"}], 0)  # duration unknown
 
@@ -79,11 +112,18 @@ def test_games_rows():
         ([{"start_time": -1, "end_time": 1, "game_name": "A"}], "games[0].start_time must be a number of seconds >= 0"),
         ([{"start_time": "abc", "end_time": 1, "game_name": "A"}], "games[0].start_time must be a number"),
         ([{"start_time": 5, "end_time": 5, "game_name": "A"}], "games[0] must end after it starts"),
-        ([{"start_time": 0, "end_time": 200, "game_name": "A"}], "games[0] ends at 200s, after the end of the VOD (100s)"),
-        ([{"start_time": 0, "end_time": 50, "game_name": "A"}, {"start_time": 40, "end_time": 60, "game_name": "B"}],
-         "games[1] starts at 40s, inside games[0]"),
-        ([{"start_time": 50, "end_time": 60, "game_name": "A"}, {"start_time": 0, "end_time": 10, "game_name": "B"}],
-         "games[1] starts before games[0]"),
+        (
+            [{"start_time": 0, "end_time": 200, "game_name": "A"}],
+            "games[0] ends at 200s, after the end of the VOD (100s)",
+        ),
+        (
+            [{"start_time": 0, "end_time": 50, "game_name": "A"}, {"start_time": 40, "end_time": 60, "game_name": "B"}],
+            "games[1] starts at 40s, inside games[0]",
+        ),
+        (
+            [{"start_time": 50, "end_time": 60, "game_name": "A"}, {"start_time": 0, "end_time": 10, "game_name": "B"}],
+            "games[1] starts before games[0]",
+        ),
         ([{"start_time": 0, "end_time": 1, "game_name": "A", "views": 1}], "games[0] has unknown field(s) views"),
         ([{"start_time": 0, "end_time": 1, "game_name": "A", "thumbnail_url": "x"}], "games[0].thumbnail_url must be"),
     ],
@@ -96,17 +136,38 @@ def test_games_rows_refused(items, message):
 def test_chapters_stored_in_the_legacy_shape():
     out = vod_edits.chapters([ch(0, 3600), ch(3600, 1800.5, name="Artifact", restricted=True)], 5401)
     assert out == [
-        {"gameId": "509658", "name": "Just Chatting",
-         "image": "https://static-cdn.jtvnw.net/ttv-boxart/509658-40x53.jpg", "imageTemplate": TEMPLATE,
-         "duration": "00:00:00", "start": 0, "end": 3600, "restricted": False},
-        {"gameId": "509658", "name": "Artifact",
-         "image": "https://static-cdn.jtvnw.net/ttv-boxart/509658-40x53.jpg", "imageTemplate": TEMPLATE,
-         "duration": "01:00:00", "start": 3600, "end": 1800.5, "restricted": True},
+        {
+            "gameId": "509658",
+            "name": "Just Chatting",
+            "image": "https://static-cdn.jtvnw.net/ttv-boxart/509658-40x53.jpg",
+            "imageTemplate": TEMPLATE,
+            "duration": "00:00:00",
+            "start": 0,
+            "end": 3600,
+            "restricted": False,
+        },
+        {
+            "gameId": "509658",
+            "name": "Artifact",
+            "image": "https://static-cdn.jtvnw.net/ttv-boxart/509658-40x53.jpg",
+            "imageTemplate": TEMPLATE,
+            "duration": "01:00:00",
+            "start": 3600,
+            "end": 1800.5,
+            "restricted": True,
+        },
     ]
 
 
 def test_gap_chapters_stay_gap_chapters():
-    gap = {"name": "Technical difficulties", "gameId": None, "start": 10, "length": 5, "restricted": True, "kind": "gap"}
+    gap = {
+        "name": "Technical difficulties",
+        "gameId": None,
+        "start": 10,
+        "length": 5,
+        "restricted": True,
+        "kind": "gap",
+    }
     [plain, out] = vod_edits.chapters([ch(0, 10), gap], 15)
     assert out["kind"] == "gap" and "kind" not in plain
 
@@ -151,8 +212,13 @@ def test_youtube_keeps_thumbnails_and_durations():
     )
     assert out == [
         {"id": "abc", "type": "vod", "duration": 3600, "part": 1, "thumbnail_url": "https://thumb/abc"},
-        {"id": "def", "type": "live", "duration": 12.5, "part": 1,
-         "thumbnail_url": "https://i.ytimg.com/vi/def/mqdefault.jpg"},
+        {
+            "id": "def",
+            "type": "live",
+            "duration": 12.5,
+            "part": 1,
+            "thumbnail_url": "https://i.ytimg.com/vi/def/mqdefault.jpg",
+        },
     ]
 
 

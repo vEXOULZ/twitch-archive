@@ -36,11 +36,10 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Column, Row, Table, func, select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
-
 from archive_common.models import BotLog, Log, Vod
 from archive_common.serialize import BOT_LOGS, LOGS, Resource, flat_segments, js_iso
+from sqlalchemy import Column, Row, Table, func, select
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from .errors import LegacyError
 from .middleware import JsonBody, ResponseCache
@@ -58,9 +57,9 @@ HIDDEN = "Vod not found"  # a hidden VOD's chat answers like a missing page
 class _Source:
     name: str
     resource: Resource
-    seq: Column  # paging order within a VOD, rising with the offset
-    sent: Column  # when the message was sent
-    where: tuple = ()  # which of the table's rows are chat
+    seq: Column  # type: ignore[type-arg]  # paging order within a VOD, rising with the offset
+    sent: Column  # type: ignore[type-arg]  # when the message was sent
+    where: tuple = ()  # type: ignore[type-arg]  # which of the table's rows are chat
 
     @property
     def table(self) -> Table:
@@ -72,8 +71,8 @@ class _Source:
         return "" if self is REPLAY else f":{self.name}"
 
 
-REPLAY = _Source("replay", LOGS, _lt.c["_id"], _lt.c.createdAt)
-BOT = _Source("bot", BOT_LOGS, _bt.c.seq, _bt.c.at, (_bt.c.kind.in_(("message", "notice")),))
+REPLAY = _Source("replay", LOGS, _lt.c["_id"], _lt.c.createdAt)  # type: ignore[arg-type]
+BOT = _Source("bot", BOT_LOGS, _bt.c.seq, _bt.c.at, (_bt.c.kind.in_(("message", "notice")),))  # type: ignore[arg-type]
 SOURCES = {s.name: s for s in (REPLAY, BOT)}
 
 
@@ -104,7 +103,7 @@ def _decode_cursor(cursor: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _page(rows: list[dict], created_at: Any, src: _Source) -> dict[str, Any]:
+def _page(rows: list[dict[str, Any]], created_at: Any, src: _Source) -> dict[str, Any]:
     out: dict[str, Any] = {"comments": rows[:PAGE]}
     if len(rows) == PAGE + 1:
         nxt = rows[PAGE]
@@ -132,7 +131,11 @@ class Comments:
             cache.clear()
 
     async def handle(
-        self, engine: AsyncEngine, vod_id: str, offset_raw: str | None, cursor: str | None,
+        self,
+        engine: AsyncEngine,
+        vod_id: str,
+        offset_raw: str | None,
+        cursor: str | None,
         source: str | None = None,
     ) -> JsonBody:
         """A connection is only taken on a cache miss."""
@@ -157,7 +160,7 @@ class Comments:
             counts = await self._counts(engine, vod_id)
             src = SOURCES[source] if source != "auto" else _auto(counts)
 
-            async def by_offset() -> dict:
+            async def by_offset() -> dict[str, Any]:
                 # Only pages of existing vods are cached, so a hit skips the vod lookup.
                 async with engine.connect() as conn:
                     vod = await self._vod(conn, vod_id)
@@ -180,11 +183,11 @@ class Comments:
 
             return await self.cache.get_or_render(f"offset:{vod_id}:{seconds}{src.key}", by_offset)
 
-        async def by_cursor() -> dict:
+        async def by_cursor() -> dict[str, Any]:
             cursor_json = _decode_cursor(cursor or "")
             if cursor_json is None:
                 raise LegacyError(500, "Failed to parse cursor")
-            src = SOURCES.get(cursor_json.get("src"), REPLAY)
+            src = SOURCES.get(cursor_json.get("src"), REPLAY)  # type: ignore[arg-type]
             async with engine.connect() as conn:
                 vod = await self._vod(conn, vod_id)
                 if vod is not None and vod.hidden:
@@ -206,36 +209,47 @@ class Comments:
         key = f"source:{vod_id}"
         cached = self.cache.get(key)
         if cached is not None:
-            return cached
+            return cached  # type: ignore[no-any-return]
         async with engine.connect() as conn:
-            bot, replay = (await conn.execute(select(
-                select(func.count()).select_from(_bt).where(_bt.c.vod_id == vod_id, *BOT.where).scalar_subquery(),
-                select(func.count()).select_from(_lt).where(_lt.c.vod_id == vod_id).scalar_subquery(),
-            ))).one()
+            bot, replay = (
+                await conn.execute(
+                    select(
+                        select(func.count())
+                        .select_from(_bt)
+                        .where(_bt.c.vod_id == vod_id, *BOT.where)
+                        .scalar_subquery(),
+                        select(func.count()).select_from(_lt).where(_lt.c.vod_id == vod_id).scalar_subquery(),
+                    )
+                )
+            ).one()
         counts = {REPLAY.name: replay, BOT.name: bot}
         self.cache.set(key, counts)
         return counts
 
-    async def _vod(self, conn: AsyncConnection, vod_id: str) -> Row | None:
-        return (await conn.execute(
-            select(_vt.c.createdAt, _vt.c.merged_into, _vt.c.hidden, _vt.c.synthetic).where(_vt.c.id == vod_id)
-        )).first()
+    async def _vod(self, conn: AsyncConnection, vod_id: str) -> Row | None:  # type: ignore[type-arg]
+        return (
+            await conn.execute(
+                select(_vt.c.createdAt, _vt.c.merged_into, _vt.c.hidden, _vt.c.synthetic).where(_vt.c.id == vod_id)
+            )
+        ).first()
 
-    async def _synthetic(self, conn: AsyncConnection, vod_id: str) -> dict:
+    async def _synthetic(self, conn: AsyncConnection, vod_id: str) -> dict[str, Any]:
         """A synthetic VOD's (empty) page: where its chat is (the real VODs it plays, as its JSON lists them)."""
         segments = (await flat_segments(conn, [vod_id])).get(vod_id, [])
         return {**EMPTY, "segments": [x.json() for x in segments]}
 
-    async def _rows(self, conn: AsyncConnection, src: _Source, *where) -> list[dict]:
+    async def _rows(self, conn: AsyncConnection, src: _Source, *where) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
         stmt = (
             select(*src.resource.columns())
             .where(*where, *src.where)
             .order_by(src.table.c.content_offset_seconds.asc(), src.seq.asc())
             .limit(PAGE + 1)
         )
-        return [src.resource.to_json(r) for r in (await conn.execute(stmt)).mappings()]
+        return [src.resource.to_json(r) for r in (await conn.execute(stmt)).mappings()]  # type: ignore[arg-type]
 
-    async def _cursor_search(self, conn: AsyncConnection, src: _Source, vod_id: str, cursor: dict) -> dict | None:
+    async def _cursor_search(
+        self, conn: AsyncConnection, src: _Source, vod_id: str, cursor: dict[str, Any]
+    ) -> dict[str, Any] | None:
         t = src.table
         try:
             seq = int(cursor["id"])
@@ -259,9 +273,9 @@ class Comments:
             return None
         return _page(rows, created, src)
 
-    async def _offset_search(
+    async def _offset_search(  # type: ignore[no-untyped-def]
         self, conn: AsyncConnection, src: _Source, vod_id: str, offset: int, vod_created
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         t = src.table
         starting_id = await self._starting_id(conn, src, vod_id, vod_created)
         if starting_id is None:
@@ -282,12 +296,12 @@ class Comments:
             return None
         return _page(rows, js_iso(vod_created), src)
 
-    async def _starting_id(self, conn: AsyncConnection, src: _Source, vod_id: str, vod_created) -> int | None:
+    async def _starting_id(self, conn: AsyncConnection, src: _Source, vod_id: str, vod_created) -> int | None:  # type: ignore[no-untyped-def]
         t = src.table
         key = f"start:{vod_id}{src.key}"
         cached = self.long_cache.get(key)
         if cached is not None:
-            return cached
+            return cached  # type: ignore[no-any-return]
         value = (
             await conn.execute(
                 select(src.seq)

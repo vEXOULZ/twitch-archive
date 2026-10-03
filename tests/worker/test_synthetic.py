@@ -5,13 +5,11 @@ has a 300 s gap. A plays Just Chatting then the test game for an hour; B plays t
 """
 
 import datetime as dt
+from typing import Any
 from urllib.parse import quote
 
 import httpx
 import pytest
-from pydantic import SecretStr
-from sqlalchemy import delete, func, or_, select, update
-
 from archive_api.games_played import games_played
 from archive_api.main import create_app
 from archive_common.audit import AUDIT_LOG
@@ -21,18 +19,27 @@ from archive_common.models import Game, Vod, VodSegment
 from archive_worker import synthetic
 from archive_worker.admin import create_admin_app
 from archive_worker.vods import splice_reason
+from pydantic import SecretStr
+from sqlalchemy import delete, func, or_, select, update
 
 A, B = "test-syn-a", "test-syn-b"
 AB, P = f"{A}+{B}", "test-syn-p"
 KEY = {"Authorization": "Bearer k"}
-START = dt.datetime(2001, 3, 4, 20, 0, tzinfo=dt.timezone.utc)  # before any real VOD
+START = dt.datetime(2001, 3, 4, 20, 0, tzinfo=dt.UTC)  # before any real VOD
 OFFSET = 7500
 GAME = "test-syn-game"
 
 
 def _ch(start, length, name="Just Chatting", game_id="509658"):
-    return {"gameId": game_id, "name": name, "image": None, "duration": "00:00:00", "start": start, "end": length,
-            "restricted": False}
+    return {
+        "gameId": game_id,
+        "name": name,
+        "image": None,
+        "duration": "00:00:00",
+        "start": start,
+        "end": length,
+        "restricted": False,
+    }
 
 
 async def _clean():
@@ -51,12 +58,27 @@ async def _clean():
 async def vods(db):
     await _clean()
     async with get_sessionmaker()() as s:
-        s.add_all([
-            Vod(id=A, title="big stream", created_at=START, duration="02:00:00", stream_id="2001",
-                chapters=[_ch(0, 3600), _ch(3600, 3600, "Test Game", GAME)], thumbnail_url="https://t/a"),
-            Vod(id=B, title="big stream ", created_at=START + dt.timedelta(seconds=OFFSET), duration="01:00:00",
-                stream_id="2002", chapters=[_ch(0, 3600, "Test Game", GAME)]),
-        ])
+        s.add_all(
+            [
+                Vod(
+                    id=A,
+                    title="big stream",
+                    created_at=START,
+                    duration="02:00:00",
+                    stream_id="2001",
+                    chapters=[_ch(0, 3600), _ch(3600, 3600, "Test Game", GAME)],
+                    thumbnail_url="https://t/a",
+                ),
+                Vod(
+                    id=B,
+                    title="big stream ",
+                    created_at=START + dt.timedelta(seconds=OFFSET),
+                    duration="01:00:00",
+                    stream_id="2002",
+                    chapters=[_ch(0, 3600, "Test Game", GAME)],
+                ),
+            ]
+        )
         await s.flush()
         s.add(Game(vod_id=B, start_time=100, end_time=200, game_name="Test Game", video_id="g1"))
         await s.commit()
@@ -80,11 +102,27 @@ async def public(path: str) -> httpx.Response:
         return await c.get(path)
 
 
-async def _sources() -> dict:
+async def _sources() -> dict[str, Any]:
     async with get_sessionmaker()() as s:
-        return {v.id: {k: getattr(v, k) for k in ("title", "duration", "chapters", "youtube", "drive", "hidden",
-                                                  "thumbnail_url", "merged_into", "created_at", "tags", "synthetic")}
-                for v in (await s.execute(select(Vod).where(Vod.id.in_((A, B))))).scalars()}
+        return {
+            v.id: {
+                k: getattr(v, k)
+                for k in (
+                    "title",
+                    "duration",
+                    "chapters",
+                    "youtube",
+                    "drive",
+                    "hidden",
+                    "thumbnail_url",
+                    "merged_into",
+                    "created_at",
+                    "tags",
+                    "synthetic",
+                )
+            }
+            for v in (await s.execute(select(Vod).where(Vod.id.in_((A, B))))).scalars()
+        }
 
 
 def _same(a: str, b: str) -> bool:
@@ -93,7 +131,7 @@ def _same(a: str, b: str) -> bool:
     return abs(t[0] - t[1]) < dt.timedelta(milliseconds=1)
 
 
-def _ids(page: dict) -> set[str]:
+def _ids(page: dict[str, Any]) -> set[str]:
     return {v["id"] for v in page["data"]}
 
 
@@ -107,20 +145,31 @@ async def test_merge_split_and_undo(admin):
     assert r.status_code == 201, r.text
     view = r.json()
     assert (view["id"], view["supersedes"], view["tags"], view["duration"]) == (AB, True, [], "03:05:00")
-    assert view["segments"] == [{"vod_id": A, "start": 0, "end": None, "at": 0, "label": None},
-                                {"vod_id": B, "start": 0, "end": None, "at": OFFSET, "label": None}]
+    assert view["segments"] == [
+        {"vod_id": A, "start": 0, "end": None, "at": 0, "label": None},
+        {"vod_id": B, "start": 0, "end": None, "at": OFFSET, "label": None},
+    ]
     assert await _sources() == before  # the originals are never written
 
     vod = (await public(f"/vods/{AB}")).json()
     made = vod["synthetic"].pop("madeAt")
     assert made == vod["synthetic"].pop("changedAt") and _same(made, view["made_at"])
-    assert vod["synthetic"] == {"supersedes": True, "firstLiveAt": "2001-03-04T20:00:00.000Z",
-                                "lastLiveAt": "2001-03-04T23:05:00.000Z", "segments": [
-        {"vodId": A, "start": 0, "end": 7200, "at": 0, "label": None, "stream": 0},
-        {"vodId": B, "start": 0, "end": 3600, "at": OFFSET, "label": None, "stream": 0}]}
+    assert vod["synthetic"] == {
+        "supersedes": True,
+        "firstLiveAt": "2001-03-04T20:00:00.000Z",
+        "lastLiveAt": "2001-03-04T23:05:00.000Z",
+        "segments": [
+            {"vodId": A, "start": 0, "end": 7200, "at": 0, "label": None, "stream": 0},
+            {"vodId": B, "start": 0, "end": 3600, "at": OFFSET, "label": None, "stream": 0},
+        ],
+    }
     assert (vod["duration"], vod["tags"], vod["createdAt"]) == ("03:05:00", [], "2001-03-04T20:00:00.000Z")
-    assert [(c["start"], c.get("kind")) for c in vod["chapters"]] == [(0, None), (3600, None), (7200, "gap"),
-                                                                       (OFFSET, None)]
+    assert [(c["start"], c.get("kind")) for c in vod["chapters"]] == [
+        (0, None),
+        (3600, None),
+        (7200, "gap"),
+        (OFFSET, None),
+    ]
     [game] = vod["games"]
     assert (game["vodId"], game["sourceVodId"], game["start_time"], game["end_time"]) == (AB, B, "7600", "7700")
 
@@ -135,7 +184,7 @@ async def test_merge_split_and_undo(admin):
 
     # Jobs: the originals are left alone, so they still run; the synthetic VOD is no Twitch VOD.
     assert await splice_reason(A) is None and await splice_reason(B) is None
-    assert "synthetic" in await splice_reason(AB)
+    assert "synthetic" in await splice_reason(AB)  # type: ignore[operator]
 
     # One second of a source goes to one superseding VOD only.
     r = await admin.post(f"/api/v2/vods/{A}/split", headers=KEY, json={"at": 1000})
@@ -156,16 +205,26 @@ async def test_merge_split_and_undo(admin):
     assert [(v["id"], v["duration"]) for v in r.json()] == [(f"{A}-1", "00:16:41"), (f"{A}-2", "01:43:20")]
     second = (await public(f"/vods/{A}-2")).json()
     assert second["synthetic"]["segments"] == [
-        {"vodId": A, "start": 1000.5, "end": 7200, "at": 0, "label": None, "stream": 0}]
+        {"vodId": A, "start": 1000.5, "end": 7200, "at": 0, "label": None, "stream": 0}
+    ]
     assert second["createdAt"] == "2001-03-04T20:16:40.500Z"
     assert _ids((await public(f"/vods?{ALL}")).json()) == {f"{A}-1", f"{A}-2", B}
     assert await _sources() == before
 
     async with get_sessionmaker()() as s:
-        audited = (await s.execute(select(AUDIT_LOG.c.action, AUDIT_LOG.c.target)
-                                   .where(AUDIT_LOG.c.target.like("vod:test-syn-%")).order_by(AUDIT_LOG.c.id))).all()
-    assert [tuple(a) for a in audited] == [("synthetic.create", f"vod:{AB}"), ("synthetic.delete", f"vod:{AB}"),
-                                           ("synthetic.create", f"vod:{A}-1"), ("synthetic.create", f"vod:{A}-2")]
+        audited = (
+            await s.execute(
+                select(AUDIT_LOG.c.action, AUDIT_LOG.c.target)
+                .where(AUDIT_LOG.c.target.like("vod:test-syn-%"))
+                .order_by(AUDIT_LOG.c.id)
+            )
+        ).all()
+    assert [tuple(a) for a in audited] == [
+        ("synthetic.create", f"vod:{AB}"),
+        ("synthetic.delete", f"vod:{AB}"),
+        ("synthetic.create", f"vod:{A}-1"),
+        ("synthetic.create", f"vod:{A}-2"),
+    ]
 
 
 async def test_playthrough_tags_and_recompose(admin):
@@ -174,8 +233,12 @@ async def test_playthrough_tags_and_recompose(admin):
     windows = r.json()["items"]
     assert [(w["vod_id"], w["start"], w["end"]) for w in windows] == [(A, 3600, 7200), (B, 0, 3600)]
 
-    body = {"id": P, "title": "Test Game, all of it", "tags": ["compilation"],
-            "segments": [w["segment"] for w in windows]}
+    body = {
+        "id": P,
+        "title": "Test Game, all of it",
+        "tags": ["compilation"],
+        "segments": [w["segment"] for w in windows],
+    }
     assert (await admin.post("/api/v2/synthetic", headers=KEY, json={**body, "tags": ["nope"]})).status_code == 422
     r = await admin.post("/api/v2/synthetic", headers=KEY, json=body)
     assert r.status_code == 201, r.text
@@ -197,15 +260,21 @@ async def test_playthrough_tags_and_recompose(admin):
 
     # A source's change reaches it on the next sweep.
     async with get_sessionmaker()() as s:
-        await s.execute(update(Vod).where(Vod.id == B).values(
-            chapters=[_ch(0, 1800, "Test Game", GAME), _ch(1800, 1800, "Other")], updated_at=func.now()))
+        await s.execute(
+            update(Vod)
+            .where(Vod.id == B)
+            .values(chapters=[_ch(0, 1800, "Test Game", GAME), _ch(1800, 1800, "Other")], updated_at=func.now())
+        )
         await s.commit()
     assert P in await synthetic.stale_ids(limit=1000)
     assert P in await synthetic.recompose_stale()
     assert P not in await synthetic.stale_ids(limit=1000)
     vod = (await public(f"/vods/{P}?")).json()
-    assert [(c["start"], c["name"]) for c in vod["chapters"]] == [(0, "Test Game"), (3600, "Test Game"),
-                                                                  (5400, "Other")]
+    assert [(c["start"], c["name"]) for c in vod["chapters"]] == [
+        (0, "Test Game"),
+        (3600, "Test Game"),
+        (5400, "Other"),
+    ]
 
     r = await admin.put(f"/api/v2/synthetic/{P}", headers=KEY, json={"tags": [], "title": "renamed"})
     assert r.status_code == 200 and (r.json()["tags"], r.json()["title"]) == ([], "renamed")
@@ -229,13 +298,15 @@ async def test_nested_synthetic(admin):
     vod = (await public(f"/vods/{P}")).json()
     assert vod["synthetic"]["segments"] == [
         {"vodId": A, "start": 3600, "end": 7200, "at": 0, "label": None, "stream": 0},
-        {"vodId": B, "start": 0, "end": 3600, "at": 3900, "label": None, "stream": 0}]
+        {"vodId": B, "start": 0, "end": 3600, "at": 3900, "label": None, "stream": 0},
+    ]
     [game] = vod["games"]
     assert (game["sourceVodId"], game["start_time"], game["end_time"]) == (B, "4000", "4100")
     page = (await public(f"/v1/vods/{P}/comments?content_offset_seconds=0")).json()
     assert [s["vodId"] for s in page["segments"]] == [A, B]
     assert (await public(f"/vods/{quote(AB)}")).json()["appears_in"] == [
-        {"id": P, "title": "Test Game", "tags": ["compilation"]}]
+        {"id": P, "title": "Test Game", "tags": ["compilation"]}
+    ]
 
     # No cycles, and the merge cannot go while the playthrough is made of it.
     r = await admin.put(f"/api/v2/synthetic/{quote(AB)}", headers=KEY, json={"segments": [{"vod_id": P}]})
@@ -245,8 +316,11 @@ async def test_nested_synthetic(admin):
 
     # A change to a real VOD reaches the merge, then the playthrough, in one sweep.
     async with get_sessionmaker()() as s:
-        await s.execute(update(Vod).where(Vod.id == B).values(
-            chapters=[_ch(0, 1800, "Test Game", GAME), _ch(1800, 1800, "Other")], updated_at=func.now()))
+        await s.execute(
+            update(Vod)
+            .where(Vod.id == B)
+            .values(chapters=[_ch(0, 1800, "Test Game", GAME), _ch(1800, 1800, "Other")], updated_at=func.now())
+        )
         await s.commit()
     done = await synthetic.recompose_stale()
     assert done.index(AB) < done.index(P)
@@ -265,31 +339,45 @@ async def test_changed_at(admin):
         syn = (await public(f"/vods/{P}")).json()["synthetic"]
         return syn["madeAt"], syn["changedAt"], syn["lastLiveAt"]
 
-    r = await admin.post("/api/v2/synthetic", headers=KEY, json={
-        "id": P, "tags": ["compilation"], "segments": [{"vod_id": A, "start": 3600, "end": 5400}]})
+    r = await admin.post(
+        "/api/v2/synthetic",
+        headers=KEY,
+        json={"id": P, "tags": ["compilation"], "segments": [{"vod_id": A, "start": 3600, "end": 5400}]},
+    )
     assert r.status_code == 201, r.text
     made, changed, last = await stamps()
     assert made == changed and last == "2001-03-04T21:30:00.000Z"
 
     async with get_sessionmaker()() as s:  # a source's chapter edit, recomposed: same length
-        await s.execute(update(Vod).where(Vod.id == A).values(
-            chapters=[_ch(0, 3600), _ch(3600, 3600, "Renamed", GAME)], updated_at=func.now()))
+        await s.execute(
+            update(Vod)
+            .where(Vod.id == A)
+            .values(chapters=[_ch(0, 3600), _ch(3600, 3600, "Renamed", GAME)], updated_at=func.now())
+        )
         await s.commit()
     assert P in await synthetic.recompose_stale()
     assert (await admin.put(f"/api/v2/synthetic/{P}", headers=KEY, json={"title": "renamed"})).status_code == 200
     assert await stamps() == (made, changed, last)
 
     # Played again on a later stream: its window goes on the end.
-    r = await admin.put(f"/api/v2/synthetic/{P}", headers=KEY, json={"segments": [
-        {"vod_id": A, "start": 3600, "end": 5400}, {"vod_id": B, "start": 0, "end": 1800}]})
+    r = await admin.put(
+        f"/api/v2/synthetic/{P}",
+        headers=KEY,
+        json={"segments": [{"vod_id": A, "start": 3600, "end": 5400}, {"vod_id": B, "start": 0, "end": 1800}]},
+    )
     assert r.status_code == 200, r.text
     _, changed2, last2 = await stamps()
     assert changed2 > changed and _same(r.json()["changed_at"], changed2) and _same(r.json()["made_at"], made)
     assert last2 == "2001-03-04T22:35:00.000Z"
 
     # A source growing under an open-ended window lengthens it too.
-    assert (await admin.put(f"/api/v2/synthetic/{P}", headers=KEY, json={"segments": [
-        {"vod_id": A, "start": 3600, "end": 5400}, {"vod_id": B, "start": 0}]})).status_code == 200
+    assert (
+        await admin.put(
+            f"/api/v2/synthetic/{P}",
+            headers=KEY,
+            json={"segments": [{"vod_id": A, "start": 3600, "end": 5400}, {"vod_id": B, "start": 0}]},
+        )
+    ).status_code == 200
     _, changed3, _ = await stamps()
     async with get_sessionmaker()() as s:
         await s.execute(update(Vod).where(Vod.id == B).values(duration="01:30:00", updated_at=func.now()))
@@ -304,10 +392,10 @@ async def test_live_span_filters(admin):
     query so totals and paging hold. A starts 20:00, B 22:05; their merge AB spans 20:00-23:05."""
     assert (await admin.post(f"/api/v2/vods/{A}/merge", headers=KEY, json={"source": B})).status_code == 201
 
-    async def live(q: str) -> dict:
+    async def live(q: str) -> dict[str, Any]:
         r = await public(f"/vods?{ALL}&$superseded=true&{q}")
         assert r.status_code == 200, r.text
-        return r.json()
+        return r.json()  # type: ignore[no-any-return]
 
     assert _ids(await live("lastLiveAt[$gte]=2001-03-04T23:00:00Z")) == {AB}
     assert _ids(await live("firstLiveAt[$gte]=2001-03-04T20:00:00Z&firstLiveAt[$lt]=2001-03-04T20:00:01Z")) == {A, AB}
@@ -324,8 +412,12 @@ async def test_live_span_filters(admin):
     page = await live("lastLiveAt[$gte]=2001-03-04T22:00:00Z&$limit=1&$skip=1&$sort[createdAt]=-1")
     assert (page["total"], [v["id"] for v in page["data"]]) == (2, [AB])
 
-    for q in ("firstLiveAt=2001-03-04", "firstLiveAt[$ne]=2001-03-04", "lastLiveAt[$gte]=yesterday",
-              "lastLiveAt[$gte][]=2001-03-04"):
+    for q in (
+        "firstLiveAt=2001-03-04",
+        "firstLiveAt[$ne]=2001-03-04",
+        "lastLiveAt[$gte]=yesterday",
+        "lastLiveAt[$gte][]=2001-03-04",
+    ):
         r = await public(f"/vods?{ALL}&{q}")
         assert r.status_code == 400, (q, r.text)
 
@@ -333,10 +425,11 @@ async def test_live_span_filters(admin):
 def test_live_span_without_a_start():
     """A synthetic VOD none of whose sources has a start has no span, so no live filter matches it."""
     from archive_api.services import _live_filter
-    from archive_common.serialize import Segment, live_span
+    from archive_common.serialize import Segment, live_span  # type: ignore[attr-defined]
 
     seg = Segment(source_id=A, start=0, end=60, at=0, label=None)
     assert live_span([seg], {A: None}) is None and live_span([], {}) is None
     clause = _live_filter("firstLiveAt", 0, {AB: None, P: (START, START)})({"$gte": "2001-01-01"})
     assert P in str(clause.compile(compile_kwargs={"literal_binds": True})) and AB not in str(
-        clause.compile(compile_kwargs={"literal_binds": True}))
+        clause.compile(compile_kwargs={"literal_binds": True})
+    )

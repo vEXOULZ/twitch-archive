@@ -9,25 +9,28 @@ import datetime as dt
 
 import httpx
 import pytest
-from pydantic import SecretStr
-from sqlalchemy import delete, select, text
-
 from archive_common.audit import AUDIT_LOG, actor_of
 from archive_common.db import get_sessionmaker
 from archive_common.models import Job, Vod
 from archive_worker import jobs, legacy_jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.job_rows import RUNS, subject_of
+from pydantic import SecretStr
+from sqlalchemy import delete, select, text
 
 VOD = "test-job-control-vod"
 
 
 async def _reset():
     async with get_sessionmaker()() as s:
-        ids = select(RUNS.c.id).where(RUNS.c.subject == subject_of(VOD)).union_all(
-            select(Job.id).where(Job.vod_id == VOD))
-        await s.execute(delete(AUDIT_LOG).where(AUDIT_LOG.c.target.in_(select(text("'job:' || id")).select_from(
-            ids.subquery()))))
+        ids = (
+            select(RUNS.c.id)
+            .where(RUNS.c.subject == subject_of(VOD))
+            .union_all(select(Job.id).where(Job.vod_id == VOD))
+        )
+        await s.execute(
+            delete(AUDIT_LOG).where(AUDIT_LOG.c.target.in_(select(text("'job:' || id")).select_from(ids.subquery())))
+        )
         await s.execute(delete(Job).where(Job.vod_id == VOD))
         await s.execute(delete(RUNS).where(RUNS.c.subject == subject_of(VOD)))
         # A retry waiting out its backoff would hold the VOD's lock for the next test.
@@ -42,7 +45,7 @@ async def _reset():
 async def vod(db):
     await _reset()
     async with get_sessionmaker()() as s:
-        s.add(Vod(id=VOD, title="t", created_at=dt.datetime.now(dt.timezone.utc), duration="00:10:00"))
+        s.add(Vod(id=VOD, title="t", created_at=dt.datetime.now(dt.UTC), duration="00:10:00"))
         await s.commit()
     yield VOD
     await _reset()
@@ -62,7 +65,7 @@ def steps(monkeypatch):
 
     monkeypatch.setitem(jobs.KINDS, "test", ["a", "b", "c"])
     for name in "abc":
-        monkeypatch.setitem(jobs.STEPS, name, step(name))
+        monkeypatch.setitem(jobs.STEPS, name, step(name))  # type: ignore[attr-defined]
     return calls
 
 
@@ -125,8 +128,8 @@ async def test_pause_requested_while_running(vod, monkeypatch, make_service, wai
         pass
 
     monkeypatch.setitem(jobs.KINDS, "test", ["slow", "fast"])
-    monkeypatch.setitem(jobs.STEPS, "slow", slow)
-    monkeypatch.setitem(jobs.STEPS, "fast", fast)
+    monkeypatch.setitem(jobs.STEPS, "slow", slow)  # type: ignore[attr-defined]
+    monkeypatch.setitem(jobs.STEPS, "fast", fast)  # type: ignore[attr-defined]
     service = await make_service()
     job = await service.enqueue("test", vod)
     await asyncio.wait_for(started.wait(), 10)
@@ -145,7 +148,7 @@ async def test_cancel_running_job(vod, monkeypatch, make_service, wait_job):
         await asyncio.Event().wait()
 
     monkeypatch.setitem(jobs.KINDS, "test", ["forever"])
-    monkeypatch.setitem(jobs.STEPS, "forever", forever)
+    monkeypatch.setitem(jobs.STEPS, "forever", forever)  # type: ignore[attr-defined]
     service = await make_service()
     job = await service.enqueue("test", vod)
     await asyncio.wait_for(started.wait(), 10)
@@ -165,7 +168,7 @@ async def test_steps_see_the_vod_and_save_the_payload(vod, monkeypatch, make_ser
         ctx.progress(1, 2, "parts", "half")
 
     monkeypatch.setitem(jobs.KINDS, "test", ["look"])
-    monkeypatch.setitem(jobs.STEPS, "look", look)
+    monkeypatch.setitem(jobs.STEPS, "look", look)  # type: ignore[attr-defined]
     service = await make_service()
     job = await service.enqueue("test", vod)
     assert (await wait_job(job.id, "done")).payload == {"n": 1}
@@ -221,7 +224,7 @@ async def test_legacy_job_cancelled_while_running(vod, deps, monkeypatch, make_s
         await asyncio.Event().wait()
 
     monkeypatch.setitem(jobs.KINDS, "test", ["forever"])
-    monkeypatch.setitem(jobs.STEPS, "forever", forever)
+    monkeypatch.setitem(jobs.STEPS, "forever", forever)  # type: ignore[attr-defined]
     service = await make_service(start=False)
     job = await _legacy_job("test")
     await service.legacy._fill()
@@ -246,8 +249,9 @@ async def test_admin_launch_list_pause_resume(vod, steps, deps, make_service, wa
         bad = await c.post("/admin/jobs", headers=headers, json={"kind": "test", "vodId": vod, "fromStep": "z"})
         assert bad.status_code == 400 and "no step(s) z" in bad.json()["msg"]
 
-        r = await c.post("/admin/jobs", headers=headers,
-                         json={"kind": "test", "vodId": vod, "fromStep": "b", "pauseBefore": ["c"]})
+        r = await c.post(
+            "/admin/jobs", headers=headers, json={"kind": "test", "vodId": vod, "fromStep": "b", "pauseBefore": ["c"]}
+        )
         job_id = r.json()["jobId"]
         listed = (await c.get(f"/admin/jobs?state=waiting&kind=test&vodId={vod}", headers=headers)).json()
         assert [j["id"] for j in listed["data"]] == [job_id]
@@ -274,10 +278,17 @@ async def test_admin_job_routes_404_and_409(vod, steps, deps, make_service, wait
     headers = {"Authorization": "Bearer k"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://admin") as c:
         missing = 2**62
-        for method, path in (("get", ""), ("post", "/resume"), ("post", "/pause"), ("post", "/retry"),
-                             ("post", "/cancel"), ("patch", ""), ("get", "/events")):
+        for method, path in (
+            ("get", ""),
+            ("post", "/resume"),
+            ("post", "/pause"),
+            ("post", "/retry"),
+            ("post", "/cancel"),
+            ("patch", ""),
+            ("get", "/events"),
+        ):
             kwargs = {"json": {"pauseNext": True}} if method == "patch" else {}
-            r = await c.request(method.upper(), f"/admin/jobs/{missing}{path}", headers=headers, **kwargs)
+            r = await c.request(method.upper(), f"/admin/jobs/{missing}{path}", headers=headers, **kwargs)  # type: ignore[arg-type]
             assert (r.status_code, r.json()["msg"]) == (404, "No such job"), path
 
         job = await service.enqueue("test", vod)
@@ -296,11 +307,11 @@ async def test_admin_job_routes_404_and_409(vod, steps, deps, make_service, wait
 # ── Audit ─────────────────────────────────────────────────────────────────
 
 
-async def _audited(job_id: int) -> list[tuple]:
+async def _audited(job_id: int) -> list[tuple]:  # type: ignore[type-arg]
     async with get_sessionmaker()() as s:
-        rows = (await s.execute(
-            select(AUDIT_LOG).where(AUDIT_LOG.c.target == f"job:{job_id}").order_by(AUDIT_LOG.c.id)
-        )).all()
+        rows = (
+            await s.execute(select(AUDIT_LOG).where(AUDIT_LOG.c.target == f"job:{job_id}").order_by(AUDIT_LOG.c.id))
+        ).all()
     return [(r.action, r.actor_kind, r.via, r.before, r.after) for r in rows]
 
 
@@ -315,7 +326,13 @@ async def test_admin_job_actions_are_audited_once_with_the_caller(vod, steps, de
         assert (await c.post(f"/admin/jobs/{job_id}/cancel", headers=headers)).status_code == 200
     # The runtime's rows, in the transaction of each change; none from the request as well.
     assert await _audited(job_id) == [
-        ("job.enqueue", "api_key", "api", None, {"kind": "test", "step": "a", "state": "paused", "subject": f"vod:{vod}"}),
+        (
+            "job.enqueue",
+            "api_key",
+            "api",
+            None,
+            {"kind": "test", "step": "a", "state": "paused", "subject": f"vod:{vod}"},
+        ),
         ("job.cancel", "api_key", "api", {"state": "paused"}, None),
     ]
 

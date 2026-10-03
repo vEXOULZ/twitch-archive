@@ -7,11 +7,10 @@ import pkgutil
 import re
 from pathlib import Path
 
-from sqlalchemy import Table
-
 import archive_api
 from archive_common import serialize
 from archive_common.models import Base
+from sqlalchemy import Table
 
 ROLES_SQL = Path(__file__).parents[2] / "deploy" / "roles.sql"
 # GRANT <privileges> ON <tables> TO <roles>; (not ON ALL ... / SCHEMA / DATABASE)
@@ -42,8 +41,9 @@ def test_worker_is_granted_every_table():
 
 
 def test_api_is_granted_the_tables_it_reads():
-    modules = [serialize] + [importlib.import_module(m.name)
-                             for m in pkgutil.walk_packages(archive_api.__path__, "archive_api.")]
+    modules = [serialize] + [
+        importlib.import_module(m.name) for m in pkgutil.walk_packages(archive_api.__path__, "archive_api.")
+    ]
     used = set().union(*map(_tables_in, modules))
     assert "vod_segments" in used  # (the check sees serialize's tables)
     missing = used - granted("archive_api")

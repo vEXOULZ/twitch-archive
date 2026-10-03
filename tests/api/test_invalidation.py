@@ -5,17 +5,26 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from sqlalchemy import text
-
 from archive_api import invalidation
 from archive_api.comments import Comments
 from archive_api.invalidation import VodInvalidator, asyncpg_dsn
 from archive_api.middleware import ResponseCache
 from archive_common.config import get_settings
 from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_engine
+from sqlalchemy import text
 
-KEYS = ["vods/1", "vods/12", "vods?$limit=10", "games?vodId=1", "games/5", "v1/games-played",
-        "emotes/1", "emotes/12", "emotes?vodId=1", "streams?"]
+KEYS = [
+    "vods/1",
+    "vods/12",
+    "vods?$limit=10",
+    "games?vodId=1",
+    "games/5",
+    "v1/games-played",
+    "emotes/1",
+    "emotes/12",
+    "emotes?vodId=1",
+    "streams?",
+]
 LEFT = ["vods/12", "emotes/1", "emotes/12", "emotes?vodId=1", "streams?"]
 
 

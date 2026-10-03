@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from archive_common.serialize import box_art_template, js_iso
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
-
-from archive_common.serialize import box_art_template, js_iso
 
 NO_CATEGORY = "No category"
 

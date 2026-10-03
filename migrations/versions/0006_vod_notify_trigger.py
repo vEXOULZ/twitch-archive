@@ -65,10 +65,16 @@ def upgrade() -> None:
         )
 
     # Skip the index if the database already has one led by games.vod_id (under any name).
-    indexed = op.get_bind().execute(sa.text(
-        "SELECT 1 FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] "
-        "WHERE i.indrelid = 'games'::regclass AND a.attname = 'vod_id'"
-    )).first()
+    indexed = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                "SELECT 1 FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] "
+                "WHERE i.indrelid = 'games'::regclass AND a.attname = 'vod_id'"
+            )
+        )
+        .first()
+    )
     if indexed is None:
         with op.get_context().autocommit_block():
             op.execute("CREATE INDEX CONCURRENTLY IF NOT EXISTS games_vod_id_idx ON games (vod_id)")

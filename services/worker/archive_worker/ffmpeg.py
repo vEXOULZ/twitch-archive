@@ -27,9 +27,7 @@ class FfmpegError(RuntimeError):
 
 async def _run(args: list[str]) -> str:
     log.debug("exec: %s", " ".join(args))
-    proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
+    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await proc.communicate()
     except asyncio.CancelledError:
@@ -52,9 +50,7 @@ async def _ffmpeg_to(out: Path, args: list[str]) -> Path:
 
 
 async def probe_duration(path: Path) -> float:
-    out = await _run(
-        [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)]
-    )
+    out = await _run([FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)])
     return float(json.loads(out)["format"]["duration"])
 
 
@@ -63,12 +59,18 @@ async def hls_to_mp4(playlist: Path, out: Path, *, fmp4: bool = False) -> Path:
     return await _ffmpeg_to(
         out,
         [
-            "-thread_queue_size", "1024",
-            "-allowed_extensions", "ALL",
-            "-i", str(playlist),
-            "-c", "copy",
-            "-bsf:a", "aac_adtstoasc",
-            "-movflags", "+faststart",
+            "-thread_queue_size",
+            "1024",
+            "-allowed_extensions",
+            "ALL",
+            "-i",
+            str(playlist),
+            "-c",
+            "copy",
+            "-bsf:a",
+            "aac_adtstoasc",
+            "-movflags",
+            "+faststart",
             *extra,
         ],
     )
@@ -90,8 +92,7 @@ def _seek_args(src: Path, start: float) -> list[str]:
     return ["-ss", f"{start - margin:.3f}", "-i", str(src), "-ss", f"{margin:.3f}"]
 
 
-async def cut(src: Path, out: Path, start: float, duration: float | None = None, *,
-              faststart: bool = True) -> Path:
+async def cut(src: Path, out: Path, start: float, duration: float | None = None, *, faststart: bool = True) -> Path:
     """Stream-copy ``duration`` seconds (default: to the end) starting at ``start``.
 
     ``faststart=False`` skips the second pass that moves the index to the front,
@@ -103,9 +104,12 @@ async def cut(src: Path, out: Path, start: float, duration: float | None = None,
         [
             *_seek_args(src, start),
             *length,
-            "-map", "0",
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
+            "-map",
+            "0",
+            "-c",
+            "copy",
+            "-avoid_negative_ts",
+            "make_zero",
             *(["-movflags", "+faststart"] if faststart else []),
         ],
     )
@@ -121,12 +125,36 @@ async def preview_sheets(src: Path, out_dir: Path) -> int:
     await asyncio.to_thread(shutil.rmtree, tmp, True)
     tmp.mkdir(parents=True)
     w, h = pv.WIDTH, pv.HEIGHT
-    vf = (f"fps=1/{pv.INTERVAL}:round=up,scale={w}:{h}:force_original_aspect_ratio=decrease,"
-          f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,tile={pv.COLS}x{pv.ROWS}")
+    vf = (
+        f"fps=1/{pv.INTERVAL}:round=up,scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,tile={pv.COLS}x{pv.ROWS}"
+    )
     try:
-        await _run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-skip_frame", "nokey",
-                    "-i", str(src), "-map", "0:v:0", "-vf", vf, "-frames:v", str(pv.sheet_count(frames)),
-                    "-q:v", "5", "-start_number", "0", str(tmp / "%d.jpg")])
+        await _run(
+            [
+                FFMPEG,
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-y",
+                "-skip_frame",
+                "nokey",
+                "-i",
+                str(src),
+                "-map",
+                "0:v:0",
+                "-vf",
+                vf,
+                "-frames:v",
+                str(pv.sheet_count(frames)),
+                "-q:v",
+                "5",
+                "-start_number",
+                "0",
+                str(tmp / "%d.jpg"),
+            ]
+        )
         await asyncio.to_thread(shutil.rmtree, out_dir, True)
         os.replace(tmp, out_dir)
     finally:
@@ -139,8 +167,22 @@ async def mute(src: Path, out: Path, ranges: list[tuple[float, float]]) -> Path:
     filters = ",".join(f"volume=0:enable='between(t,{a:g},{b:g})'" for a, b in ranges)
     return await _ffmpeg_to(
         out,
-        ["-i", str(src), "-map", "0", "-c:v", "copy", "-af", filters, "-c:a", "aac", "-b:a", "160k",
-         "-movflags", "+faststart"],
+        [
+            "-i",
+            str(src),
+            "-map",
+            "0",
+            "-c:v",
+            "copy",
+            "-af",
+            filters,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-movflags",
+            "+faststart",
+        ],
     )
 
 
@@ -164,9 +206,24 @@ async def blackout(src: Path, out: Path, ranges: list[tuple[float, float]], work
                 await _ffmpeg_to(
                     work / f"bo-{i}-black.mp4",
                     [
-                        "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{end - start:.3f}", "-map", "0",
-                        "-vf", "geq=0:128:128", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
-                        "-c:a", "copy",
+                        "-ss",
+                        f"{start:.3f}",
+                        "-i",
+                        str(src),
+                        "-t",
+                        f"{end - start:.3f}",
+                        "-map",
+                        "0",
+                        "-vf",
+                        "geq=0:128:128",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "veryfast",
+                        "-crf",
+                        "30",
+                        "-c:a",
+                        "copy",
                     ],
                 )
             )

@@ -22,15 +22,14 @@ import datetime as dt
 import logging
 from typing import Any
 
+from archive_common.db import VOD_CHANGED, get_sessionmaker
+from archive_common.models import Vod, VodSegment
+from archive_common.segments import EPS, MAX_DEPTH, Segment, resolve
+from archive_common.serialize import js_iso, nested_segments
+from archive_common.timeutil import hhmmss_to_seconds
 from sqlalchemy import ARRAY, Text, cast, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from archive_common.db import VOD_CHANGED, get_sessionmaker
-from archive_common.models import Vod, VodSegment
-from archive_common.serialize import js_iso, nested_segments
-from archive_common.segments import EPS, MAX_DEPTH, Segment, resolve
-from archive_common.timeutil import hhmmss_to_seconds
 
 from . import compose
 from .compose import ComposeError, Source
@@ -48,11 +47,18 @@ class SyntheticError(Exception):
 
 
 def source_of(vod: Vod) -> Source:
-    return Source(vod.id, float(hhmmss_to_seconds(vod.duration)), list(vod.chapters or []), vod.created_at,
-                  vod.thumbnail_url, vod.title, vod.synthetic is not None)
+    return Source(
+        vod.id,
+        float(hhmmss_to_seconds(vod.duration)),
+        list(vod.chapters or []),
+        vod.created_at,
+        vod.thumbnail_url,
+        vod.title,
+        vod.synthetic is not None,
+    )
 
 
-def _composed(fn, *args):
+def _composed(fn, *args):  # type: ignore[no-untyped-def]
     try:
         return fn(*args)
     except ComposeError as exc:
@@ -96,10 +102,13 @@ async def _no_double_cover(s: AsyncSession, vod_id: str, segments: list[Segment]
     """A source's second may be superseded by one synthetic VOD only, or its URL could not redirect."""
     durations = {k: v.duration for k, v in sources.items()}
     mine = resolve(segments, durations)
-    others = (await s.execute(
-        select(VodSegment, Vod.synthetic).join(Vod, Vod.id == VodSegment.vod_id)
-        .where(VodSegment.source_id.in_({x.source_id for x in mine}), VodSegment.vod_id != vod_id)
-    )).all()
+    others = (
+        await s.execute(
+            select(VodSegment, Vod.synthetic)
+            .join(Vod, Vod.id == VodSegment.vod_id)
+            .where(VodSegment.source_id.in_({x.source_id for x in mine}), VodSegment.vod_id != vod_id)
+        )
+    ).all()
     by_synthetic: dict[str, list[Segment]] = {}
     for row, synthetic in others:
         if (synthetic or {}).get("supersedes"):
@@ -108,17 +117,22 @@ async def _no_double_cover(s: AsyncSession, vod_id: str, segments: list[Segment]
         theirs = resolve(sorted(theirs, key=lambda x: x.at), durations)
         for a in mine:
             for b in theirs:
-                if a.source_id == b.source_id and min(a.end, b.end) - max(a.start, b.start) > EPS:
-                    raise SyntheticError(409, f"{a.source_id} {max(a.start, b.start):g}-{min(a.end, b.end):g}s is "
-                                              f"already superseded by {other_id}; delete or change that one first",
-                                         synthetic=other_id, vodId=a.source_id)
+                if a.source_id == b.source_id and min(a.end, b.end) - max(a.start, b.start) > EPS:  # type: ignore[operator, type-var]
+                    raise SyntheticError(
+                        409,
+                        f"{a.source_id} {max(a.start, b.start):g}-{min(a.end, b.end):g}s is "  # type: ignore[type-var]
+                        f"already superseded by {other_id}; delete or change that one first",
+                        synthetic=other_id,
+                        vodId=a.source_id,
+                    )
 
 
 async def _write_segments(s: AsyncSession, vod_id: str, segments: list[Segment]) -> None:
     await s.execute(delete(VodSegment).where(VodSegment.vod_id == vod_id))
     if segments:
-        await s.execute(insert(VodSegment).values(
-            [{"vod_id": vod_id, "pos": i, **seg.columns()} for i, seg in enumerate(segments)]))
+        await s.execute(
+            insert(VodSegment).values([{"vod_id": vod_id, "pos": i, **seg.columns()} for i, seg in enumerate(segments)])
+        )
 
 
 def _apply(vod: Vod, derived: dict[str, Any]) -> None:
@@ -140,18 +154,27 @@ def _changed(vod: Vod) -> None:
 
 def synthetic_json(vod: Vod, segments: list[Segment]) -> dict[str, Any]:
     meta = vod.synthetic or {}
-    return {"id": vod.id, "title": vod.title, "supersedes": bool(meta.get("supersedes")),
-            "tags": list(vod.tags or []), "hidden": vod.hidden, "duration": vod.duration,
-            "createdAt": js_iso(vod.created_at), "madeAt": meta.get("madeAt"), "changedAt": meta.get("changedAt"),
-            "segments": [seg.json() for seg in segments]}
+    return {
+        "id": vod.id,
+        "title": vod.title,
+        "supersedes": bool(meta.get("supersedes")),
+        "tags": list(vod.tags or []),
+        "hidden": vod.hidden,
+        "duration": vod.duration,
+        "createdAt": js_iso(vod.created_at),
+        "madeAt": meta.get("madeAt"),
+        "changedAt": meta.get("changedAt"),
+        "segments": [seg.json() for seg in segments],
+    }
 
 
 async def _checked(s: AsyncSession, vod_id: str, segments: list[Segment], supersedes: bool) -> dict[str, Source]:
     sources = await _sources(s, {seg.source_id for seg in segments})
-    _composed(compose.validate, segments, sources)
+    _composed(compose.validate, segments, sources)  # type: ignore[no-untyped-call]
     if any(x.synthetic for x in sources.values()):
-        _composed(compose.check_nesting, vod_id, segments,
-                  await _inner(s, {k for k, x in sources.items() if x.synthetic}))
+        _composed(  # type: ignore[no-untyped-call]
+            compose.check_nesting, vod_id, segments, await _inner(s, {k for k, x in sources.items() if x.synthetic})
+        )
     if supersedes:
         await _no_double_cover(s, vod_id, segments, sources)
     return sources
@@ -160,18 +183,28 @@ async def _checked(s: AsyncSession, vod_id: str, segments: list[Segment], supers
 # ── Changes ───────────────────────────────────────────────────────────────
 
 
-async def create(vod_id: str, segments: list[Segment], *, title: str | None = None, supersedes: bool = False,
-                 tags: Any = ()) -> dict[str, Any]:
+async def create(
+    vod_id: str, segments: list[Segment], *, title: str | None = None, supersedes: bool = False, tags: Any = ()
+) -> dict[str, Any]:
     """A new synthetic VOD; ``title`` defaults to the first source's."""
-    _composed(compose.check_id, vod_id)
+    _composed(compose.check_id, vod_id)  # type: ignore[no-untyped-call]
     async with get_sessionmaker()() as s, s.begin():
-        tags = _composed(check_tags, list(tags), await vod_tags(s))
+        tags = _composed(check_tags, list(tags), await vod_tags(s))  # type: ignore[no-untyped-call]
         if await s.get(Vod, vod_id) is not None:
             raise SyntheticError(409, f"There is already a VOD {vod_id}", vodId=vod_id)
         sources = await _checked(s, vod_id, segments, supersedes)
         first = sources[segments[0].source_id]
-        vod = Vod(id=vod_id, title=(title or "").strip() or first.title, platform="twitch", chapters_locked=True,
-                  synthetic={"supersedes": supersedes, "madeAt": (now := _now()), "changedAt": now}, tags=tags, hidden=False, youtube=[], drive=[])
+        vod = Vod(
+            id=vod_id,
+            title=(title or "").strip() or first.title,
+            platform="twitch",
+            chapters_locked=True,
+            synthetic={"supersedes": supersedes, "madeAt": (now := _now()), "changedAt": now},
+            tags=tags,
+            hidden=False,
+            youtube=[],
+            drive=[],
+        )
         _apply(vod, compose.derive(segments, sources))
         s.add(vod)
         await s.flush()
@@ -180,13 +213,19 @@ async def create(vod_id: str, segments: list[Segment], *, title: str | None = No
         return synthetic_json(vod, segments)
 
 
-async def change(vod_id: str, *, segments: list[Segment] | None = None, title: str | None = None,
-                 supersedes: bool | None = None, tags: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
+async def change(
+    vod_id: str,
+    *,
+    segments: list[Segment] | None = None,
+    title: str | None = None,
+    supersedes: bool | None = None,
+    tags: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Change what is given; returns the synthetic VOD (as ``synthetic_json``) before and after."""
     async with get_sessionmaker()() as s, s.begin():
         vod = await _locked(s, vod_id)
         if tags is not None:
-            tags = _composed(check_tags, tags, await vod_tags(s, vod.tags))
+            tags = _composed(check_tags, tags, await vod_tags(s, vod.tags))  # type: ignore[no-untyped-call]
         old = await _segments(s, vod_id)
         before = synthetic_json(vod, old)
         new = old if segments is None else segments
@@ -213,11 +252,24 @@ async def remove(vod_id: str) -> dict[str, Any]:
     """Delete a synthetic VOD (its segments go with it); its sources are as they were. Returns what it was."""
     async with get_sessionmaker()() as s, s.begin():
         vod = await _locked(s, vod_id)
-        users = list((await s.execute(select(VodSegment.vod_id).where(VodSegment.source_id == vod_id)
-                                      .distinct().order_by(VodSegment.vod_id))).scalars())
+        users = list(
+            (
+                await s.execute(
+                    select(VodSegment.vod_id)
+                    .where(VodSegment.source_id == vod_id)
+                    .distinct()
+                    .order_by(VodSegment.vod_id)
+                )
+            ).scalars()
+        )
         if users:
-            raise SyntheticError(409, f"{', '.join(users)} {'is' if len(users) == 1 else 'are'} made of {vod_id}; "
-                                      "change or delete that first", synthetic=users[0], vodId=vod_id)
+            raise SyntheticError(
+                409,
+                f"{', '.join(users)} {'is' if len(users) == 1 else 'are'} made of {vod_id}; "
+                "change or delete that first",
+                synthetic=users[0],
+                vodId=vod_id,
+            )
         segments = await _segments(s, vod_id)
         before = synthetic_json(vod, segments)
         await s.execute(delete(Vod).where(Vod.id == vod_id))
@@ -234,15 +286,26 @@ async def get(vod_id: str) -> dict[str, Any]:
 async def containing(source_id: str) -> list[dict[str, Any]]:
     """The synthetic VODs made with ``source_id``, each with the segments of it they use."""
     async with get_sessionmaker()() as s:
-        rows = (await s.execute(
-            select(VodSegment, Vod).join(Vod, Vod.id == VodSegment.vod_id)
-            .where(VodSegment.source_id == source_id).order_by(Vod.created_at, Vod.id, VodSegment.pos)
-        )).all()
+        rows = (
+            await s.execute(
+                select(VodSegment, Vod)
+                .join(Vod, Vod.id == VodSegment.vod_id)
+                .where(VodSegment.source_id == source_id)
+                .order_by(Vod.created_at, Vod.id, VodSegment.pos)
+            )
+        ).all()
     out: dict[str, dict[str, Any]] = {}
     for seg, vod in rows:
-        entry = out.setdefault(vod.id, {"id": vod.id, "title": vod.title, "tags": list(vod.tags or []),
-                                        "supersedes": bool((vod.synthetic or {}).get("supersedes")),
-                                        "segments": []})
+        entry = out.setdefault(
+            vod.id,
+            {
+                "id": vod.id,
+                "title": vod.title,
+                "tags": list(vod.tags or []),
+                "supersedes": bool((vod.synthetic or {}).get("supersedes")),
+                "segments": [],
+            },
+        )
         entry["segments"].append(Segment.of_row(seg).json())
     return list(out.values())
 
@@ -256,8 +319,11 @@ async def recompose(*vod_ids: str) -> list[str]:
     done = []
     for vod_id in vod_ids:
         async with get_sessionmaker()() as s, s.begin():
-            vod = (await s.execute(select(Vod).where(Vod.id == vod_id, Vod.synthetic.is_not(None))
-                                   .with_for_update(skip_locked=True))).scalar_one_or_none()
+            vod = (
+                await s.execute(
+                    select(Vod).where(Vod.id == vod_id, Vod.synthetic.is_not(None)).with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
             if vod is None:
                 continue
             segments = await _segments(s, vod_id)
@@ -276,14 +342,19 @@ async def stale_ids(limit: int = STALE_BATCH) -> list[str]:
     """Synthetic VODs with a source updated after they were last composed."""
     src = Vod.__table__.alias("src")
     async with get_sessionmaker()() as s:
-        return list((await s.execute(
-            select(VodSegment.vod_id)
-            .join(Vod, Vod.id == VodSegment.vod_id)
-            .join(src, src.c.id == VodSegment.source_id)
-            .group_by(VodSegment.vod_id, Vod.updated_at)
-            .having(func.max(src.c.updatedAt) > Vod.updated_at)
-            .order_by(VodSegment.vod_id).limit(limit)
-        )).scalars())
+        return list(
+            (
+                await s.execute(
+                    select(VodSegment.vod_id)
+                    .join(Vod, Vod.id == VodSegment.vod_id)
+                    .join(src, src.c.id == VodSegment.source_id)
+                    .group_by(VodSegment.vod_id, Vod.updated_at)
+                    .having(func.max(src.c.updatedAt) > Vod.updated_at)
+                    .order_by(VodSegment.vod_id)
+                    .limit(limit)
+                )
+            ).scalars()
+        )
 
 
 async def recompose_stale() -> list[str]:

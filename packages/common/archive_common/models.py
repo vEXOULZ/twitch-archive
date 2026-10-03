@@ -39,38 +39,37 @@ def _created() -> Any:
 
 
 def _updated() -> Any:
-    return mapped_column(
-        "updatedAt", DateTime(timezone=True), nullable=False, default=func.now(), onupdate=func.now()
-    )
+    return mapped_column("updatedAt", DateTime(timezone=True), nullable=False, default=func.now(), onupdate=func.now())
 
 
 class Vod(Base):
     __tablename__ = "vods"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    chapters: Mapped[list | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
+    chapters: Mapped[list[Any] | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
     title: Mapped[str | None] = mapped_column(Text)
     duration: Mapped[str | None] = mapped_column(Text, server_default=text("'00:00:00'::text"), default="00:00:00")
     thumbnail_url: Mapped[str | None] = mapped_column(Text)
-    youtube: Mapped[list | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
+    youtube: Mapped[list[Any] | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
     stream_id: Mapped[str | None] = mapped_column(Text)
-    drive: Mapped[list | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
+    drive: Mapped[list[Any] | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
     platform: Mapped[str] = mapped_column(Text, nullable=False, default="twitch")
     # Alembic 0005: chapters edited by hand; the automatic chapters step leaves them alone.
-    chapters_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"),
-                                                  default=False)
+    chapters_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"), default=False)
     # Alembic 0007: {"id": <vod id>, "offset": <seconds>} once merged into that VOD; NULL otherwise.
-    merged_into: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
-    # Alembic 0008: the last bot_chat read, {"fetched_at", "since", "until", "keyed", "rows", "coverage"}; NULL = never run.
-    bot_chat: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    merged_into: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    # Alembic 0008: the last bot_chat read, {"fetched_at", "since", "until", "keyed", "rows", "coverage"};
+    # NULL = never run.
+    bot_chat: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # Alembic 0010: off the public API (lists, GET, games rows, chat, games-played, status); admin still sees it.
     hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"), default=False)
     # Alembic 0016: NULL on a real VOD; {"supersedes": bool} on a synthetic one (its content is vod_segments,
     # and its title, duration, chapters, thumbnail and date are composed from them).
-    synthetic: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    synthetic: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # Alembic 0016: [] = a regular VOD; a tagged one (e.g. "compilation") is listed apart.
-    tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"),
-                                            default=list)
+    tags: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"), default=list
+    )
     created_at: Mapped[dt.datetime] = _created()
     updated_at: Mapped[dt.datetime] = _updated()
 
@@ -120,13 +119,13 @@ class Emote(Base):
     vod_id: Mapped[str] = mapped_column(
         Text, ForeignKey("vods.id", onupdate="CASCADE", ondelete="CASCADE"), primary_key=True
     )
-    ffz_emotes: Mapped[list | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
-    bttv_emotes: Mapped[list | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
-    seventv_emotes: Mapped[list | None] = mapped_column(
+    ffz_emotes: Mapped[list[Any] | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
+    bttv_emotes: Mapped[list[Any] | None] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
+    seventv_emotes: Mapped[list[Any] | None] = mapped_column(
         "7tv_emotes", JSONB, server_default=text("'[]'::jsonb"), default=list
     )
     # Alembic 0004: {"7tv": [...], "bttv": [...], "ffz": [...]}; NULL = never saved.
-    global_emotes: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    global_emotes: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     global_emotes_source: Mapped[str | None] = mapped_column(Text)  # 'captured' | 'backfilled'
     global_emotes_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[dt.datetime] = _created()
@@ -204,7 +203,7 @@ class Job(Base):
     step: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     not_before: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))  # retry backoff
     # Steps to pause before; NULL = Settings.manual_steps for the kind, [] = none.
     pause_before: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
@@ -238,7 +237,7 @@ class JobEvent(Base):
     level: Mapped[str] = mapped_column(Text, nullable=False)  # info | warning | error
     step: Mapped[str | None] = mapped_column(Text)
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    progress: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))  # {done, total, unit}
+    progress: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))  # {done, total, unit}
 
 
 class VodSplice(Base):
@@ -256,8 +255,8 @@ class VodSplice(Base):
     vod_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     other_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     offset_s: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
-    detail: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
     undone_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 

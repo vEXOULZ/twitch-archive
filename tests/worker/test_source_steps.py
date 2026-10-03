@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
+from typing import Any
 
+import pytest
 from archive_worker.context import StepError
 from archive_worker.steps import media
 
@@ -19,7 +20,7 @@ def captured(monkeypatch) -> list[bool]:
         return 3600.0
 
     monkeypatch.setattr(media, "capture", capture)
-    monkeypatch.setattr(media.ffmpeg, "probe_duration", probe)
+    monkeypatch.setattr(media.ffmpeg, "probe_duration", probe)  # type: ignore[attr-defined]
     return calls
 
 
@@ -41,7 +42,7 @@ async def test_previous_download_is_reused(make_ctx, captured, monkeypatch):
     ctx = make_ctx("download", "100", {"type": "vod"})
     ctx.default_mp4.parent.mkdir(parents=True)
     ctx.default_mp4.write_bytes(b"mp4")
-    updates: list[dict] = []
+    updates: list[dict[str, Any]] = []
 
     async def update_vod(**values):
         updates.append(values)

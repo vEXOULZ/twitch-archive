@@ -29,11 +29,13 @@ def upgrade() -> None:
 
     op.create_table(
         "vod_segments",
-        sa.Column("vod_id", sa.Text, sa.ForeignKey("vods.id", onupdate="CASCADE", ondelete="CASCADE"),
-                  primary_key=True),
+        sa.Column(
+            "vod_id", sa.Text, sa.ForeignKey("vods.id", onupdate="CASCADE", ondelete="CASCADE"), primary_key=True
+        ),
         sa.Column("pos", sa.Integer, primary_key=True),
-        sa.Column("source_id", sa.Text, sa.ForeignKey("vods.id", onupdate="CASCADE", ondelete="RESTRICT"),
-                  nullable=False),
+        sa.Column(
+            "source_id", sa.Text, sa.ForeignKey("vods.id", onupdate="CASCADE", ondelete="RESTRICT"), nullable=False
+        ),
         sa.Column("start_s", sa.Numeric, nullable=False),
         sa.Column("end_s", sa.Numeric),  # NULL: to the source's end, however long it gets
         sa.Column("at_s", sa.Numeric, nullable=False),

@@ -10,8 +10,17 @@ import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
+from archive_common import logs, site_tags
+from archive_common import previews as pv
+from archive_common.config import Settings, get_settings
+from archive_common.db import get_engine
+from archive_common.http import close_client
+from archive_common.models import Vod
+from archive_common.serialize import not_hidden
+from archive_common.twitch.helix import Helix
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -19,16 +28,6 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
-
-from archive_common import logs
-from archive_common import previews as pv
-from archive_common import site_tags
-from archive_common.config import Settings, get_settings
-from archive_common.db import get_engine
-from archive_common.http import close_client
-from archive_common.models import Vod
-from archive_common.serialize import not_hidden
-from archive_common.twitch.helix import Helix
 
 from .comments import Comments
 from .errors import FeathersError, LegacyError, bad_literal, legacy_error
@@ -68,7 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     invalidator = VodInvalidator(settings.database_url, service_cache, status_cache, comments=comments)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
+    async def lifespan(_: FastAPI):  # type: ignore[no-untyped-def]
         listener = asyncio.create_task(invalidator.run_forever(), name="cache-invalidation")
         yield
         listener.cancel()
@@ -81,7 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     @app.middleware("http")
-    async def rate_limit(request: Request, call_next):
+    async def rate_limit(request: Request, call_next):  # type: ignore[no-untyped-def]
         path = request.url.path
         if path.startswith(RATE_LIMITED_PREFIXES) and not path.startswith(UNLIMITED_PREFIXES):
             allowed, headers = limiter.hit(client_ip(request))
@@ -97,15 +96,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ── Error handling ────────────────────────────────────────────────────
 
     @app.exception_handler(FeathersError)
-    async def feathers_error(_: Request, exc: FeathersError):
+    async def feathers_error(_: Request, exc: FeathersError):  # type: ignore[no-untyped-def]
         return exc.response()
 
     @app.exception_handler(LegacyError)
-    async def legacy(_: Request, exc: LegacyError):
+    async def legacy(_: Request, exc: LegacyError):  # type: ignore[no-untyped-def]
         return legacy_error(exc.status, exc.msg)
 
     @app.exception_handler(StarletteHTTPException)
-    async def http_error(request: Request, exc: StarletteHTTPException):
+    async def http_error(request: Request, exc: StarletteHTTPException):  # type: ignore[no-untyped-def]
         if exc.status_code == 405:
             return FeathersError(405, f"Method {request.method} is not allowed").response()
         if exc.status_code == 404:
@@ -113,7 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return legacy_error(exc.status_code, str(exc.detail))
 
     @app.exception_handler(DBAPIError)
-    async def db_error(request: Request, exc: DBAPIError):
+    async def db_error(request: Request, exc: DBAPIError):  # type: ignore[no-untyped-def]
         if not bad_literal(exc):
             return await unhandled(request, exc)
         # An invalid literal in a filter (e.g. createdAt[$gte]=garbage)
@@ -121,14 +120,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FeathersError(400, "Invalid query").response()
 
     @app.exception_handler(Exception)
-    async def unhandled(_: Request, exc: Exception):
+    async def unhandled(_: Request, exc: Exception):  # type: ignore[no-untyped-def]
         log.exception("unhandled error")
         return FeathersError(500, "Internal server error").response()
 
     # ── Health ────────────────────────────────────────────────────────────
 
     @app.get("/healthz")
-    async def healthz():
+    async def healthz():  # type: ignore[no-untyped-def]
         async with engine.connect() as conn:
             await conn.execute(text("select 1"))
         return {"ok": True}
@@ -138,22 +137,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def register(name: str) -> None:
         svc = services[name]
 
-        async def query(method, arg: str):
+        async def query(method, arg: str):  # type: ignore[no-untyped-def]
             async with engine.connect() as conn:
                 return await method(conn, arg)
 
         @app.get(f"/{name}", name=f"{name}-find")
-        async def find(request: Request):
+        async def find(request: Request):  # type: ignore[no-untyped-def]
             qs = request.url.query
             body = await service_cache.get_or_render(f"{name}?{qs}", lambda: query(svc.find, qs))
             return body.response(request)
 
         @app.get(f"/{name}/{{item_id}}", name=f"{name}-get")
-        async def get(item_id: str, request: Request):
+        async def get(item_id: str, request: Request):  # type: ignore[no-untyped-def]
             body = await service_cache.get_or_render(f"{name}/{item_id}", lambda: query(svc.get, item_id))
             return body.response(request)
 
-        async def disallowed(request: Request):
+        async def disallowed(request: Request):  # type: ignore[no-untyped-def]
             raise FeathersError(405, f"Provider 'rest' can not call '{request.method.lower()}'. (disallow)")
 
         for path in (f"/{name}", f"/{name}/{{item_id}}"):
@@ -165,23 +164,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ── Additions for the new sites (not in the legacy API) ───────────────
 
     @app.get("/v1/games-played")
-    async def games_played_route(request: Request):
-        async def fetch() -> list[dict]:
+    async def games_played_route(request: Request):  # type: ignore[no-untyped-def]
+        async def fetch() -> list[dict[str, Any]]:
             async with engine.connect() as conn:
                 return await games_played(conn)
 
         return (await service_cache.get_or_render("v1/games-played", fetch)).response(request)
 
     @app.get("/v1/status")
-    async def status_route(request: Request):
-        async def fetch() -> dict:
+    async def status_route(request: Request):  # type: ignore[no-untyped-def]
+        async def fetch() -> dict[str, Any]:
             async with engine.connect() as conn:
                 return await stream_status(conn, helix, settings.twitch_id)
 
         return (await status_cache.get_or_render("status", fetch)).response(request)
 
     @app.get("/v1/emotes/third-party")
-    async def third_party_emotes(request: Request):
+    async def third_party_emotes(request: Request):  # type: ignore[no-untyped-def]
         body = emotes_cache.get("emotes") or emotes_partial_cache.get("emotes")
         if body is None:
             value = await fetch_third_party_emotes(settings.twitch_id)
@@ -192,7 +191,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ── Seek-bar previews ─────────────────────────────────────────────────
 
     @app.get("/v1/previews/{youtube_id}/{name}")
-    async def preview_sheet(youtube_id: str, name: str):
+    async def preview_sheet(youtube_id: str, name: str):  # type: ignore[no-untyped-def]
         """Sheet ``name`` of an upload's previews (archive_common.previews), made by the worker; the upload must
         be on a VOD the API shows."""
         if not pv.YOUTUBE_ID.match(youtube_id) or not pv.SHEET.match(name):
@@ -206,14 +205,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         if listed is None:
             raise LegacyError(404, "Not found")
-        return FileResponse(path, media_type="image/jpeg",
-                            headers={"Cache-Control": "public, max-age=31536000, immutable"})
+        return FileResponse(
+            path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"}
+        )
 
     # ── Site tags (how vods.vexoulz.net shows each VOD tag; the worker's admin routes save them) ──
 
     @app.get("/v1/site/tags")
-    async def site_tag_list(request: Request):
-        async def fetch() -> dict:
+    async def site_tag_list(request: Request):  # type: ignore[no-untyped-def]
+        async def fetch() -> dict[str, Any]:
             async with engine.connect() as conn:
                 loaded = await site_tags.load(conn)
             if loaded is None:
@@ -225,7 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return response
 
     @app.get("/v1/site/tags/{file}")
-    async def site_tag_shape(file: str, v: str | None = None):
+    async def site_tag_shape(file: str, v: str | None = None):  # type: ignore[no-untyped-def]
         """A tag's shape, cleaned by the worker when uploaded. Served so that even opened on its own it can't
         run or load anything; immutable when asked for by its current hash (the list's ``shape``)."""
         name = file.removesuffix(".svg")
@@ -237,16 +237,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise LegacyError(404, "Not found")
         svg, digest = found
         cache = "public, max-age=31536000, immutable" if v == digest else f"public, max-age={SITE_TAGS_TTL}"
-        return Response(svg, media_type="image/svg+xml", headers={
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": cache,
-        })
+        return Response(
+            svg,
+            media_type="image/svg+xml",
+            headers={
+                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": cache,
+            },
+        )
 
     # ── Chat replay ───────────────────────────────────────────────────────
 
     @app.get("/v1/vods/{vod_id}/comments")
-    async def vod_comments(vod_id: str, request: Request):
+    async def vod_comments(vod_id: str, request: Request):  # type: ignore[no-untyped-def]
         params = request.query_params
         body = await comments.handle(
             engine, vod_id, params.get("content_offset_seconds"), params.get("cursor"), params.get("source")
@@ -256,8 +260,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ── Badges ────────────────────────────────────────────────────────────
 
     @app.get("/v2/badges")
-    async def badges(request: Request):
-        async def fetch() -> dict:
+    async def badges(request: Request):  # type: ignore[no-untyped-def]
+        async def fetch() -> dict[str, Any]:
             if not helix.configured:
                 raise LegacyError(500, "Twitch credentials are not configured")
             try:
@@ -270,7 +274,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return (await badges_cache.get_or_render("badges", fetch)).response(request)
 
     @app.get("/favicon.ico", include_in_schema=False)
-    async def favicon():
+    async def favicon():  # type: ignore[no-untyped-def]
         return Response(status_code=204)
 
     return app

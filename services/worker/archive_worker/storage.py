@@ -20,10 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
-
 from archive_common.db import get_sessionmaker
 from archive_common.models import Vod
+from sqlalchemy import func, select
 
 from .events import iso_utc
 from .job_rows import ACTIVE, ALL_JOBS
@@ -100,9 +99,8 @@ def _jobs_of(area: str, names: list[str]) -> Any:
     return (typ != "live") & ALL_JOBS.c.vod_id.in_(names)
 
 
-def _job_json(job: Any) -> dict:
-    return {"id": job.id, "kind": job.kind, "state": job.state, "step": job.step,
-            "updatedAt": iso_utc(job.updated_at)}
+def _job_json(job: Any) -> dict[str, Any]:
+    return {"id": job.id, "kind": job.kind, "state": job.state, "step": job.step, "updatedAt": iso_utc(job.updated_at)}
 
 
 class Storage:
@@ -117,14 +115,14 @@ class Storage:
                 self._cache = (time.monotonic(), await asyncio.to_thread(scan, self.data_dir))
             return self._cache[1]
 
-    def disk(self) -> dict | None:
+    def disk(self) -> dict[str, Any] | None:
         try:
             usage = shutil.disk_usage(self.data_dir)
         except OSError:
             return None
         return {"total": usage.total, "used": usage.used, "free": usage.free}
 
-    async def view(self, refresh: bool = False) -> dict:
+    async def view(self, refresh: bool = False) -> dict[str, Any]:
         folders = await self.folders(refresh)
         rows = []
         async with get_sessionmaker()() as s:
@@ -134,7 +132,7 @@ class Storage:
                     continue
                 names = [f.name for f in mine]
                 key = Vod.stream_id if area == "live" else Vod.id
-                vods = {}
+                vods = {}  # type: ignore[var-annotated]
                 for v in (await s.execute(select(key, Vod.id, Vod.title, Vod.hidden).where(key.in_(names)))).all():
                     vods.setdefault(v[0], {"id": v.id, "title": v.title, "hidden": v.hidden})
                 by_folder: dict[str, list[Any]] = {}
@@ -148,23 +146,35 @@ class Storage:
                     last = jobs[0] if jobs else None
                     vod = vods.get(f.name)
                     stale = not active and (vod is None or (last is not None and last.state in ("failed", "cancelled")))
-                    rows.append({
-                        "area": area, "name": f.name, "path": f"{area}/{f.name}", "bytes": f.bytes, "files": f.files,
-                        "modifiedAt": iso_utc(dt.datetime.fromtimestamp(f.modified, dt.timezone.utc))
-                        if f.modified is not None else None,
-                        "vod": vod,
-                        "jobs": {"active": [_job_json(j) for j in active], "last": _job_json(last) if last else None},
-                        "stale": stale,
-                    })
+                    rows.append(
+                        {
+                            "area": area,
+                            "name": f.name,
+                            "path": f"{area}/{f.name}",
+                            "bytes": f.bytes,
+                            "files": f.files,
+                            "modifiedAt": iso_utc(dt.datetime.fromtimestamp(f.modified, dt.UTC))
+                            if f.modified is not None
+                            else None,
+                            "vod": vod,
+                            "jobs": {
+                                "active": [_job_json(j) for j in active],
+                                "last": _job_json(last) if last else None,
+                            },
+                            "stale": stale,
+                        }
+                    )
         return {"disk": self.disk(), "folders": rows, "cacheSeconds": CACHE_SECONDS}
 
-    async def delete(self, area: str, name: str) -> dict:
+    async def delete(self, area: str, name: str) -> dict[str, Any]:
         """Remove a folder no job is working in. Returns what was freed."""
         path = folder_path(self.data_dir, area, name)
         async with get_sessionmaker()() as s:
-            active = (await s.execute(
-                select(ALL_JOBS.c.id).where(_jobs_of(area, [name]), ALL_JOBS.c.state.in_(ACTIVE)).limit(1)
-            )).scalar()
+            active = (
+                await s.execute(
+                    select(ALL_JOBS.c.id).where(_jobs_of(area, [name]), ALL_JOBS.c.state.in_(ACTIVE)).limit(1)
+                )
+            ).scalar()
         if active is not None:
             raise StorageError(409, f"Job {active} is working in {area}/{name}; cancel it or let it finish first")
         size, files, _ = await asyncio.to_thread(_size, path)

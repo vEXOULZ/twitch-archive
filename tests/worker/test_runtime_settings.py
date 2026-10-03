@@ -1,17 +1,18 @@
 """Worker settings changed from the admin dashboard (runtime_settings.py; the DB parts need the dev DB)."""
 
+from typing import Any
+
 import httpx
 import pytest
-from pydantic import SecretStr
-from sqlalchemy import delete, func, insert, select
-
-from archive_common.db import get_sessionmaker
 from archive_common.audit import AUDIT_LOG
+from archive_common.db import get_sessionmaker
 from archive_common.models import RuntimeSetting
 from archive_worker import jobs, legacy_jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.context import JobContext
 from archive_worker.runtime_settings import BY_KEY, RuntimeSettings, validate
+from pydantic import SecretStr
+from sqlalchemy import delete, func, insert, select
 
 KEY = {"Authorization": "Bearer k"}
 TOUCHED = ("keep_hls", "split_duration", "restricted_games", "runner_concurrency", "manual_steps", "retired_key")
@@ -26,23 +27,26 @@ def test_validate():
     assert validate("manual_steps", {"archive": ["upload", "upload"], "chat": []}) == {"archive": ["upload"]}
 
 
-@pytest.mark.parametrize("key, value, msg", [
-    ("data_dir", "/tmp", "can't be changed here"),
-    ("twitch_client_secret", "x", "can't be changed here"),
-    ("keep_hls", "yes", "true or false"),
-    ("keep_hls", 1, "true or false"),
-    ("split_duration", True, "must be a number"),
-    ("split_duration", 3600.5, "whole number"),
-    ("split_duration", 10, "between 600 and 43200"),
-    ("runner_concurrency", 0, "between 1 and 16"),
-    ("youtube_keepalive_hours", float("nan"), "must be a number"),
-    ("youtube_description", "x" * 501, "at most 500"),
-    ("restricted_games", "Artifact", "list of non-empty names"),
-    ("restricted_games", ["ok", " "], "list of non-empty names"),
-    ("manual_steps", ["upload"], "map job kinds"),
-    ("manual_steps", {"archive": ["uplaod"]}, "no step"),
-    ("manual_steps", {"nope": ["upload"]}, "unknown job kind"),
-])
+@pytest.mark.parametrize(
+    "key, value, msg",
+    [
+        ("data_dir", "/tmp", "can't be changed here"),
+        ("twitch_client_secret", "x", "can't be changed here"),
+        ("keep_hls", "yes", "true or false"),
+        ("keep_hls", 1, "true or false"),
+        ("split_duration", True, "must be a number"),
+        ("split_duration", 3600.5, "whole number"),
+        ("split_duration", 10, "between 600 and 43200"),
+        ("runner_concurrency", 0, "between 1 and 16"),
+        ("youtube_keepalive_hours", float("nan"), "must be a number"),
+        ("youtube_description", "x" * 501, "at most 500"),
+        ("restricted_games", "Artifact", "list of non-empty names"),
+        ("restricted_games", ["ok", " "], "list of non-empty names"),
+        ("manual_steps", ["upload"], "map job kinds"),
+        ("manual_steps", {"archive": ["uplaod"]}, "no step"),
+        ("manual_steps", {"nope": ["upload"]}, "unknown job kind"),
+    ],
+)
 def test_validate_refused(key, value, msg):
     with pytest.raises(ValueError, match=msg):
         validate(key, value)
@@ -123,9 +127,18 @@ async def test_overrides_apply_and_reset(clean, settings):
     assert (settings.keep_hls, settings.split_duration, settings.restricted_games) == (True, 3600, ["Artifact"])
     row = {r["key"]: r for r in fresh.describe()}["keep_hls"]
     assert row | {"updatedAt": None} == {
-        "key": "keep_hls", "value": True, "default": False, "overridden": True, "type": "bool",
-        "group": "Pipeline", "applies": "next job", "help": "Keep the HLS segments after upload",
-        "min": None, "max": None, "updatedAt": None, "updatedBy": "someone",
+        "key": "keep_hls",
+        "value": True,
+        "default": False,
+        "overridden": True,
+        "type": "bool",
+        "group": "Pipeline",
+        "applies": "next job",
+        "help": "Keep the HLS segments after upload",
+        "min": None,
+        "max": None,
+        "updatedAt": None,
+        "updatedBy": "someone",
     }
 
     assert await fresh.reset("keep_hls") == ({"keep_hls": True}, {"keep_hls": False})
@@ -146,13 +159,11 @@ def client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app[0]), base_url="https://admin")
 
 
-async def _audit(after: int) -> list:
+async def _audit(after: int) -> list[Any]:
     """The settings rows audited since ``after``."""
     c = AUDIT_LOG.c
     async with get_sessionmaker()() as s:
-        return (await s.execute(
-            select(AUDIT_LOG).where(c.id > after, c.action.like("setting.%")).order_by(c.id)
-        )).all()
+        return (await s.execute(select(AUDIT_LOG).where(c.id > after, c.action.like("setting.%")).order_by(c.id))).all()  # type: ignore[no-any-return]
 
 
 async def test_settings_routes(app, clean, deps):
@@ -170,8 +181,9 @@ async def test_settings_routes(app, clean, deps):
         r = await c.patch("/admin/settings", headers=KEY, json={})
         assert r.status_code == 400
 
-        r = await c.patch("/admin/settings", headers=KEY,
-                          json={"runner_concurrency": 6, "manual_steps": {"archive": ["upload"]}})
+        r = await c.patch(
+            "/admin/settings", headers=KEY, json={"runner_concurrency": 6, "manual_steps": {"archive": ["upload"]}}
+        )
         assert r.status_code == 200
         row = {x["key"]: x for x in r.json()["data"]}["runner_concurrency"]
         assert (row["value"], row["default"], row["overridden"], row["updatedBy"]) == (6, 3, True, "api-key")
@@ -185,7 +197,9 @@ async def test_settings_routes(app, clean, deps):
 
     patch, reset = await _audit(clean)
     assert (patch.action, patch.target, patch.actor_kind) == ("setting.update", None, "api_key")
-    assert (patch.before, patch.after) == ({"runner_concurrency": 3, "manual_steps": {}},
-                                           {"runner_concurrency": 6, "manual_steps": {"archive": ["upload"]}})
+    assert (patch.before, patch.after) == (
+        {"runner_concurrency": 3, "manual_steps": {}},
+        {"runner_concurrency": 6, "manual_steps": {"archive": ["upload"]}},
+    )
     assert (reset.action, reset.target) == ("setting.reset", "setting:runner_concurrency")
     assert (reset.before, reset.after) == ({"runner_concurrency": 6}, {"runner_concurrency": 3})

@@ -1,8 +1,33 @@
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
+# conventions:begin: synced from vEXOULZ/conventions; edit it there, then run `conventions sync`
+# Secrets and local settings. The templates (.env.example, secrets.example/) are the ones committed.
 .env
+.env.*
+!.env.example
+secrets/
+
+# Claude Code worktrees and the graphify knowledge graph, both local to a checkout
+.claude/worktrees/
+graphify-out/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+# conventions:end
+
+# Database dumps and the worker's data directory
 *.dump
 /data/
-secrets/

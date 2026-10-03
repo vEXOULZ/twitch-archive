@@ -5,15 +5,14 @@ import os
 
 import httpx
 import pytest
-from pydantic import SecretStr
-from sqlalchemy import delete, func, select
-
-from archive_common.db import get_sessionmaker
 from archive_common.audit import AUDIT_LOG
+from archive_common.db import get_sessionmaker
 from archive_common.models import Job, Vod
 from archive_worker import jobs
 from archive_worker.admin import create_admin_app
 from archive_worker.storage import StorageError, folder_path, scan
+from pydantic import SecretStr
+from sqlalchemy import delete, func, select
 
 KEY = {"Authorization": "Bearer k"}
 KEPT, FAILED, ORPHAN = "test-storage-kept", "test-storage-failed", "test-storage-orphan"
@@ -35,9 +34,16 @@ def test_scan_counts_files_and_bytes(tmp_path):
     assert got == {("vods", "1"): (120, 2), ("live", "2"): (5, 1)}
 
 
-@pytest.mark.parametrize("area, name, status", [
-    ("vods", "..", 400), ("vods", ".", 400), ("vods", "a b", 400), ("other", "1", 404), ("vods", "missing", 404),
-])
+@pytest.mark.parametrize(
+    "area, name, status",
+    [
+        ("vods", "..", 400),
+        ("vods", ".", 400),
+        ("vods", "a b", 400),
+        ("other", "1", 404),
+        ("vods", "missing", 404),
+    ],
+)
 def test_folder_path_refused(tmp_path, area, name, status):
     (tmp_path / "vods").mkdir()
     with pytest.raises(StorageError) as err:
@@ -72,14 +78,21 @@ async def world(db, settings):
     await _reset()
     async with get_sessionmaker()() as s:
         audit_after = (await s.execute(select(func.max(AUDIT_LOG.c.id)))).scalar() or 0
-        now = dt.datetime.now(dt.timezone.utc)
-        s.add_all([
-            Vod(id=KEPT, title="kept", created_at=now, duration="01:00:00", stream_id=STREAM),
-            Vod(id=FAILED, title="failed", created_at=now, duration="01:00:00", hidden=True),
-            Job(vod_id=FAILED, kind="archive", state="done", payload={}),
-            Job(vod_id=KEPT, kind="live", state="running", step="live_record",
-                payload={"type": "live", "stream_id": STREAM}),
-        ])
+        now = dt.datetime.now(dt.UTC)
+        s.add_all(
+            [
+                Vod(id=KEPT, title="kept", created_at=now, duration="01:00:00", stream_id=STREAM),
+                Vod(id=FAILED, title="failed", created_at=now, duration="01:00:00", hidden=True),
+                Job(vod_id=FAILED, kind="archive", state="done", payload={}),
+                Job(
+                    vod_id=KEPT,
+                    kind="live",
+                    state="running",
+                    step="live_record",
+                    payload={"type": "live", "stream_id": STREAM},
+                ),
+            ]
+        )
         await s.flush()
         s.add(Job(vod_id=FAILED, kind="reupload", state="failed", payload={}))
         await s.commit()
@@ -104,10 +117,18 @@ async def test_storage_view_and_delete(world, app, settings):
         rows = {f["path"]: f for f in body["folders"]}
         assert str(settings.data_dir) not in str(body)
 
-        kept, failed, orphan, live = (rows[f"vods/{KEPT}"], rows[f"vods/{FAILED}"], rows[f"vods/{ORPHAN}"],
-                                      rows[f"live/{STREAM}"])
+        kept, failed, orphan, live = (
+            rows[f"vods/{KEPT}"],
+            rows[f"vods/{FAILED}"],
+            rows[f"vods/{ORPHAN}"],
+            rows[f"live/{STREAM}"],
+        )
         assert (kept["bytes"], kept["files"], kept["vod"], kept["stale"]) == (
-            10, 1, {"id": KEPT, "title": "kept", "hidden": False}, False)
+            10,
+            1,
+            {"id": KEPT, "title": "kept", "hidden": False},
+            False,
+        )
         assert kept["jobs"] == {"active": [], "last": None}  # the live job works in live/<stream>
         assert (failed["vod"]["hidden"], failed["jobs"]["last"]["state"], failed["stale"]) == (True, "failed", True)
         assert (orphan["vod"], orphan["stale"]) == (None, True)
@@ -122,8 +143,9 @@ async def test_storage_view_and_delete(world, app, settings):
 
         # Cached until refreshed; a delete drops the cache.
         put(settings.data_dir / "vods" / ORPHAN / "more.bin", 5)
-        assert {f["path"]: f for f in (await c.get("/admin/storage", headers=KEY)).json()["folders"]}[
-            f"vods/{ORPHAN}"]["bytes"] == 30
+        assert {f["path"]: f for f in (await c.get("/admin/storage", headers=KEY)).json()["folders"]}[f"vods/{ORPHAN}"][
+            "bytes"
+        ] == 30
         r = await c.delete(f"/admin/storage/vods/{ORPHAN}", headers=KEY)
         assert r.status_code == 200 and r.json() == {"path": f"vods/{ORPHAN}", "bytes": 35, "files": 2}
         assert not (settings.data_dir / "vods" / ORPHAN).exists()

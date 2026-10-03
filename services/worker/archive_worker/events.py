@@ -14,10 +14,9 @@ import logging
 from collections import defaultdict, deque
 from typing import Any
 
-from sqlalchemy import delete, insert, select
-
 from archive_common.db import get_sessionmaker
 from archive_common.models import JobEvent
+from sqlalchemy import delete, insert, select
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +35,7 @@ def level_name(levelno: int) -> str:
 
 
 def iso_utc(value: dt.datetime | None) -> str | None:
-    return value.astimezone(dt.timezone.utc).isoformat() if value else None
+    return value.astimezone(dt.UTC).isoformat() if value else None
 
 
 def event_json(event: JobEvent) -> dict[str, Any]:
@@ -60,7 +59,7 @@ class _Handler(logging.Handler):
         if job is None:
             return
         try:
-            at = dt.datetime.fromtimestamp(record.created, dt.timezone.utc)
+            at = dt.datetime.fromtimestamp(record.created, dt.UTC)
             self.events.add(job, level_name(record.levelno), getattr(record, "step", None), record.getMessage(), at=at)
         except Exception:
             self.handleError(record)
@@ -95,14 +94,16 @@ class JobEvents:
         *,
         at: dt.datetime | None = None,
     ) -> None:
-        self._pending.append({
-            "job_id": job_id,
-            "at": at or dt.datetime.now(dt.timezone.utc),
-            "level": level,
-            "step": step,
-            "message": message,
-            "progress": progress,
-        })
+        self._pending.append(
+            {
+                "job_id": job_id,
+                "at": at or dt.datetime.now(dt.UTC),
+                "level": level,
+                "step": step,
+                "message": message,
+                "progress": progress,
+            }
+        )
 
     async def flush(self) -> None:
         async with self._lock:
@@ -124,10 +125,14 @@ class JobEvents:
                 # Not through the job logger: that would feed this batch's failure back into it.
                 log.warning("dropped %d job event(s): %s", len(rows), exc)
 
-    def _prune(self, job_id: int):
+    def _prune(self, job_id: int):  # type: ignore[no-untyped-def]
         newest_kept = (
-            select(JobEvent.id).where(JobEvent.job_id == job_id)
-            .order_by(JobEvent.id.desc()).offset(self.cap - 1).limit(1).scalar_subquery()
+            select(JobEvent.id)
+            .where(JobEvent.job_id == job_id)
+            .order_by(JobEvent.id.desc())
+            .offset(self.cap - 1)
+            .limit(1)
+            .scalar_subquery()
         )
         return delete(JobEvent).where(JobEvent.job_id == job_id, JobEvent.id < newest_kept)
 
@@ -143,7 +148,9 @@ class JobEvents:
         await self.flush()  # include what was logged a moment ago
         async with get_sessionmaker()() as s:
             stmt = (
-                select(JobEvent).where(JobEvent.job_id == job_id, JobEvent.id > after)
-                .order_by(JobEvent.id).limit(limit)
+                select(JobEvent)
+                .where(JobEvent.job_id == job_id, JobEvent.id > after)
+                .order_by(JobEvent.id)
+                .limit(limit)
             )
             return list((await s.execute(stmt)).scalars())

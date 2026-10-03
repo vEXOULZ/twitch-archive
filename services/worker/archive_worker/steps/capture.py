@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 
 import httpx
-
 from archive_common import http
 from archive_common.timeutil import format_hhmmss
 
@@ -273,7 +272,8 @@ async def live_record(ctx: JobContext) -> None:
             # then index it in order.
             names = {
                 seg.sequence: f"{seg.sequence:09d}{Path(hls.local_name(seg.uri)).suffix or '.ts'}"
-                for seg in new if not seg.ad
+                for seg in new
+                if not seg.ad
             }
             lost = await _download_all(
                 [(_abs(base, seg.uri), d / names[seg.sequence]) for seg in new if not seg.ad],

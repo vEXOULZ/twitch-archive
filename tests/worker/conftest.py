@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from typing import Any
 
 import pytest
-
 from archive_common.config import Settings
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
@@ -40,7 +40,6 @@ def deps(settings) -> Deps:
 def api():
     """The public archive API, rate limit and service cache off."""
     import httpx
-
     from archive_api.main import create_app
 
     app = create_app(Settings(rate_limit_points=1_000_000, cache_ttl_seconds=0))
@@ -49,7 +48,7 @@ def api():
 
 @pytest.fixture
 def make_ctx(deps):
-    def make(kind: str = "archive", vod_id: str | None = "100", payload: dict | None = None, job_id: int = 0):
+    def make(kind: str = "archive", vod_id: str | None = "100", payload: dict[str, Any] | None = None, job_id: int = 0):
         return JobContext(job_id, kind, vod_id, dict(payload or {}), deps)
 
     return make
@@ -59,7 +58,6 @@ def make_ctx(deps):
 async def db():
     """Local Postgres (see README "Development"); tests using it skip without one."""
     import sqlalchemy
-
     from archive_common.db import get_engine
 
     try:
@@ -75,7 +73,7 @@ async def make_service(deps, db):
     """``await make_service(start=True)``: a JobService whose runtime runs the kinds in ``jobs.KINDS``
     (a test's monkeypatched ones too) on the dev DB, closed after the test. ``start=False`` only
     opens it: jobs are queued but nothing runs them."""
-    made: list = []
+    made: list[Any] = []
 
     async def make(*, start: bool = True) -> jobs.JobService:
         runtime = jobs.create_runtime(deps, poll_interval=0.2, shutdown_timeout=2.0)

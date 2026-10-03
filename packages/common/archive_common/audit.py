@@ -24,8 +24,26 @@ from .db import get_sessionmaker
 TABLE = "public.audit_log"
 AUDIT_LOG = table(
     "audit_log",
-    *(column(c) for c in ("id", "at", "actor_kind", "actor_id", "actor_login", "via", "action", "target",
-                          "scope", "outcome", "before", "after", "detail", "request_id", "job_run_id")),
+    *(
+        column(c)
+        for c in (
+            "id",
+            "at",
+            "actor_kind",
+            "actor_id",
+            "actor_login",
+            "via",
+            "action",
+            "target",
+            "scope",
+            "outcome",
+            "before",
+            "after",
+            "detail",
+            "request_id",
+            "job_run_id",
+        )
+    ),
     schema="public",
 )
 
@@ -115,7 +133,7 @@ async def write(entry: AuditEntry) -> int:
     async with get_sessionmaker()() as s:
         row_id = await record(s, entry, table=TABLE)
         await s.commit()
-        return row_id
+        return row_id  # type: ignore[no-any-return]
 
 
 # ── Copying admin_audit ────────────────────────────────────────────────────
@@ -130,8 +148,16 @@ _INSERT = text(insert_sql(TABLE, "named").removesuffix(" RETURNING id"))  # exec
 
 def _copies(rows: Any) -> list[dict[str, Any]]:
     return [
-        values(route_entry(r.action, actor_of(r.actor, r.actor_login), r.target, r.detail,
-                           at=r.at, request_id=f"admin_audit:{r.id}"))
+        values(
+            route_entry(
+                r.action,
+                actor_of(r.actor, r.actor_login),
+                r.target,
+                r.detail,
+                at=r.at,
+                request_id=f"admin_audit:{r.id}",
+            )
+        )
         for r in rows
     ]
 

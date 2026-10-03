@@ -103,7 +103,12 @@ class Settings(BaseSettings):
     # Where the admin password is taken from (addresses or CIDR ranges; ["*"] = anywhere). Elsewhere it is
     # refused, and the dashboard signs in with Twitch instead. Default: this host and the private ranges.
     admin_password_networks: list[str] = [
-        "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
+        "127.0.0.0/8",
+        "::1/128",
+        "10.0.0.0/8",  # conventions:allow-infra
+        "172.16.0.0/12",  # conventions:allow-infra
+        "192.168.0.0/16",  # conventions:allow-infra
+        "fc00::/7",
     ]
     # Twitch sign-in through vexoulz-auth: on when admin_auth_url, the client secret, the redirect URL
     # and at least one Twitch user id are set. Only those users get in.

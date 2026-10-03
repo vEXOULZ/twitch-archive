@@ -8,10 +8,9 @@ import asyncio
 import os
 
 from alembic import context
-from sqlalchemy.ext.asyncio import create_async_engine
-
 from archive_common.config import get_settings
 from archive_common.models import Base
+from sqlalchemy.ext.asyncio import create_async_engine
 
 target_metadata = Base.metadata
 
@@ -26,7 +25,7 @@ def run_offline() -> None:
         context.run_migrations()
 
 
-def _do_run(connection) -> None:
+def _do_run(connection) -> None:  # type: ignore[no-untyped-def]
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
         context.run_migrations()

@@ -21,15 +21,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, select
-from sqlalchemy.dialects.postgresql import insert
-from vex_platform.audit import AuditEntry
-from vex_platform.audit.sqlalchemy import record
-
 from archive_common import audit
 from archive_common.config import Settings
 from archive_common.db import get_sessionmaker
 from archive_common.models import RuntimeSetting
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert
+from vex_platform.audit import AuditEntry
+from vex_platform.audit.sqlalchemy import record
 
 from . import jobs
 from .events import iso_utc
@@ -39,7 +38,7 @@ log = logging.getLogger(__name__)
 TEXT_MAX = 500
 
 # (before, after) -> the audit row a change writes in its own transaction (the v2 routes).
-Audit = Callable[[dict, dict], AuditEntry]
+Audit = Callable[[dict[str, Any], dict[str, Any]], AuditEntry]
 
 
 @dataclass(frozen=True)
@@ -58,22 +57,42 @@ ENTRIES = (
     Entry("chat_download", "bool", "Capture", "next job", "Save the chat replay"),
     Entry("live_record", "bool", "Capture", "now", "Record the live stream itself"),
     Entry("multi_track", "bool", "Capture", "now", "Upload both the VOD copy and the live copy"),
-    Entry("monitor_interval_seconds", "int", "Capture", "now", "How often Twitch is checked for a live stream",
-          5, 3600),
+    Entry(
+        "monitor_interval_seconds", "int", "Capture", "now", "How often Twitch is checked for a live stream", 5, 3600
+    ),
     Entry("youtube_upload", "bool", "YouTube", "next job", "Upload to YouTube"),
     Entry("youtube_public", "bool", "YouTube", "next job", "Public instead of unlisted (for the main copy)"),
     Entry("youtube_description", "text", "YouTube", "next job", "Last line of every description"),
-    Entry("youtube_keepalive_hours", "float", "YouTube", "now",
-          "How often the YouTube token is refreshed (from the next refresh)", 1, 720),
+    Entry(
+        "youtube_keepalive_hours",
+        "float",
+        "YouTube",
+        "now",
+        "How often the YouTube token is refreshed (from the next refresh)",
+        1,
+        720,
+    ),
     Entry("restricted_games", "list", "Pipeline", "next job", "Chapters of these games are left out of uploads"),
     Entry("split_duration", "int", "Pipeline", "next job", "Maximum YouTube part length in seconds", 600, 43200),
     Entry("keep_hls", "bool", "Pipeline", "next job", "Keep the HLS segments after upload"),
     Entry("keep_mp4", "bool", "Pipeline", "next job", "Keep the MP4 after upload"),
     Entry("previews", "bool", "Pipeline", "next job", "Make seek-bar previews of each uploaded part"),
-    Entry("previews_fetch_pause_seconds", "int", "Pipeline", "next job",
-          "Pause between two YouTube downloads of the previews backfill", 0, 3600),
-    Entry("manual_steps", "steps", "Pipeline", "now",
-          "Steps a job pauses before until resumed, per job kind (a job's own list wins)"),
+    Entry(
+        "previews_fetch_pause_seconds",
+        "int",
+        "Pipeline",
+        "next job",
+        "Pause between two YouTube downloads of the previews backfill",
+        0,
+        3600,
+    ),
+    Entry(
+        "manual_steps",
+        "steps",
+        "Pipeline",
+        "now",
+        "Steps a job pauses before until resumed, per job kind (a job's own list wins)",
+    ),
     Entry("runner_concurrency", "int", "Runner", "now", "Jobs run at once", 1, 16),
     Entry("max_attempts", "int", "Runner", "now", "Tries of a failing step before its job fails", 1, 10),
 )
@@ -108,8 +127,9 @@ def validate(key: str, value: Any) -> Any:
             raise ValueError(f"{key} must be a list of non-empty names")
         return list(dict.fromkeys(v.strip() for v in value))
     # steps: {kind: [step, ...]}
-    if not isinstance(value, dict) or not all(isinstance(v, list) and all(isinstance(s, str) for s in v)
-                                              for v in value.values()):
+    if not isinstance(value, dict) or not all(
+        isinstance(v, list) and all(isinstance(s, str) for s in v) for v in value.values()
+    ):
         raise ValueError(f"{key} must map job kinds to lists of steps")
     try:
         for kind, steps in value.items():
@@ -144,45 +164,57 @@ class RuntimeSettings:
             value = overrides[e.key].value if e.key in overrides else self.env[e.key]
             setattr(self.settings, e.key, copy.deepcopy(value))
 
-    def current(self, keys) -> dict[str, Any]:
+    def current(self, keys) -> dict[str, Any]:  # type: ignore[no-untyped-def]
         return {k: copy.deepcopy(getattr(self.settings, k)) for k in keys}
 
-    def describe(self) -> list[dict]:
+    def describe(self) -> list[dict[str, Any]]:
         out = []
         for e in ENTRIES:
             row = self.overrides.get(e.key)
             item = {
-                "key": e.key, "value": getattr(self.settings, e.key), "default": self.env[e.key],
-                "overridden": row is not None, "type": e.type, "group": e.group, "applies": e.applies,
-                "help": e.help, "min": e.min, "max": e.max,
-                "updatedAt": iso_utc(row.updated_at) if row else None, "updatedBy": row.updated_by if row else None,
+                "key": e.key,
+                "value": getattr(self.settings, e.key),
+                "default": self.env[e.key],
+                "overridden": row is not None,
+                "type": e.type,
+                "group": e.group,
+                "applies": e.applies,
+                "help": e.help,
+                "min": e.min,
+                "max": e.max,
+                "updatedAt": iso_utc(row.updated_at) if row else None,
+                "updatedBy": row.updated_by if row else None,
             }
             if e.type == "steps":
                 item["choices"] = jobs.KINDS
             out.append(item)
         return out
 
-    async def update(self, changes: dict[str, Any], by: str, audit_as: Audit | None = None) -> tuple[dict, dict]:
+    async def update(
+        self, changes: dict[str, Any], by: str, audit_as: Audit | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Override every key in ``changes``, or none (ValueError). Returns the values before and after."""
         if not changes:
             raise ValueError("Send at least one setting")
         values = {k: validate(k, v) for k, v in changes.items()}
         before = self.current(values)
-        now = dt.datetime.now(dt.timezone.utc)
+        now = dt.datetime.now(dt.UTC)
         async with get_sessionmaker()() as s:
             for key, value in values.items():
                 stmt = insert(RuntimeSetting).values(key=key, value=value, updated_at=now, updated_by=by)
-                await s.execute(stmt.on_conflict_do_update(
-                    index_elements=[RuntimeSetting.key],
-                    set_={"value": stmt.excluded.value, "updated_at": now, "updated_by": by},
-                ))
+                await s.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=[RuntimeSetting.key],
+                        set_={"value": stmt.excluded.value, "updated_at": now, "updated_by": by},
+                    )
+                )
             if audit_as:
                 await record(s, audit_as(before, copy.deepcopy(values)), table=audit.TABLE)
             await s.commit()
         await self.load()
         return before, self.current(values)
 
-    async def reset(self, key: str, audit_as: Audit | None = None) -> tuple[dict, dict]:
+    async def reset(self, key: str, audit_as: Audit | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         """Back to the env value. Returns the value before and after."""
         if key not in BY_KEY:
             raise KeyError(key)

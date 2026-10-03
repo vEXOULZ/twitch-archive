@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -25,9 +26,12 @@ KNOWN_DIFFERENCES = {
 
 # Fields added for the new sites. Legacy responses never had them; everything else must match.
 ADDED_VOD_FIELDS = {
-    "duration_seconds", "tags",
+    "duration_seconds",
+    "tags",
     "merged_into",  # only on merged-away VODs
-    "synthetic", "superseded_by", "appears_in",  # only on synthetic VODs and the VODs they are made of
+    "synthetic",
+    "superseded_by",
+    "appears_in",  # only on synthetic VODs and the VODs they are made of
 }
 ADDED_CHAPTER_FIELDS = {"imageTemplate", "length"}
 # Global emote sets saved with each VOD (emotes rows are the dicts with "7tv_emotes").
@@ -70,7 +74,7 @@ def _is_unordered_list(path: str) -> bool:
 
 
 @pytest.mark.parametrize("entry", GOLDEN, ids=[e["path"][:90] for e in GOLDEN])
-async def test_golden(client: httpx.AsyncClient, entry: dict) -> None:
+async def test_golden(client: httpx.AsyncClient, entry: dict[str, Any]) -> None:
     path = entry["path"]
     if path in KNOWN_DIFFERENCES:
         pytest.skip("intentional deviation from legacy behaviour")
@@ -93,9 +97,7 @@ async def test_golden(client: httpx.AsyncClient, entry: dict) -> None:
 
     if isinstance(expected, dict) and "data" in expected and _is_unordered_list(path):
         # No $sort: row order is whatever Postgres returns; compare the envelope.
-        assert {k: body[k] for k in ("total", "limit", "skip")} == {
-            k: expected[k] for k in ("total", "limit", "skip")
-        }
+        assert {k: body[k] for k in ("total", "limit", "skip")} == {k: expected[k] for k in ("total", "limit", "skip")}
         assert len(body["data"]) == len(expected["data"])
         if expected["total"] <= expected["limit"]:
             key = "id" if expected["data"] and "id" in expected["data"][0] else "vodId"

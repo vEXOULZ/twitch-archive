@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
+from archive_common import audit
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
@@ -28,8 +29,6 @@ from vex_platform.api import ApiError, RequestIdMiddleware, install_error_handle
 from vex_platform.audit.router import AuditRefusalsMiddleware, audit_router
 from vex_platform.jobs.router import jobs_router
 from vex_platform.jobs.runtime import JobRuntime
-
-from archive_common import audit
 
 from .job_rows import vod_of
 from .vods import splice_reason
@@ -53,8 +52,9 @@ class GuardedRuntime:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._runtime, name)
 
-    async def enqueue(self, kind: str, subject: str | None = None, payload: dict[str, Any] | None = None,
-                      **kwargs: Any) -> Any:
+    async def enqueue(
+        self, kind: str, subject: str | None = None, payload: dict[str, Any] | None = None, **kwargs: Any
+    ) -> Any:
         if subject is not None:
             vod_id = vod_of(subject)
             if not vod_id:
@@ -64,13 +64,23 @@ class GuardedRuntime:
             job_kind = self._runtime.registry.kinds.get(kind)  # an unknown kind: the runtime refuses it
             if job_kind and self._twitch_steps & set(job_kind.steps):
                 if reason := await splice_reason(vod_id):
-                    raise ApiError(409, "vod_spliced", f"{reason}; a {kind} job would refetch or replace it."
-                                   " Undo the merge/split first")
+                    raise ApiError(
+                        409,
+                        "vod_spliced",
+                        f"{reason}; a {kind} job would refetch or replace it. Undo the merge/split first",
+                    )
         return await self._runtime.enqueue(kind, subject, payload, **kwargs)
 
 
-def mount(app: FastAPI, *, auth: Auth, runtime: JobRuntime, vod_exists: VodExists,
-          twitch_steps: set[str], routers: Sequence[APIRouter] = ()) -> None:
+def mount(
+    app: FastAPI,
+    *,
+    auth: Auth,
+    runtime: JobRuntime,
+    vod_exists: VodExists,
+    twitch_steps: set[str],
+    routers: Sequence[APIRouter] = (),
+) -> None:
     """``auth`` admits a caller and sets ``request.state.actor`` to an ``Actor``, raising ``ApiError``.
     ``routers``: more routes under the prefix (their paths without it)."""
     install_error_handlers(app, PREFIX)
@@ -79,7 +89,7 @@ def mount(app: FastAPI, *, auth: Auth, runtime: JobRuntime, vod_exists: VodExist
     app.add_middleware(RequestIdMiddleware)
 
     v2 = APIRouter(prefix=PREFIX)
-    v2.include_router(jobs_router(GuardedRuntime(runtime, vod_exists, twitch_steps), auth))  # type: ignore[arg-type]
+    v2.include_router(jobs_router(GuardedRuntime(runtime, vod_exists, twitch_steps), auth))
     v2.include_router(audit_router(runtime.pool.connection, auth, table=audit.TABLE))
     for router in routers:
         v2.include_router(router)

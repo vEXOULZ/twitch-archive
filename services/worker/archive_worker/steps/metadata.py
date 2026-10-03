@@ -6,21 +6,21 @@ import asyncio
 import datetime as dt
 import json
 from pathlib import Path
+from typing import Any
 
 import httpx
-from sqlalchemy import func, select, update
-from sqlalchemy.dialects.postgresql import insert
-
 from archive_common import emote_providers as providers
 from archive_common import http
 from archive_common.db import get_sessionmaker
 from archive_common.models import Emote, Log, Vod
 from archive_common.timeutil import hhmmss_to_seconds, parse_ts
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert
 
 from .. import planning
-from ..vods import notify_rows_moved
-from ..timeline import EMOTE_SETS as CHANNEL_SETS
 from ..context import JobContext, StepError
+from ..timeline import EMOTE_SETS as CHANNEL_SETS
+from ..vods import notify_rows_moved
 
 CHAT_BATCH = 2500
 DEFAULT_COLOR = "#999999"
@@ -65,7 +65,7 @@ async def chapters(ctx: JobContext) -> None:
 # ── Chat replay ───────────────────────────────────────────────────────────
 
 
-def comment_row(vod_id: str, node: dict) -> dict:
+def comment_row(vod_id: str, node: dict[str, Any]) -> dict[str, Any]:
     commenter = node.get("commenter") or {}
     message = node.get("message") or {}
     return {
@@ -76,11 +76,11 @@ def comment_row(vod_id: str, node: dict) -> dict:
         "message": message.get("fragments") or [],
         "user_badges": message.get("userBadges") or [],
         "user_color": message.get("userColor") or DEFAULT_COLOR,
-        "created_at": parse_ts(node.get("createdAt")) or dt.datetime.now(dt.timezone.utc),
+        "created_at": parse_ts(node.get("createdAt")) or dt.datetime.now(dt.UTC),
     }
 
 
-async def insert_comments(rows: list[dict]) -> None:
+async def insert_comments(rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
     async with get_sessionmaker()() as s:
@@ -103,7 +103,7 @@ async def chat(ctx: JobContext) -> None:
         ).scalar() or 0
 
     video = await gql.comments(vod_id, offset=offset)
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     total = 0
     while True:
         comments = (video or {}).get("comments")
@@ -142,7 +142,8 @@ async def logs_manual(ctx: JobContext) -> None:
 
 # ── Emotes ────────────────────────────────────────────────────────────────
 
-async def _json(url: str, ctx: JobContext):
+
+async def _json(url: str, ctx: JobContext):  # type: ignore[no-untyped-def]
     try:
         return (await http.request("GET", url)).json()
     except Exception as exc:
@@ -150,30 +151,30 @@ async def _json(url: str, ctx: JobContext):
         return None
 
 
-async def _fetch(endpoints: dict[str, providers.Endpoint], ctx: JobContext) -> dict[str, list[dict]]:
+async def _fetch(endpoints: dict[str, providers.Endpoint], ctx: JobContext) -> dict[str, list[dict[str, Any]]]:
     """Each provider's emotes from ``endpoints``; a provider that fails gets an empty list."""
     responses = await asyncio.gather(*(_json(url, ctx) for url, _ in endpoints.values()))
-    return {p: parse(data) for (p, (_, parse)), data in zip(endpoints.items(), responses)}
+    return {p: parse(data) for (p, (_, parse)), data in zip(endpoints.items(), responses, strict=True)}
 
 
-async def fetch_global_emotes(ctx: JobContext) -> dict[str, list[dict]]:
+async def fetch_global_emotes(ctx: JobContext) -> dict[str, list[dict[str, Any]]]:
     """The providers' current global sets."""
     return await _fetch(providers.GLOBAL, ctx)
 
 
-async def fetch_emotes(ctx: JobContext, twitch_id: str) -> dict:
-    channel, global_emotes = await asyncio.gather(
-        _fetch(providers.channel(twitch_id), ctx), fetch_global_emotes(ctx)
-    )
+async def fetch_emotes(ctx: JobContext, twitch_id: str) -> dict[str, Any]:
+    channel, global_emotes = await asyncio.gather(_fetch(providers.channel(twitch_id), ctx), fetch_global_emotes(ctx))
     # bttv_emotes has always mixed the globals in; older consumers rely on that.
     bttv = global_emotes["bttv"] + channel["bttv"]
-    return {"ffz_emotes": channel["ffz"], "bttv_emotes": bttv, "seventv_emotes": channel["7tv"],
-            "global_emotes": global_emotes}
+    return {
+        "ffz_emotes": channel["ffz"],
+        "bttv_emotes": bttv,
+        "seventv_emotes": channel["7tv"],
+        "global_emotes": global_emotes,
+    }
 
 
-
-
-def merge_emotes(existing: Emote | None, fetched: dict, *, force: bool, now: dt.datetime) -> dict:
+def merge_emotes(existing: Emote | None, fetched: dict[str, Any], *, force: bool, now: dt.datetime) -> dict[str, Any]:
     """Attribute values to write for a VOD's emotes row.
 
     A new row (or ``force``) takes everything fetched, globals marked 'captured'.
@@ -190,7 +191,9 @@ def merge_emotes(existing: Emote | None, fetched: dict, *, force: bool, now: dt.
         }
     values = {k: fetched[k] for k in CHANNEL_SETS if not getattr(existing, k) and fetched[k]}
     old = existing.global_emotes or {}
-    missing = {p: fetched["global_emotes"][p] for p in providers.PROVIDERS if not old.get(p) and fetched["global_emotes"][p]}
+    missing = {
+        p: fetched["global_emotes"][p] for p in providers.PROVIDERS if not old.get(p) and fetched["global_emotes"][p]
+    }
     if missing:
         values.update(global_emotes={**old, **missing}, global_emotes_source="backfilled", global_emotes_at=now)
     return values
@@ -203,10 +206,8 @@ async def emotes(ctx: JobContext) -> None:
     force = bool(ctx.payload.get("force"))
     fetched = await fetch_emotes(ctx, ctx.settings.twitch_id)
     async with get_sessionmaker()() as s:
-        existing = (
-            await s.execute(select(Emote).where(Emote.vod_id == vod_id).with_for_update())
-        ).scalar_one_or_none()
-        values = merge_emotes(existing, fetched, force=force, now=dt.datetime.now(dt.timezone.utc))
+        existing = (await s.execute(select(Emote).where(Emote.vod_id == vod_id).with_for_update())).scalar_one_or_none()
+        values = merge_emotes(existing, fetched, force=force, now=dt.datetime.now(dt.UTC))
         if existing is None:
             s.add(Emote(vod_id=vod_id, **values))
         else:
@@ -216,8 +217,12 @@ async def emotes(ctx: JobContext) -> None:
     g = fetched["global_emotes"]
     ctx.log.info(
         "emotes: ffz=%d bttv=%d 7tv=%d, globals 7tv=%d bttv=%d ffz=%d",
-        len(fetched["ffz_emotes"]), len(fetched["bttv_emotes"]), len(fetched["seventv_emotes"]),
-        len(g["7tv"]), len(g["bttv"]), len(g["ffz"]),
+        len(fetched["ffz_emotes"]),
+        len(fetched["bttv_emotes"]),
+        len(fetched["seventv_emotes"]),
+        len(g["7tv"]),
+        len(g["bttv"]),
+        len(g["ffz"]),
     )
     if existing is not None and not force:
         ctx.log.info("emotes row existed; filled %s (pass force to overwrite)", ", ".join(values) or "nothing")
@@ -251,7 +256,7 @@ async def global_emotes_backfill(ctx: JobContext) -> None:
 SEVENTV_CONCURRENCY = 5
 
 
-def apply_flags(entries: list | None, emote_flags: dict[str, int]) -> list | None:
+def apply_flags(entries: list[Any] | None, emote_flags: dict[str, int]) -> list[Any] | None:
     """``entries`` with ``flags`` added where it is missing, or None if nothing changed.
 
     ``emote_flags`` maps an emote id to 7TV's own ``data.flags``. The entry gets the
@@ -270,7 +275,7 @@ def apply_flags(entries: list | None, emote_flags: dict[str, int]) -> list | Non
     return out if changed else None
 
 
-def _missing_flag_ids(entries: list | None) -> set[str]:
+def _missing_flag_ids(entries: list[Any] | None) -> set[str]:
     return {str(e["id"]) for e in entries or [] if isinstance(e, dict) and e.get("id") is not None and "flags" not in e}
 
 
@@ -313,7 +318,9 @@ async def seventv_flags_backfill(ctx: JobContext) -> None:
     if ctx.payload.get("vod_ids"):
         stmt = stmt.where(Emote.vod_id.in_([str(v) for v in ctx.payload["vod_ids"]]))
     async with get_sessionmaker()() as s:
-        missing = {vod_id: ids for vod_id, entries in (await s.execute(stmt)).all() if (ids := _missing_flag_ids(entries))}
+        missing = {
+            vod_id: ids for vod_id, entries in (await s.execute(stmt)).all() if (ids := _missing_flag_ids(entries))
+        }
     ids = set().union(*missing.values())
     if not ids:
         ctx.log.info("every saved 7TV set already has flags")

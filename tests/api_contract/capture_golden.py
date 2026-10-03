@@ -14,6 +14,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -45,7 +46,7 @@ CURSOR_PAGES = 3
 
 def main(base: str) -> None:
     client = httpx.Client(base_url=base.rstrip("/"), timeout=30)
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
 
     def get(path: str) -> httpx.Response:
         time.sleep(0.35)  # legacy limiter: 20 req / 5 s
