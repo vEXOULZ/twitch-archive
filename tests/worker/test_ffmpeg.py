@@ -3,7 +3,6 @@ import subprocess
 import sys
 
 import pytest
-
 from archive_worker import ffmpeg, hls
 
 pytestmark = [
@@ -19,10 +18,33 @@ def clip(tmp_path_factory):
     """12 s test pattern with a tone, 1 s GOP so cuts land close to the target."""
     out = tmp_path_factory.mktemp("media") / "src.mp4"
     subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-         "-f", "lavfi", "-i", "testsrc=size=160x90:rate=10",
-         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
-         "-t", "12", "-c:v", "libx264", "-g", "10", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(out)],
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x90:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100",
+            "-t",
+            "12",
+            "-c:v",
+            "libx264",
+            "-g",
+            "10",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(out),
+        ],
         check=True,
     )
     return out
@@ -51,8 +73,24 @@ async def test_hls_to_mp4(clip, tmp_path):
     seg_dir = tmp_path / "hls"
     seg_dir.mkdir()
     subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(clip), "-c", "copy",
-         "-f", "segment", "-segment_time", "4", "-segment_format", "mpegts", str(seg_dir / "%d.ts")],
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(clip),
+            "-c",
+            "copy",
+            "-f",
+            "segment",
+            "-segment_time",
+            "4",
+            "-segment_format",
+            "mpegts",
+            str(seg_dir / "%d.ts"),
+        ],
         check=True,
     )
     names = sorted((p.name for p in seg_dir.glob("*.ts")), key=lambda n: int(n.split(".")[0]))
@@ -74,6 +112,10 @@ async def test_preview_sheets(clip, tmp_path):
     assert await ffmpeg.preview_sheets(clip, out) == 2  # frames at 0 and 10 s of 12 s
     assert sorted(p.name for p in out.iterdir()) == ["0.jpg"]  # replaced whole
     assert not out.with_name(out.name + ".part").exists()
-    size = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0",
-                           str(out / "0.jpg")], check=True, capture_output=True, text=True).stdout.strip()
+    size = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(out / "0.jpg")],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     assert size == "1600,900"  # 10×10 tiles of 160×90

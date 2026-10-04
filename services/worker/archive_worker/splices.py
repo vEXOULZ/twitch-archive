@@ -17,12 +17,11 @@ import datetime as dt
 import math
 from typing import Any
 
-from sqlalchemy import delete, func, insert, literal, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from archive_common.db import get_sessionmaker
 from archive_common.models import BotLog, Emote, Game, Log, Vod, VodSplice, VodSpliceBotLog, VodSpliceLog
 from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds
+from sqlalchemy import delete, func, insert, literal, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import timeline
 from .events import iso_utc
@@ -47,18 +46,23 @@ class SpliceError(Exception):
 
 
 def _session() -> AsyncSession:
-    return get_sessionmaker()()
+    return get_sessionmaker()()  # type: ignore[no-any-return]
 
 
 def _whole_seconds(value: Any, name: str) -> int:
-    if not timeline.is_number(value) or value < 0 or not float(value).is_integer():
+    if not timeline.is_number(value) or value < 0 or not float(value).is_integer():  # type: ignore[attr-defined]
         raise SpliceError(400, f"{name} must be a whole number of seconds >= 0")
     return int(value)
 
 
 def _side(vod: Vod) -> Side:
-    return Side(vod.id, hhmmss_to_seconds(vod.duration), list(vod.chapters or []), list(vod.youtube or []),
-                list(vod.drive or []))
+    return Side(
+        vod.id,
+        hhmmss_to_seconds(vod.duration),
+        list(vod.chapters or []),
+        list(vod.youtube or []),
+        list(vod.drive or []),
+    )
 
 
 def _fields(vod: Vod) -> dict[str, Any]:
@@ -71,7 +75,12 @@ def _restore(vod: Vod, fields: dict[str, Any]) -> None:
 
 
 def _apply(vod: Vod, plan: Plan) -> None:
-    vod.duration, vod.chapters, vod.youtube, vod.drive = format_hhmmss(plan.duration), plan.chapters, plan.youtube, plan.drive
+    vod.duration, vod.chapters, vod.youtube, vod.drive = (
+        format_hhmmss(plan.duration),
+        plan.chapters,
+        plan.youtube,
+        plan.drive,
+    )
     vod.chapters_locked = True  # the automatic chapters step would put Twitch's (one-VOD) chapters back
 
 
@@ -81,7 +90,7 @@ def splice_json(sp: VodSplice) -> dict[str, Any]:
         "kind": sp.kind,
         "vodId": sp.vod_id,
         "otherId": sp.other_id,
-        "offset": timeline.num_seconds(sp.offset_s),
+        "offset": timeline.num_seconds(sp.offset_s),  # type: ignore[arg-type, attr-defined]
         "gap": sp.detail.get("gap"),  # merges only
         "detail": sp.detail,
         "createdAt": iso_utc(sp.created_at),
@@ -94,9 +103,10 @@ def splice_json(sp: VodSplice) -> dict[str, Any]:
 
 async def _lock(s: AsyncSession, *vod_ids: str) -> list[Vod]:
     """The rows, locked for the transaction (in id order, so two splices never deadlock)."""
-    rows = {v.id: v for v in (await s.execute(
-        select(Vod).where(Vod.id.in_(vod_ids)).order_by(Vod.id).with_for_update()
-    )).scalars()}
+    rows = {
+        v.id: v
+        for v in (await s.execute(select(Vod).where(Vod.id.in_(vod_ids)).order_by(Vod.id).with_for_update())).scalars()
+    }
     for vod_id in vod_ids:
         if vod_id not in rows:
             raise SpliceError(404, f"No Vod Data for {vod_id}")
@@ -104,20 +114,29 @@ async def _lock(s: AsyncSession, *vod_ids: str) -> list[Vod]:
 
 
 async def _no_active_jobs(s: AsyncSession, *vod_ids: str) -> None:
-    active = (await s.execute(
-        select(ALL_JOBS).where(ALL_JOBS.c.vod_id.in_(vod_ids), ALL_JOBS.c.state.in_(ACTIVE)).order_by(ALL_JOBS.c.id)
-    )).all()
+    active = (
+        await s.execute(
+            select(ALL_JOBS).where(ALL_JOBS.c.vod_id.in_(vod_ids), ALL_JOBS.c.state.in_(ACTIVE)).order_by(ALL_JOBS.c.id)
+        )
+    ).all()
     if active:
-        raise SpliceError(409, "Jobs are active on " + ", ".join(sorted(vod_ids)) + ": " + ", ".join(
-            f"{j.id} ({j.kind}, {j.state}, vod {j.vod_id})" for j in active) + "; wait for them or cancel them",
-            jobs=[j.id for j in active])
+        raise SpliceError(
+            409,
+            "Jobs are active on "
+            + ", ".join(sorted(vod_ids))
+            + ": "
+            + ", ".join(f"{j.id} ({j.kind}, {j.state}, vod {j.vod_id})" for j in active)
+            + "; wait for them or cancel them",
+            jobs=[j.id for j in active],
+        )
 
 
 def _not_merged_away(*vods: Vod) -> None:
     for vod in vods:
         if vod.merged_into:
-            raise SpliceError(409, f"{vod.id} is already merged into {vod.merged_into.get('id')}",
-                              mergedInto=vod.merged_into)
+            raise SpliceError(
+                409, f"{vod.id} is already merged into {vod.merged_into.get('id')}", mergedInto=vod.merged_into
+            )
 
 
 async def _active(s: AsyncSession, *vod_ids: str) -> list[VodSplice]:
@@ -139,21 +158,31 @@ async def _blocking_splice(s: AsyncSession, splice: VodSplice) -> VodSplice | No
 async def _undoable(s: AsyncSession, splice: VodSplice) -> None:
     later = await _blocking_splice(s, splice)
     if later is not None:
-        raise SpliceError(409, f"{later.vod_id} was {'merged with' if later.kind == 'merge' else 'split into'} "
-                               f"{later.other_id} since (splice {later.id}); undo that first",
-                          blockedBy=splice_json(later))
+        raise SpliceError(
+            409,
+            f"{later.vod_id} was {'merged with' if later.kind == 'merge' else 'split into'} "
+            f"{later.other_id} since (splice {later.id}); undo that first",
+            blockedBy=splice_json(later),
+        )
 
 
 def _unedited(splice: VodSplice, vods: dict[str, Vod], force: bool) -> None:
     """Refuse an undo that would throw away hand edits made since the splice (unless forced)."""
     if force:
         return
-    edited = [f"{vod_id}.{k}" for vod_id, fields in splice.snapshot["result"].items()
-              for k in EDITABLE if getattr(vods[vod_id], k) != fields[k]]
+    edited = [
+        f"{vod_id}.{k}"
+        for vod_id, fields in splice.snapshot["result"].items()
+        for k in EDITABLE
+        if getattr(vods[vod_id], k) != fields[k]
+    ]
     if edited:
-        raise SpliceError(409, f"Edited since the {splice.kind}: {', '.join(edited)}. Undoing it restores the rows "
-                               "as they were before, losing those edits; pass force to do it anyway",
-                          edited=edited)
+        raise SpliceError(
+            409,
+            f"Edited since the {splice.kind}: {', '.join(edited)}. Undoing it restores the rows "
+            "as they were before, losing those edits; pass force to do it anyway",
+            edited=edited,
+        )
 
 
 async def _emotes(s: AsyncSession, vod_id: str) -> Emote | None:
@@ -186,29 +215,37 @@ async def _set_emotes(s: AsyncSession, vod_id: str, row: Emote | None, values: d
             setattr(row, k, v)
 
 
-async def _move_chat(s: AsyncSession, to_id: str, by: int, where) -> list[int]:
+async def _move_chat(s: AsyncSession, to_id: str, by: int, where) -> list[int]:  # type: ignore[no-untyped-def]
     """Re-key the chat rows ``where(model, member, member_id)`` selects to ``to_id``, their
     offsets shifted by ``by``. Returns how many moved, per ``CHAT`` table."""
     moved = []
     for model, member, member_id in CHAT:
-        moved.append((await s.execute(update(model).where(*where(model, member, member_id)).values(
-            vod_id=to_id, content_offset_seconds=model.content_offset_seconds + by))).rowcount)
+        moved.append(
+            (  # type: ignore[attr-defined]
+                await s.execute(
+                    update(model)
+                    .where(*where(model, member, member_id))
+                    .values(vod_id=to_id, content_offset_seconds=model.content_offset_seconds + by)
+                )
+            ).rowcount
+        )
     await resequence_bot_logs(s, to_id)
     return moved
 
 
-async def _repoint(s: AsyncSession, from_id: str, to_id: str, by: float, *, at_least: float | None = None
-                   ) -> dict[str, Any]:
+async def _repoint(
+    s: AsyncSession, from_id: str, to_id: str, by: float, *, at_least: float | None = None
+) -> dict[str, Any]:
     """VODs merged into ``from_id`` (at an offset >= ``at_least``) now point at ``to_id``, their
     offset moved by ``by``, so the site's redirect stays one hop. Returns the old values."""
     old = {}
-    for vod in (await s.execute(
-        select(Vod).where(Vod.merged_into["id"].astext == from_id).with_for_update()
-    )).scalars():
-        offset = vod.merged_into.get("offset") or 0
+    for vod in (
+        await s.execute(select(Vod).where(Vod.merged_into["id"].astext == from_id).with_for_update())
+    ).scalars():
+        offset = vod.merged_into.get("offset") or 0  # type: ignore[union-attr]
         if at_least is None or offset >= at_least:
             old[vod.id] = vod.merged_into
-            vod.merged_into = {"id": to_id, "offset": timeline.num_seconds(offset + by)}
+            vod.merged_into = {"id": to_id, "offset": timeline.num_seconds(offset + by)}  # type: ignore[attr-defined]
     return old
 
 
@@ -217,7 +254,7 @@ async def _unpoint(s: AsyncSession, old: dict[str, Any]) -> None:
         await s.execute(update(Vod).where(Vod.id == vod_id).values(merged_into=merged_into))
 
 
-def _plan(fn, *args):
+def _plan(fn, *args):  # type: ignore[no-untyped-def]
     try:
         return fn(*args)
     except PlanError as exc:
@@ -237,30 +274,48 @@ async def merge(target_id: str, source_id: str, gap: Any = None) -> dict[str, An
         a, b = await _lock(s, target_id, source_id)
         _not_merged_away(a, b)
         if b.created_at < a.created_at:
-            raise SpliceError(409, f"{b.id} started before {a.id}; merge the later VOD into the earlier one "
-                                   f"(POST /admin/vods/{b.id}/merge with source {a.id})")
+            raise SpliceError(
+                409,
+                f"{b.id} started before {a.id}; merge the later VOD into the earlier one "
+                f"(POST /admin/vods/{b.id}/merge with source {a.id})",
+            )
         await _no_active_jobs(s, a.id, b.id)
         side_a, side_b = _side(a), _side(b)
         computed = round((b.created_at - a.created_at).total_seconds())
         offset = computed if gap_override is None else side_a.duration + gap_override
-        plan = _plan(timeline.plan_merge, side_a, side_b, offset)
+        plan = _plan(timeline.plan_merge, side_a, side_b, offset)  # type: ignore[no-untyped-call]
         before = {"target": _fields(a), "source": _fields(b)}
 
         emotes_a = await _emotes(s, a.id)
         target_emotes = _emote_values(emotes_a)
-        await _set_emotes(s, a.id, emotes_a,
-                          timeline.union_emotes(target_emotes, _emote_values(await _emotes(s, b.id))))
+        await _set_emotes(
+            s, a.id, emotes_a, timeline.union_emotes(target_emotes, _emote_values(await _emotes(s, b.id)))
+        )
 
-        games = sorted((await s.execute(update(Game).where(Game.vod_id == b.id).values(
-            vod_id=a.id, start_time=Game.start_time + offset, end_time=Game.end_time + offset,
-        ).returning(Game.id))).scalars())
+        games = sorted(
+            (
+                await s.execute(
+                    update(Game)
+                    .where(Game.vod_id == b.id)
+                    .values(
+                        vod_id=a.id,
+                        start_time=Game.start_time + offset,
+                        end_time=Game.end_time + offset,
+                    )
+                    .returning(Game.id)
+                )
+            ).scalars()
+        )
 
         splice = VodSplice(kind="merge", vod_id=a.id, other_id=b.id, offset_s=offset, detail={}, snapshot={})
         s.add(splice)
         await s.flush()
         for model, member, member_id in CHAT:
-            await s.execute(insert(member).from_select(
-                ["splice_id", member_id.key], select(literal(splice.id), model.id).where(model.vod_id == b.id)))
+            await s.execute(
+                insert(member).from_select(
+                    ["splice_id", member_id.key], select(literal(splice.id), model.id).where(model.vod_id == b.id)
+                )
+            )
         comments, bot_comments = await _move_chat(s, a.id, offset, lambda m, *_: [m.vod_id == b.id])
         repointed = await _repoint(s, b.id, a.id, offset)
 
@@ -278,19 +333,25 @@ async def merge(target_id: str, source_id: str, gap: Any = None) -> dict[str, An
             "movedGames": games,
             "repointed": sorted(repointed),
         }
-        splice.snapshot = {**before, "targetEmotes": _emote_json(target_emotes), "games": games,
-                           "repointed": repointed, "result": {a.id: _fields(a), b.id: _fields(b)}}
+        splice.snapshot = {
+            **before,
+            "targetEmotes": _emote_json(target_emotes),
+            "games": games,
+            "repointed": repointed,
+            "result": {a.id: _fields(a), b.id: _fields(b)},
+        }
         await notify_rows_moved(s, a.id, b.id)
         await s.flush()
         return {"splice": splice_json(splice), "warnings": _drift_warnings(plan.detail)}
 
 
-def _drift_warnings(detail: dict) -> list[str]:
+def _drift_warnings(detail: dict[str, Any]) -> list[str]:
     """One gap chapter serves every upload type, but it can only fit the played type exactly."""
     return [
         f"The target's {typ} uploads now play {n['drift']}s off: the gap chapter fits the {detail['playedType']} "
         f"uploads, and the source's {typ} uploads start {n['drift']}s differently from those"
-        for typ, n in detail["types"].items() if abs(n["drift"]) > 1
+        for typ, n in detail["types"].items()
+        if abs(n["drift"]) > 1
     ]
 
 
@@ -313,13 +374,15 @@ async def _undo(s: AsyncSession, splice: VodSplice, force: bool) -> dict[str, An
 async def _unmerge_rows(s: AsyncSession, splice: VodSplice, a: Vod, b: Vod) -> None:
     offset = int(splice.offset_s)
     snap = splice.snapshot
-    await _move_chat(s, b.id, -offset, lambda m, member, member_id: [m.id == member_id,
-                                                                     member.splice_id == splice.id])
+    await _move_chat(s, b.id, -offset, lambda m, member, member_id: [m.id == member_id, member.splice_id == splice.id])
     for _, member, _ in CHAT:
         await s.execute(delete(member).where(member.splice_id == splice.id))
     if snap["games"]:
-        await s.execute(update(Game).where(Game.id.in_(snap["games"])).values(
-            vod_id=b.id, start_time=Game.start_time - offset, end_time=Game.end_time - offset))
+        await s.execute(
+            update(Game)
+            .where(Game.id.in_(snap["games"]))
+            .values(vod_id=b.id, start_time=Game.start_time - offset, end_time=Game.end_time - offset)
+        )
     await _set_emotes(s, a.id, await _emotes(s, a.id), snap["targetEmotes"])
     _restore(b, snap["source"])
     b.merged_into = None
@@ -328,18 +391,27 @@ async def _unmerge_rows(s: AsyncSession, splice: VodSplice, a: Vod, b: Vod) -> N
 async def _unsplit_rows(s: AsyncSession, splice: VodSplice, a: Vod, new: Vod) -> None:
     cut = int(splice.offset_s)
     await _move_chat(s, a.id, cut, lambda m, *_: [m.vod_id == new.id])
-    await s.execute(update(Game).where(Game.vod_id == new.id).values(
-        vod_id=a.id, start_time=Game.start_time + cut, end_time=Game.end_time + cut))
+    await s.execute(
+        update(Game)
+        .where(Game.vod_id == new.id)
+        .values(vod_id=a.id, start_time=Game.start_time + cut, end_time=Game.end_time + cut)
+    )
     await _set_emotes(s, new.id, await _emotes(s, new.id), None)
     await s.delete(new)
 
 
 async def unmerge(target_id: str, source_id: str, force: bool = False) -> dict[str, Any]:
     async with _session() as s, s.begin():
-        splice = (await s.execute(
-            select(VodSplice).where(VodSplice.kind == "merge", VodSplice.vod_id == target_id,
-                                    VodSplice.other_id == source_id, VodSplice.undone_at.is_(None))
-        )).scalar_one_or_none()
+        splice = (
+            await s.execute(
+                select(VodSplice).where(
+                    VodSplice.kind == "merge",
+                    VodSplice.vod_id == target_id,
+                    VodSplice.other_id == source_id,
+                    VodSplice.undone_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
         if splice is None:
             raise SpliceError(404, f"{source_id} is not merged into {target_id}")
         return await _undo(s, splice, force)
@@ -365,7 +437,7 @@ def _join(splice: VodSplice) -> tuple[float, float]:
 async def split(vod_id: str, at: Any, force: bool = False) -> dict[str, Any]:
     """Split at ``at`` seconds: a merge's join undoes that merge; anywhere else the rest
     becomes a new VOD. Only where no upload has to be cut (409 with the nearest points)."""
-    if not timeline.is_number(at):
+    if not timeline.is_number(at):  # type: ignore[attr-defined]
         raise SpliceError(400, "at must be a number of seconds")
     async with _session() as s, s.begin():
         [a] = await _lock(s, vod_id)
@@ -373,42 +445,86 @@ async def split(vod_id: str, at: Any, force: bool = False) -> dict[str, Any]:
         await _no_active_jobs(s, a.id)
         for merge_ in reversed([sp for sp in await _active(s, a.id) if sp.kind == "merge" and sp.vod_id == a.id]):
             lo, hi = _join(merge_)
-            if lo - timeline.SPLIT_SLACK <= at <= hi + timeline.SPLIT_SLACK and await _blocking_splice(s, merge_) is None:
+            if (
+                lo - timeline.SPLIT_SLACK <= at <= hi + timeline.SPLIT_SLACK
+                and await _blocking_splice(s, merge_) is None
+            ):
                 return {"undid": "merge", **await _undo(s, merge_, force)}
 
         cut = math.floor(at + 0.5)
         side = _side(a)
-        first, second = _plan(timeline.plan_split, side, cut)
-        straddling = (await s.execute(select(Game.id).where(
-            Game.vod_id == a.id, Game.start_time < cut, Game.end_time > cut))).scalars().all()
+        first, second = _plan(timeline.plan_split, side, cut)  # type: ignore[no-untyped-call]
+        straddling = (
+            (await s.execute(select(Game.id).where(Game.vod_id == a.id, Game.start_time < cut, Game.end_time > cut)))
+            .scalars()
+            .all()
+        )
         if straddling:
-            raise SpliceError(409, f"Per-game upload(s) {', '.join(map(str, straddling))} span {cut}s and cannot "
-                                   "be split", games=list(straddling))
+            raise SpliceError(
+                409,
+                f"Per-game upload(s) {', '.join(map(str, straddling))} span {cut}s and cannot be split",
+                games=list(straddling),
+            )
 
         new_id = await _free_id(s, a.id)
         before = _fields(a)
-        new = Vod(id=new_id, title=a.title, created_at=a.created_at + dt.timedelta(seconds=cut),
-                  duration=format_hhmmss(second.duration), chapters=second.chapters, youtube=second.youtube,
-                  drive=second.drive, platform=a.platform, chapters_locked=True,
-                  thumbnail_url=next((e.get("thumbnail_url") for e in second.youtube if e.get("thumbnail_url")),
-                                     a.thumbnail_url))
+        new = Vod(
+            id=new_id,
+            title=a.title,
+            created_at=a.created_at + dt.timedelta(seconds=cut),
+            duration=format_hhmmss(second.duration),
+            chapters=second.chapters,
+            youtube=second.youtube,
+            drive=second.drive,
+            platform=a.platform,
+            chapters_locked=True,
+            thumbnail_url=next(
+                (e.get("thumbnail_url") for e in second.youtube if e.get("thumbnail_url")), a.thumbnail_url
+            ),
+        )
         s.add(new)
         await s.flush()  # games and emotes rows reference it
         await _set_emotes(s, new_id, None, _emote_values(await _emotes(s, a.id)))
-        games = sorted((await s.execute(update(Game).where(Game.vod_id == a.id, Game.start_time >= cut).values(
-            vod_id=new_id, start_time=Game.start_time - cut, end_time=Game.end_time - cut,
-        ).returning(Game.id))).scalars())
+        games = sorted(
+            (
+                await s.execute(
+                    update(Game)
+                    .where(Game.vod_id == a.id, Game.start_time >= cut)
+                    .values(
+                        vod_id=new_id,
+                        start_time=Game.start_time - cut,
+                        end_time=Game.end_time - cut,
+                    )
+                    .returning(Game.id)
+                )
+            ).scalars()
+        )
         comments, bot_comments = await _move_chat(
-            s, new_id, -cut, lambda m, *_: [m.vod_id == a.id, m.content_offset_seconds >= cut])
+            s, new_id, -cut, lambda m, *_: [m.vod_id == a.id, m.content_offset_seconds >= cut]
+        )
         repointed = await _repoint(s, a.id, new_id, -cut, at_least=cut)
 
         _apply(a, first)
 
-        splice = VodSplice(kind="split", vod_id=a.id, other_id=new_id, offset_s=cut, detail={
-            **first.detail, "movedComments": comments, "movedBotComments": bot_comments, "movedGames": games,
-            "repointed": sorted(repointed),
-        }, snapshot={"target": before, "games": games, "repointed": repointed,
-                     "result": {a.id: _fields(a), new_id: _fields(new)}})
+        splice = VodSplice(
+            kind="split",
+            vod_id=a.id,
+            other_id=new_id,
+            offset_s=cut,
+            detail={
+                **first.detail,
+                "movedComments": comments,
+                "movedBotComments": bot_comments,
+                "movedGames": games,
+                "repointed": sorted(repointed),
+            },
+            snapshot={
+                "target": before,
+                "games": games,
+                "repointed": repointed,
+                "result": {a.id: _fields(a), new_id: _fields(new)},
+            },
+        )
         s.add(splice)
         await notify_rows_moved(s, a.id, new_id)
         await s.flush()
@@ -418,8 +534,9 @@ async def split(vod_id: str, at: Any, force: bool = False) -> dict[str, Any]:
 async def unsplit(vod_id: str, other_id: str | None = None, force: bool = False) -> dict[str, Any]:
     """Undo a split of ``vod_id`` (the latest, or the one that made ``other_id``)."""
     async with _session() as s, s.begin():
-        stmt = select(VodSplice).where(VodSplice.kind == "split", VodSplice.vod_id == vod_id,
-                                       VodSplice.undone_at.is_(None))
+        stmt = select(VodSplice).where(
+            VodSplice.kind == "split", VodSplice.vod_id == vod_id, VodSplice.undone_at.is_(None)
+        )
         if other_id is not None:
             stmt = stmt.where(VodSplice.other_id == other_id)
         splice = (await s.execute(stmt.order_by(VodSplice.id.desc()).limit(1))).scalar_one_or_none()
@@ -452,20 +569,48 @@ async def merge_candidates(vod_id: str, minutes: int) -> dict[str, Any]:
             raise SpliceError(404, "No Vod Data")
         duration = hhmmss_to_seconds(a.duration)
         ends = a.created_at + dt.timedelta(seconds=duration)
-        rows = (await s.execute(
-            select(Vod).where(Vod.id != a.id, Vod.merged_into.is_(None), Vod.created_at > a.created_at,
-                              Vod.created_at <= ends + dt.timedelta(minutes=minutes))
-            .order_by(Vod.created_at).limit(20)
-        )).scalars().all()
+        rows = (
+            (
+                await s.execute(
+                    select(Vod)
+                    .where(
+                        Vod.id != a.id,
+                        Vod.merged_into.is_(None),
+                        Vod.created_at > a.created_at,
+                        Vod.created_at <= ends + dt.timedelta(minutes=minutes),
+                    )
+                    .order_by(Vod.created_at)
+                    .limit(20)
+                )
+            )
+            .scalars()
+            .all()
+        )
     out = []
     for v in rows:
         gap = round((v.created_at - a.created_at).total_seconds()) - duration
-        out.append({"id": v.id, "streamId": v.stream_id, "title": v.title, "createdAt": iso_utc(v.created_at),
-                    "duration": v.duration, "gap": gap, "overlaps": gap < 0,
-                    "titlesMatch": _normal_title(v.title) == _normal_title(a.title)})
+        out.append(
+            {
+                "id": v.id,
+                "streamId": v.stream_id,
+                "title": v.title,
+                "createdAt": iso_utc(v.created_at),
+                "duration": v.duration,
+                "gap": gap,
+                "overlaps": gap < 0,
+                "titlesMatch": _normal_title(v.title) == _normal_title(a.title),
+            }
+        )
     return {
-        "vod": {"id": a.id, "streamId": a.stream_id, "title": a.title, "createdAt": iso_utc(a.created_at),
-                "duration": a.duration, "endsAt": iso_utc(ends), "mergedInto": a.merged_into},
+        "vod": {
+            "id": a.id,
+            "streamId": a.stream_id,
+            "title": a.title,
+            "createdAt": iso_utc(a.created_at),
+            "duration": a.duration,
+            "endsAt": iso_utc(ends),
+            "mergedInto": a.merged_into,
+        },
         "withinMinutes": minutes,
         "candidates": out,
     }

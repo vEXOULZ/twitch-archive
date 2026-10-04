@@ -9,12 +9,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from sqlalchemy import delete, func, select
-from sqlalchemy.dialects.postgresql import insert
-
 from archive_common import site_tags
 from archive_common.db import get_sessionmaker
 from archive_common.models import SiteSetting, SiteTagShape
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert
 
 from .events import iso_utc
 from .svg_clean import digest
@@ -90,8 +89,13 @@ def _within(value: Any, bounds: tuple[int, int]) -> bool:
 
 COLOR_RULE = "null or a color: a hex, a color name, var(--vx-…), or a color function (rgb() … oklch(), color-mix())"
 NUMBERS = {
-    "width": (SIZE, "px"), "height": (SIZE, "px"), "textSize": (TEXT_SIZE, "px"), "textX": (TEXT_NUDGE, "px"),
-    "textY": (TEXT_NUDGE, "px"), "textRotate": (TEXT_ROTATE, "degrees"), "patternSize": (PATTERN_SIZE, "px"),
+    "width": (SIZE, "px"),
+    "height": (SIZE, "px"),
+    "textSize": (TEXT_SIZE, "px"),
+    "textX": (TEXT_NUDGE, "px"),
+    "textY": (TEXT_NUDGE, "px"),
+    "textRotate": (TEXT_ROTATE, "degrees"),
+    "patternSize": (PATTERN_SIZE, "px"),
 }
 
 
@@ -160,7 +164,7 @@ def view(loaded: dict[str, Any] | None) -> dict[str, Any]:
     return {**loaded, "updatedAt": iso_utc(loaded["updatedAt"])}
 
 
-async def _locked(s) -> dict[str, Any] | None:
+async def _locked(s) -> dict[str, Any] | None:  # type: ignore[no-untyped-def]
     """The saved list, its row locked until the change commits (one change at a time)."""
     await s.execute(select(SiteSetting.key).where(SiteSetting.key == site_tags.KEY).with_for_update())
     return await site_tags.load(s)
@@ -175,9 +179,12 @@ async def save(tags: list[dict[str, Any]], updated_by: str) -> tuple[Any, Any, d
     async with get_sessionmaker()() as s:
         before = await _locked(s)
         stmt = insert(SiteSetting).values(key=site_tags.KEY, value=tags, updated_by=updated_by)
-        await s.execute(stmt.on_conflict_do_update(
-            index_elements=[SiteSetting.key],
-            set_={"value": stmt.excluded.value, "updated_by": stmt.excluded.updated_by, "updated_at": func.now()}))
+        await s.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[SiteSetting.key],
+                set_={"value": stmt.excluded.value, "updated_by": stmt.excluded.updated_by, "updated_at": func.now()},
+            )
+        )
         await s.execute(delete(SiteTagShape).where(SiteTagShape.name.not_in([t["name"] for t in tags])))
         after = await site_tags.load(s)
         await s.commit()
@@ -200,15 +207,18 @@ async def set_shape(name: str, svg: str | None) -> tuple[Any, Any, dict[str, Any
             await s.execute(delete(SiteTagShape).where(SiteTagShape.name == name))
         else:
             stmt = insert(SiteTagShape).values(name=name, svg=svg, hash=digest(svg))
-            await s.execute(stmt.on_conflict_do_update(
-                index_elements=[SiteTagShape.name],
-                set_={"svg": stmt.excluded.svg, "hash": stmt.excluded.hash, "updated_at": func.now()}))
+            await s.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=[SiteTagShape.name],
+                    set_={"svg": stmt.excluded.svg, "hash": stmt.excluded.hash, "updated_at": func.now()},
+                )
+            )
         after = await site_tags.load(s)
         await s.commit()
     return before, _tag(after, name), view(after)
 
 
-async def vod_tags(s, keep: Any = ()) -> tuple[str, ...]:
+async def vod_tags(s, keep: Any = ()) -> tuple[str, ...]:  # type: ignore[no-untyped-def]
     """The tags a VOD can be given: the site's list, less the ones it works out itself (``new``,
     ``updated``), or ``vod_edits.KNOWN_TAGS`` while the list was never saved. ``keep``: the VOD's own
     tags, which stay allowed after the site's list drops them."""

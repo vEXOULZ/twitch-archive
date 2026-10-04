@@ -72,21 +72,37 @@ class AuthClient(Protocol):
 
 
 class VexoulzAuth:
-    def __init__(self, public_url: str, internal_url: str, client_id: str, secret: str, redirect_uri: str,
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        public_url: str,
+        internal_url: str,
+        client_id: str,
+        secret: str,
+        redirect_uri: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.public_url = public_url.rstrip("/")
         self.client_id = client_id
         self.redirect_uri = redirect_uri
-        self._http = httpx.AsyncClient(base_url=(internal_url or public_url).rstrip("/"),
-                                       auth=(client_id, secret), timeout=10.0, transport=transport)
+        self._http = httpx.AsyncClient(
+            base_url=(internal_url or public_url).rstrip("/"),
+            auth=(client_id, secret),
+            timeout=10.0,
+            transport=transport,
+        )
 
     @classmethod
     def from_settings(cls, settings: Settings) -> VexoulzAuth | None:
         secret = settings.admin_auth_client_secret.get_secret_value()
         if not (settings.admin_auth_url and secret and settings.admin_auth_redirect_url and settings.admin_twitch_ids):
             return None
-        return cls(settings.admin_auth_url, settings.admin_auth_internal_url, settings.admin_auth_client_id,
-                   secret, settings.admin_auth_redirect_url)
+        return cls(
+            settings.admin_auth_url,
+            settings.admin_auth_internal_url,
+            settings.admin_auth_client_id,
+            secret,
+            settings.admin_auth_redirect_url,
+        )
 
     def authorize_url(self, state: str) -> str:
         query = urlencode({"client_id": self.client_id, "redirect_uri": self.redirect_uri, "state": state})

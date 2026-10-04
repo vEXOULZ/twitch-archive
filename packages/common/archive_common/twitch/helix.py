@@ -25,7 +25,7 @@ class Helix:
         self._token: str | None = None
         self._expires_at = 0.0
         self._lock = asyncio.Lock()
-        self._games: TTLCache[str, dict | None] = TTLCache(maxsize=1000, ttl=24 * 3600)
+        self._games: TTLCache[str, dict[str, Any] | None] = TTLCache(maxsize=1000, ttl=24 * 3600)
 
     @property
     def configured(self) -> bool:
@@ -51,7 +51,7 @@ class Helix:
             log.info("Obtained Twitch app access token")
             return self._token
 
-    async def get(self, path: str, params: dict[str, Any] | None = None) -> dict:
+    async def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         for force in (False, True):
             token = await self._get_token(force=force)
             try:
@@ -61,7 +61,7 @@ class Helix:
                     params=params,
                     headers={"Authorization": f"Bearer {token}", "Client-Id": self.settings.twitch_client_id},
                 )
-                return resp.json()
+                return resp.json()  # type: ignore[no-any-return]
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 401 and not force:
                     log.info("Helix returned 401, refreshing app token")
@@ -71,12 +71,12 @@ class Helix:
 
     # ── Convenience wrappers ──────────────────────────────────────────────
 
-    async def get_stream(self, user_id: str) -> dict | None:
+    async def get_stream(self, user_id: str) -> dict[str, Any] | None:
         data = await self.get("/streams", {"user_id": user_id})
         items = data.get("data") or []
         return items[0] if items else None
 
-    async def get_video(self, video_id: str) -> dict | None:
+    async def get_video(self, video_id: str) -> dict[str, Any] | None:
         """Return the Helix video or None when it no longer exists."""
         try:
             data = await self.get("/videos", {"id": video_id})
@@ -87,15 +87,15 @@ class Helix:
         items = data.get("data") or []
         return items[0] if items else None
 
-    async def list_videos(self, user_id: str, video_type: str = "archive", first: int = 20) -> list[dict]:
+    async def list_videos(self, user_id: str, video_type: str = "archive", first: int = 20) -> list[dict[str, Any]]:
         data = await self.get("/videos", {"user_id": user_id, "type": video_type, "first": first})
         return data.get("data") or []
 
-    async def video_for_stream(self, user_id: str, stream_id: str) -> dict | None:
+    async def video_for_stream(self, user_id: str, stream_id: str) -> dict[str, Any] | None:
         """The archive video recorded from ``stream_id``, if Twitch has made one yet."""
         return next((v for v in await self.list_videos(user_id) if str(v.get("stream_id")) == stream_id), None)
 
-    async def get_game(self, game_id: str) -> dict | None:
+    async def get_game(self, game_id: str) -> dict[str, Any] | None:
         if game_id in self._games:
             return self._games[game_id]
         data = await self.get("/games", {"id": game_id})
@@ -104,15 +104,14 @@ class Helix:
         self._games[game_id] = game
         return game
 
-    async def search_categories(self, query: str, first: int = 20) -> list[dict]:
+    async def search_categories(self, query: str, first: int = 20) -> list[dict[str, Any]]:
         data = await self.get("/search/categories", {"query": query, "first": first})
         return data.get("data") or []
 
-    async def channel_badges(self, broadcaster_id: str) -> list[dict] | None:
+    async def channel_badges(self, broadcaster_id: str) -> list[dict[str, Any]] | None:
         data = await self.get("/chat/badges", {"broadcaster_id": broadcaster_id})
         return data.get("data")
 
-    async def global_badges(self) -> list[dict] | None:
+    async def global_badges(self) -> list[dict[str, Any]] | None:
         data = await self.get("/chat/badges/global")
         return data.get("data")
-

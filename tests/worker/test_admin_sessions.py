@@ -9,7 +9,7 @@ from archive_worker.admin_auth import AdminAuth, DbSessionStore, token_hash
 from pydantic import SecretStr
 from sqlalchemy import delete, select
 
-from test_admin_signin import ALICE, FakeAuth, sign_in
+from .test_admin_signin import ALICE, FakeAuth, sign_in
 
 
 class Clock:
@@ -42,7 +42,7 @@ async def test_sessions_outlast_a_restart_and_only_the_hash_is_kept(db):
 
     clock.now += 30
     await restarted.checked(found, clock.now)
-    assert (await restarted.session(session.token)).checked_at == clock.now
+    assert (await restarted.session(session.token)).checked_at == clock.now  # type: ignore[union-attr]
 
     clock.now += 30  # expired: gone on sight
     assert await restarted.session(session.token) is None
@@ -62,7 +62,9 @@ async def test_audit_names_the_twitch_login(db, deps):
     deps.settings.admin_twitch_ids = ["100"]
 
     def client(cookies: httpx.Cookies | None = None) -> httpx.AsyncClient:
-        app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)), signin=fake, sessions=DbSessionStore())
+        app = create_admin_app(
+            deps, jobs.JobService(deps, jobs.create_runtime(deps)), signin=fake, sessions=DbSessionStore()
+        )
         transport = httpx.ASGITransport(app=app, client=("203.0.113.5", 1234))
         return httpx.AsyncClient(transport=transport, base_url="https://admin", cookies=cookies)
 

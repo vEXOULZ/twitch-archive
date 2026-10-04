@@ -40,8 +40,13 @@ class Segment:
     @classmethod
     def of_row(cls, row: Any) -> Segment:
         """From a ``VodSegment`` (or a row with its columns)."""
-        return cls(row.source_id, float(row.start_s), None if row.end_s is None else float(row.end_s),
-                   float(row.at_s), row.label)
+        return cls(
+            row.source_id,
+            float(row.start_s),
+            None if row.end_s is None else float(row.end_s),
+            float(row.at_s),
+            row.label,
+        )
 
     @property
     def length(self) -> float:
@@ -49,13 +54,22 @@ class Segment:
 
     def columns(self) -> dict[str, Any]:
         """``vod_segments`` values (without ``vod_id`` and ``pos``)."""
-        return {"source_id": self.source_id, "start_s": Decimal(str(seconds(self.start))),
-                "end_s": None if self.end is None else Decimal(str(seconds(self.end))),
-                "at_s": Decimal(str(seconds(self.at))), "label": self.label}
+        return {
+            "source_id": self.source_id,
+            "start_s": Decimal(str(seconds(self.start))),
+            "end_s": None if self.end is None else Decimal(str(seconds(self.end))),
+            "at_s": Decimal(str(seconds(self.at))),
+            "label": self.label,
+        }
 
     def json(self) -> dict[str, Any]:
-        out = {"vodId": self.source_id, "start": seconds(self.start),
-               "end": None if self.end is None else seconds(self.end), "at": seconds(self.at), "label": self.label}
+        out = {
+            "vodId": self.source_id,
+            "start": seconds(self.start),
+            "end": None if self.end is None else seconds(self.end),
+            "at": seconds(self.at),
+            "label": self.label,
+        }
         if self.stream is not None:
             out["stream"] = self.stream
         return out
@@ -83,8 +97,13 @@ def total(resolved: Iterable[Segment]) -> float:
     return max((s.at + s.length for s in resolved), default=0.0)
 
 
-def flatten(top: Iterable[Segment], inner: Mapping[str, list[Segment]], supersedes: Mapping[str, bool],
-            one_stream: bool = False, _depth: int = 0) -> list[Segment]:
+def flatten(
+    top: Iterable[Segment],
+    inner: Mapping[str, list[Segment]],
+    supersedes: Mapping[str, bool],
+    one_stream: bool = False,
+    _depth: int = 0,
+) -> list[Segment]:
     """``top`` (resolved) as windows of real VODs only, each with its ``stream``.
 
     A segment whose source is a synthetic VOD (a key of ``inner``, which holds every synthetic VOD's
@@ -97,7 +116,7 @@ def flatten(top: Iterable[Segment], inner: Mapping[str, list[Segment]], supersed
     if _depth > MAX_DEPTH:
         raise ValueError(f"synthetic VODs are nested more than {MAX_DEPTH} deep")
     out: list[Segment] = []
-    numbers: dict[tuple, int] = {}
+    numbers: dict[tuple, int] = {}  # type: ignore[type-arg]
     run, prev = -1, None
     for seg in top:
         if seg.source_id != prev and not (one_stream and run == 0):
@@ -112,6 +131,14 @@ def flatten(top: Iterable[Segment], inner: Mapping[str, list[Segment]], supersed
             if b - a <= EPS:
                 continue
             key = (run,) if supersedes.get(seg.source_id) else (run, part.stream)
-            out.append(Segment(part.source_id, part.start + a - part.at, part.start + b - part.at,
-                               seg.at + a - seg.start, seg.label or part.label, numbers.setdefault(key, len(numbers))))
+            out.append(
+                Segment(
+                    part.source_id,
+                    part.start + a - part.at,
+                    part.start + b - part.at,
+                    seg.at + a - seg.start,
+                    seg.label or part.label,
+                    numbers.setdefault(key, len(numbers)),
+                )
+            )
     return out

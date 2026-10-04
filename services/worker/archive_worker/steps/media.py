@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from pathlib import Path
+from typing import Any
 
 from archive_common.timeutil import format_hhmmss
 
@@ -20,7 +21,7 @@ async def resolve_vod(ctx: JobContext) -> None:
     if ctx.vod_id:
         return
     stream_id = str(ctx.payload["stream_id"])
-    for attempt in range(30):
+    for _attempt in range(30):
         vod_id = await vod_id_for_stream(stream_id)
         if vod_id is None and ctx.deps.helix.configured:
             video = await ctx.deps.helix.video_for_stream(ctx.settings.twitch_id, stream_id)
@@ -96,7 +97,7 @@ async def split(ctx: JobContext) -> None:
         raise StepError(f"no parts in range (VOD has {len(all_parts)})")
     done = {p["number"]: p for p in ctx.payload.get("parts", []) if Path(p["path"]).exists()}
     src = ctx.source_mp4
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for part in parts:
         if part.number in done:
             out.append(done[part.number])
@@ -105,8 +106,9 @@ async def split(ctx: JobContext) -> None:
             path = src  # whole video, no cut needed
         else:
             path = ctx.parts_dir / f"{src.stem}-part{part.number}.mp4"
-            ctx.log.info("cutting part %d: %s + %s", part.number, format_hhmmss(part.start),
-                         format_hhmmss(part.duration))
+            ctx.log.info(
+                "cutting part %d: %s + %s", part.number, format_hhmmss(part.start), format_hhmmss(part.duration)
+            )
             await ffmpeg.cut(src, path, part.start, part.duration)
         out.append({"number": part.number, "start": part.start, "end": part.end, "path": str(path)})
         ctx.payload["parts"] = out
@@ -144,7 +146,7 @@ async def dmca_edit(ctx: JobContext) -> None:
             cur = nxt
         edited.append(cur)
     if ctx.kind == "part_dmca":
-        for p, path in zip(ctx.payload["parts"], edited):
+        for p, path in zip(ctx.payload["parts"], edited, strict=True):
             p["path"] = str(path)
     else:
         ctx.payload["mp4"] = str(edited[0])

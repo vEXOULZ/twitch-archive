@@ -19,17 +19,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from archive_common import http
+from archive_common.config import Settings
+from archive_common.db import execute, get_sessionmaker
+from archive_common.models import AppState
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from sqlalchemy.dialects.postgresql import insert
-
-from archive_common import http
-from archive_common.config import Settings
-from archive_common.db import execute, get_sessionmaker
-from archive_common.models import AppState
 
 log = logging.getLogger(__name__)
 
@@ -45,13 +44,13 @@ class YouTubeNotAuthorized(RuntimeError):
     pass
 
 
-async def load_token() -> dict | None:
+async def load_token() -> dict[str, Any] | None:
     async with get_sessionmaker()() as s:
         row = await s.get(AppState, STATE_KEY)
         return row.value if row else None
 
 
-async def save_token(value: dict) -> None:
+async def save_token(value: dict[str, Any]) -> None:
     stmt = insert(AppState).values(key=STATE_KEY, value=value)
     await execute(stmt.on_conflict_do_update(index_elements=[AppState.key], set_={"value": value}))
 
@@ -86,7 +85,7 @@ def verify_state(settings: Settings, state: str, max_age: int = 900) -> bool:
     return time.time() - int(ts) <= max_age
 
 
-async def exchange_code(settings: Settings, code: str) -> dict:
+async def exchange_code(settings: Settings, code: str) -> dict[str, Any]:
     resp = await http.request(
         "POST",
         TOKEN_URI,
@@ -126,7 +125,7 @@ class YouTube:
                     "No YouTube token stored. Run the OAuth flow (GET /admin/youtube/auth) "
                     "or `archive-worker import-youtube-token`."
                 )
-            self._creds = Credentials(
+            self._creds = Credentials(  # type: ignore[no-untyped-call]
                 token=token.get("token"),
                 refresh_token=token["refresh_token"],
                 token_uri=TOKEN_URI,
@@ -138,7 +137,7 @@ class YouTube:
             await asyncio.to_thread(self._creds.refresh, GoogleRequest())
         return self._creds
 
-    async def _service(self):
+    async def _service(self):  # type: ignore[no-untyped-def]
         # Built per call: the service wraps an httplib2.Http, which is not safe to share
         # across the worker threads that concurrent jobs use.
         creds = await self._credentials()
@@ -152,7 +151,7 @@ class YouTube:
         tokens left unused for six months.
         """
         result = await self._check()
-        self.last_check = {**result, "checkedAt": dt.datetime.now(dt.timezone.utc)}
+        self.last_check = {**result, "checkedAt": dt.datetime.now(dt.UTC)}
         return result
 
     async def cached_check(self, max_age: float = 600) -> dict[str, Any]:
@@ -160,9 +159,9 @@ class YouTube:
         than ``max_age`` seconds. Cheap enough to call on every dashboard refresh."""
         async with self._check_lock:
             last = self.last_check
-            if last is None or (dt.datetime.now(dt.timezone.utc) - last["checkedAt"]).total_seconds() > max_age:
+            if last is None or (dt.datetime.now(dt.UTC) - last["checkedAt"]).total_seconds() > max_age:
                 await self.check()
-            return self.last_check
+            return self.last_check  # type: ignore[return-value]
 
     async def _check(self) -> dict[str, Any]:
         if not self.settings.google_client_id:
@@ -181,7 +180,7 @@ class YouTube:
             # Google rarely rotates refresh tokens, but keep the new one if it does.
             token = await load_token() or {}
             await save_token({**token, "refresh_token": creds.refresh_token, "token": creds.token})
-        expiry = creds.expiry.replace(tzinfo=dt.timezone.utc).isoformat() if creds.expiry else None
+        expiry = creds.expiry.replace(tzinfo=dt.UTC).isoformat() if creds.expiry else None
         return {"authorized": True, "valid": True, "accessTokenExpiry": expiry}
 
     async def keepalive(self) -> None:
@@ -213,18 +212,16 @@ class YouTube:
         on_progress: Callable[[int], None] | None = None,
     ) -> dict[str, Any]:
         """``on_progress(percent)`` is called (from a worker thread) about every 10%."""
-        service = await self._service()
+        service = await self._service()  # type: ignore[no-untyped-call]
         body = {
             "snippet": {"title": title, "description": description, "categoryId": category_id},
             "status": {"privacyStatus": privacy_status, "selfDeclaredMadeForKids": False},
         }
         media = MediaFileUpload(str(path), chunksize=CHUNK, resumable=True, mimetype="video/mp4")
-        request = service.videos().insert(
-            part="id,snippet,status", body=body, media_body=media, notifySubscribers=True
-        )
+        request = service.videos().insert(part="id,snippet,status", body=body, media_body=media, notifySubscribers=True)
         return await asyncio.to_thread(self._resumable, request, path, on_progress)
 
-    def _resumable(self, request, path: Path, on_progress: Callable[[int], None] | None = None) -> dict[str, Any]:
+    def _resumable(self, request, path: Path, on_progress: Callable[[int], None] | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
         response = None
         retries = 0
         last_pct = -10
@@ -245,7 +242,7 @@ class YouTube:
                 retries = self._backoff(retries, exc)
             except (OSError, TimeoutError) as exc:
                 retries = self._backoff(retries, exc)
-        return response
+        return response  # type: ignore[no-any-return]
 
     @staticmethod
     def _backoff(retries: int, exc: BaseException) -> int:
@@ -257,14 +254,14 @@ class YouTube:
         time.sleep(delay)
         return retries
 
-    async def get_snippet(self, video_id: str, service=None) -> dict | None:
-        service = service or await self._service()
+    async def get_snippet(self, video_id: str, service=None) -> dict[str, Any] | None:  # type: ignore[no-untyped-def]
+        service = service or await self._service()  # type: ignore[no-untyped-call]
         resp = await asyncio.to_thread(service.videos().list(part="snippet", id=video_id).execute)
         items = resp.get("items") or []
         return items[0]["snippet"] if items else None
 
     async def update_description(self, video_id: str, description: str) -> None:
-        service = await self._service()
+        service = await self._service()  # type: ignore[no-untyped-call]
         snippet = await self.get_snippet(video_id, service)
         if snippet is None:
             log.warning("YouTube video %s not found; skipping description update", video_id)
@@ -290,7 +287,6 @@ async def import_legacy_token(path: Path) -> None:
     await save_token({"refresh_token": auth["refresh_token"], "token": None, "scopes": None})
 
 
-async def token_status() -> dict:
+async def token_status() -> dict[str, Any]:
     token = await load_token()
     return {"authorized": bool(token and token.get("refresh_token"))}
-

@@ -3,24 +3,24 @@
 from __future__ import annotations
 
 import datetime as dt
-
-from sqlalchemy import Select, func, or_, select, text, update
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any
 
 from archive_common.db import ROWS_MOVED, VOD_CHANGED, get_sessionmaker
 from archive_common.models import Stream, Vod, VodSplice
 from archive_common.timeutil import format_hhmmss, parse_helix_duration, parse_ts
+from sqlalchemy import Select, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
-async def upsert_vod(video: dict) -> None:
+async def upsert_vod(video: dict[str, Any]) -> None:
     """Create the vods row for a Helix video, or refresh its title. Duration and
     thumbnail are only set on insert: capture, finalize and uploads own them after."""
     async with get_sessionmaker()() as s:
         stmt = insert(Vod).values(
             id=video["id"],
             title=video.get("title"),
-            created_at=parse_ts(video.get("created_at")) or dt.datetime.now(dt.timezone.utc),
+            created_at=parse_ts(video.get("created_at")) or dt.datetime.now(dt.UTC),
             stream_id=str(video["stream_id"]) if video.get("stream_id") else None,
             duration=format_hhmmss(parse_helix_duration(video.get("duration", ""))),
             thumbnail_url=video.get("thumbnail_url") or None,  # "" while the stream is live
@@ -31,7 +31,7 @@ async def upsert_vod(video: dict) -> None:
         await s.commit()
 
 
-def active_splices(*vod_ids: str) -> Select:
+def active_splices(*vod_ids: str) -> Select:  # type: ignore[type-arg]
     """Splices (merges, splits) touching any of ``vod_ids`` that are not undone, oldest first."""
     return (
         select(VodSplice)
@@ -50,9 +50,9 @@ async def splice_reason(vod_id: str) -> str | None:
             return f"vod {vod_id} is a synthetic VOD, made of parts of others (run jobs on those)"
         if merged_into:
             return f"vod {vod_id} was merged into {merged_into.get('id')}"
-        splice = (await s.execute(
-            active_splices(vod_id).order_by(None).order_by(VodSplice.id.desc()).limit(1)
-        )).scalar_one_or_none()
+        splice = (
+            await s.execute(active_splices(vod_id).order_by(None).order_by(VodSplice.id.desc()).limit(1))
+        ).scalar_one_or_none()
     if splice is None:
         return None
     if splice.kind == "merge":
@@ -62,7 +62,7 @@ async def splice_reason(vod_id: str) -> str | None:
 
 async def vod_id_for_stream(stream_id: str) -> str | None:
     async with get_sessionmaker()() as s:
-        return (await s.execute(select(Vod.id).where(Vod.stream_id == stream_id).limit(1))).scalar_one_or_none()
+        return (await s.execute(select(Vod.id).where(Vod.stream_id == stream_id).limit(1))).scalar_one_or_none()  # type: ignore[no-any-return]
 
 
 async def live_stream_ids() -> list[str]:

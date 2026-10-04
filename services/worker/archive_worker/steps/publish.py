@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-
-from sqlalchemy import select
+from typing import Any
 
 from archive_common.db import get_sessionmaker
 from archive_common.models import Vod
+from sqlalchemy import select
 
 from .. import ffmpeg, planning
 from ..context import JobContext
@@ -25,7 +25,7 @@ def _publishing_disabled(ctx: JobContext) -> str | None:
     return None
 
 
-async def _save_entry(vod_id: str, entry: dict) -> None:
+async def _save_entry(vod_id: str, entry: dict[str, Any]) -> None:
     """Upsert one {id,type,duration,part,thumbnail_url} into vods.youtube (row-locked,
     since the live and VOD jobs of one stream may finish at the same time)."""
     async with get_sessionmaker()() as s:
@@ -46,7 +46,7 @@ async def upload(ctx: JobContext) -> None:
     total = int(ctx.payload.get("total_parts") or len(ctx.payload["parts"]))
     description = planning.base_description(s.domain_name, vod.id, vod.title, s.youtube_description)
     status = planning.privacy(ctx.video_type, s.youtube_public, s.multi_track)
-    uploaded: dict[str, dict] = ctx.payload.setdefault("uploaded", {})
+    uploaded: dict[str, dict[str, Any]] = ctx.payload.setdefault("uploaded", {})
 
     parts = ctx.payload["parts"]
     for part in parts:
@@ -57,19 +57,19 @@ async def upload(ctx: JobContext) -> None:
         title = planning.video_title(s.channel, ctx.video_type, vod.created_at, s.timezone, part["number"], total)
         ctx.log.info("uploading %s as %r (%s)", path.name, title, status)
 
-        def progress(pct: int, number=part["number"]) -> None:
+        def progress(pct: int, number=part["number"]) -> None:  # type: ignore[no-untyped-def]
             ctx.progress(pct, 100, "percent", f"uploading part {number}: {pct}%")
 
-        res = await ctx.deps.youtube.upload(path, title=title, description=description, privacy_status=status,
-                                            on_progress=progress)
+        res = await ctx.deps.youtube.upload(
+            path, title=title, description=description, privacy_status=status, on_progress=progress
+        )
         thumbs = (res.get("snippet") or {}).get("thumbnails") or {}
         entry = {
             "id": res["id"],
             "type": ctx.video_type,
             "duration": planning.num_seconds(await ffmpeg.probe_duration(path)),
             "part": part["number"],
-            "thumbnail_url": (thumbs.get("medium") or {}).get("url")
-            or planning.youtube_thumbnail(res["id"]),
+            "thumbnail_url": (thumbs.get("medium") or {}).get("url") or planning.youtube_thumbnail(res["id"]),
         }
         await _save_entry(vod.id, entry)
         uploaded[key] = entry

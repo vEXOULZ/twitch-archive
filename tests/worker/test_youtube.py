@@ -1,18 +1,18 @@
 import datetime as dt
+from typing import Any
 
 import pytest
+from archive_worker import youtube
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from pydantic import SecretStr
-
-from archive_worker import youtube
 
 
 @pytest.fixture
 def yt(settings, monkeypatch):
     settings.google_client_id = "client"
     settings.google_client_secret = SecretStr("secret")
-    stored: dict = {}
+    stored: dict[str, Any] = {}
 
     async def load():
         return stored.get("token")
@@ -23,7 +23,7 @@ def yt(settings, monkeypatch):
     monkeypatch.setattr(youtube, "load_token", load)
     monkeypatch.setattr(youtube, "save_token", save)
     client = youtube.YouTube(settings)
-    client.stored = stored
+    client.stored = stored  # type: ignore[attr-defined]
     return client
 
 

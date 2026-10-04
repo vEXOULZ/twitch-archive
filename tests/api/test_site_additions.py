@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 import respx
-
 from archive_api import third_party_emotes as tpe
-from archive_common import emote_providers as providers
 from archive_api.main import create_app
 from archive_api.status import _helix_stream
+from archive_common import emote_providers as providers
 from archive_common.config import Settings
 from archive_common.serialize import box_art_template, chapter_additions, duration_seconds, vod_additions
 
@@ -67,10 +68,10 @@ def test_vod_additions_follow_select() -> None:
     vod = {"id": "1", "title": "t"}
     vod_additions(vod)
     assert vod == {"id": "1", "title": "t"}
-    vod = {"id": "1", "duration": "01:00:00", "chapters": [{"end": 3600, "image": None}]}
+    vod = {"id": "1", "duration": "01:00:00", "chapters": [{"end": 3600, "image": None}]}  # type: ignore[dict-item]
     vod_additions(vod)
-    assert vod["duration_seconds"] == 3600
-    assert vod["chapters"][0]["length"] == 3600
+    assert vod["duration_seconds"] == 3600  # type: ignore[comparison-overlap]
+    assert vod["chapters"][0]["length"] == 3600  # type: ignore[comparison-overlap, index]
 
 
 # ── Third-party emotes ────────────────────────────────────────────────────
@@ -78,10 +79,17 @@ def test_vod_additions_follow_select() -> None:
 
 def _mock_providers(router: respx.MockRouter, **overrides) -> None:
     routes = {
-        "7tv_global": (f"{providers.SEVENTV}/emote-sets/global", {"emotes": [{"id": "g1", "name": "EZ"}, {"id": "g2", "name": "Clap"}]}),
+        "7tv_global": (
+            f"{providers.SEVENTV}/emote-sets/global",
+            {"emotes": [{"id": "g1", "name": "EZ"}, {"id": "g2", "name": "Clap"}]},
+        ),
         "7tv_channel": (
             f"{providers.SEVENTV}/users/twitch/{TWITCH_ID}",
-            {"emote_set": {"emotes": [{"id": "c1", "name": "vexHi", "flags": 1}, {"id": "c2", "name": "EZ", "flags": 0}]}},
+            {
+                "emote_set": {
+                    "emotes": [{"id": "c1", "name": "vexHi", "flags": 1}, {"id": "c2", "name": "EZ", "flags": 0}]
+                }
+            },
         ),
         "bttv_global": (f"{providers.BTTV}/cached/emotes/global", [{"id": "b1", "code": "monkaS"}]),
         "bttv_channel": (
@@ -90,8 +98,13 @@ def _mock_providers(router: respx.MockRouter, **overrides) -> None:
         ),
         "ffz_global": (
             f"{providers.FFZ}/set/global",
-            {"default_sets": [3], "sets": {"3": {"emoticons": [{"id": 25927, "name": "CatBag"}]},
-                                          "4330": {"emoticons": [{"id": 1, "name": "NotDefault"}]}}},
+            {
+                "default_sets": [3],
+                "sets": {
+                    "3": {"emoticons": [{"id": 25927, "name": "CatBag"}]},
+                    "4330": {"emoticons": [{"id": 1, "name": "NotDefault"}]},
+                },
+            },
         ),
         "ffz_channel": (
             f"{providers.FFZ}/room/id/{TWITCH_ID}",
@@ -155,22 +168,25 @@ async def test_third_party_emotes_route_caches(respx_mock: respx.MockRouter) -> 
 class FakeHelix:
     configured = True
 
-    def __init__(self, stream: dict | None, error: Exception | None = None) -> None:
+    def __init__(self, stream: dict[str, Any] | None, error: Exception | None = None) -> None:
         self.stream = stream
         self.error = error
 
-    async def get_stream(self, user_id: str) -> dict | None:
+    async def get_stream(self, user_id: str) -> dict[str, Any] | None:
         if self.error:
             raise self.error
         return self.stream
 
-    async def get_game(self, game_id: str) -> dict | None:
-        return {"id": game_id, "box_art_url": f"https://static-cdn.jtvnw.net/ttv-boxart/{game_id}-{{width}}x{{height}}.jpg"}
+    async def get_game(self, game_id: str) -> dict[str, Any] | None:
+        return {
+            "id": game_id,
+            "box_art_url": f"https://static-cdn.jtvnw.net/ttv-boxart/{game_id}-{{width}}x{{height}}.jpg",
+        }
 
 
 async def test_helix_stream() -> None:
     live = {"id": "317309253877", "title": "hi", "game_id": "509658", "game_name": "Just Chatting"}
-    info = await _helix_stream(FakeHelix(live), TWITCH_ID, "317309253877")
+    info = await _helix_stream(FakeHelix(live), TWITCH_ID, "317309253877")  # type: ignore[arg-type]
     assert info == {
         "title": "hi",
         "game": {
@@ -181,6 +197,6 @@ async def test_helix_stream() -> None:
         },
     }
     # another stream, offline, or Helix down: fall back to the VOD row
-    assert await _helix_stream(FakeHelix(live), TWITCH_ID, "1") is None
-    assert await _helix_stream(FakeHelix(None), TWITCH_ID, "317309253877") is None
-    assert await _helix_stream(FakeHelix(None, httpx.ConnectError("down")), TWITCH_ID, "317309253877") is None
+    assert await _helix_stream(FakeHelix(live), TWITCH_ID, "1") is None  # type: ignore[arg-type]
+    assert await _helix_stream(FakeHelix(None), TWITCH_ID, "317309253877") is None  # type: ignore[arg-type]
+    assert await _helix_stream(FakeHelix(None, httpx.ConnectError("down")), TWITCH_ID, "317309253877") is None  # type: ignore[arg-type]

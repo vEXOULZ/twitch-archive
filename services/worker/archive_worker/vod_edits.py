@@ -30,13 +30,13 @@ def is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _list(items: Any, name: str) -> list:
+def _list(items: Any, name: str) -> list[Any]:
     if not isinstance(items, list):
         raise ValueError(f"{name} must be a list")
     return items
 
 
-def _object(item: Any, where: str, required: set[str], optional: set[str] = frozenset()) -> dict:
+def _object(item: Any, where: str, required: set[str], optional: set[str] = frozenset()) -> dict[str, Any]:  # type: ignore[assignment]
     if not isinstance(item, dict):
         raise ValueError(f"{where} must be an object")
     missing = sorted(required - item.keys())
@@ -48,7 +48,7 @@ def _object(item: Any, where: str, required: set[str], optional: set[str] = froz
     return item
 
 
-def _optional_str(item: dict, key: str, where: str) -> str | None:
+def _optional_str(item: dict[str, Any], key: str, where: str) -> str | None:
     value = item.get(key)
     if value is None or value == "":
         return None
@@ -86,27 +86,29 @@ def chapters(items: Any, duration: float) -> list[dict[str, Any]]:
         if duration > 0 and start + length > duration + DURATION_SLACK:
             raise ValueError(f"{where} ends at {start + length}s, after the end of the VOD ({duration:g}s)")
         prev_start, prev_end = start, start + length
-        out.append({
-            **planning.chapter(game_id, name, box_art_image(template), start, length, ch["restricted"]),
-            "imageTemplate": template,
-            **({"kind": kind} if kind is not None else {}),
-        })
+        out.append(
+            {
+                **planning.chapter(game_id, name, box_art_image(template), start, length, ch["restricted"]),
+                "imageTemplate": template,
+                **({"kind": kind} if kind is not None else {}),
+            }
+        )
     return out
 
 
-def _video_type(item: dict, where: str) -> str:
+def _video_type(item: dict[str, Any], where: str) -> str:
     if item["type"] not in VIDEO_TYPES:
         raise ValueError(f"{where}.type must be 'vod' or 'live'")
-    return item["type"]
+    return item["type"]  # type: ignore[no-any-return]
 
 
-def _video_id(item: dict, where: str) -> str:
+def _video_id(item: dict[str, Any], where: str) -> str:
     if not isinstance(item["id"], str) or not item["id"].strip():
         raise ValueError(f"{where}.id must be a non-empty string")
     return item["id"].strip()
 
 
-def youtube(items: Any, existing: list[dict] | None) -> list[dict[str, Any]]:
+def youtube(items: Any, existing: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """Admin YouTube list -> vods.youtube. A video already listed keeps its thumbnail and seek-bar
     previews (and its duration, unless a new one is given)."""
     before = {e.get("id"): e for e in existing or [] if isinstance(e, dict)}
@@ -158,8 +160,14 @@ def drive(items: Any) -> list[dict[str, str]]:
 # ── VOD fields (PATCH /admin/vods/{id}) ──────────────────────────────────
 
 # Request key -> vods column. A merged VOD takes only MERGED_EDITABLE (its content is the other VOD's now).
-FIELDS = {"title": "title", "hidden": "hidden", "thumbnailUrl": "thumbnail_url", "duration": "duration",
-          "createdAt": "created_at", "tags": "tags"}
+FIELDS = {
+    "title": "title",
+    "hidden": "hidden",
+    "thumbnailUrl": "thumbnail_url",
+    "duration": "duration",
+    "createdAt": "created_at",
+    "tags": "tags",
+}
 MERGED_EDITABLE = {"hidden", "tags"}
 # A synthetic VOD's duration, chapters, thumbnail and date are composed from its segments.
 SYNTHETIC_EDITABLE = {"title", "hidden", "tags"}
@@ -197,10 +205,10 @@ def created_at(value: Any) -> dt.datetime:
         when = None
     if when is None or when.tzinfo is None:
         raise ValueError("createdAt must be an ISO date and time with an offset, e.g. 2026-09-30T18:00:00Z")
-    return when.astimezone(dt.timezone.utc)
+    return when.astimezone(dt.UTC)
 
 
-def vod_fields(body: dict, known_tags: Collection[str] = KNOWN_TAGS) -> dict[str, Any]:
+def vod_fields(body: dict[str, Any], known_tags: Collection[str] = KNOWN_TAGS) -> dict[str, Any]:
     """PATCH body -> the vods columns to set. Unknown keys are refused."""
     unknown = sorted(set(body) - FIELDS.keys())
     if unknown:
@@ -245,8 +253,11 @@ def check_fits(chapters: Any, games_end: float, seconds: float) -> None:
 
 def content_end(chapters: Any) -> float:
     """Where the last chapter ends, in seconds (``end`` holds each chapter's length)."""
-    ends = [c["start"] + c["end"] for c in chapters or []
-            if isinstance(c, dict) and is_number(c.get("start")) and is_number(c.get("end"))]
+    ends = [
+        c["start"] + c["end"]
+        for c in chapters or []
+        if isinstance(c, dict) and is_number(c.get("start")) and is_number(c.get("end"))
+    ]
     return max(ends, default=0)
 
 
@@ -266,7 +277,7 @@ def _seconds(value: Any, where: str) -> float:
             pass
     if not is_number(value) or value < 0:
         raise ValueError(f"{where} must be a number of seconds >= 0")
-    return value
+    return value  # type: ignore[no-any-return]
 
 
 def games(items: Any, vod_duration: float) -> list[dict[str, Any]]:
@@ -276,8 +287,7 @@ def games(items: Any, vod_duration: float) -> list[dict[str, Any]]:
     prev_start = prev_end = None
     for i, item in enumerate(_list(items, "games")):
         where = f"games[{i}]"
-        row = _object(item, where, {"start_time", "end_time", "game_name"},
-                      {*GAME_TEXT, *GAME_URLS} | GAME_READ_ONLY)
+        row = _object(item, where, {"start_time", "end_time", "game_name"}, {*GAME_TEXT, *GAME_URLS} | GAME_READ_ONLY)
         start, end = _seconds(row["start_time"], f"{where}.start_time"), _seconds(row["end_time"], f"{where}.end_time")
         if end <= start:
             raise ValueError(f"{where} must end after it starts")
@@ -290,10 +300,12 @@ def games(items: Any, vod_duration: float) -> list[dict[str, Any]]:
         if not (_optional_str(row, "game_name", where) or "").strip():
             raise ValueError(f"{where}.game_name must be a non-empty string")
         prev_start, prev_end = start, end
-        out.append({
-            "start_time": Decimal(str(planning.num_seconds(start))),
-            "end_time": Decimal(str(planning.num_seconds(end))),
-            **{k: _optional_str(row, k, where) for k in GAME_TEXT},
-            **{k: http_url(row.get(k), f"{where}.{k}") for k in GAME_URLS},
-        })
+        out.append(
+            {
+                "start_time": Decimal(str(planning.num_seconds(start))),
+                "end_time": Decimal(str(planning.num_seconds(end))),
+                **{k: _optional_str(row, k, where) for k in GAME_TEXT},
+                **{k: http_url(row.get(k), f"{where}.{k}") for k in GAME_URLS},
+            }
+        )
     return out

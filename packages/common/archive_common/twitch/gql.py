@@ -28,7 +28,7 @@ class Gql:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
-    async def post(self, body: dict[str, Any], *, backup_client: bool = False) -> dict:
+    async def post(self, body: dict[str, Any], *, backup_client: bool = False) -> dict[str, Any]:
         client_id = self.settings.gql_backup_client_id if backup_client else self.settings.gql_client_id
         resp = await http.request(
             "POST",
@@ -41,7 +41,7 @@ class Gql:
         if errors:
             msgs = "; ".join(str(e.get("message", e)) for e in errors)
             raise GqlError(f"{body.get('operationName')}: {msgs}")
-        return data
+        return data  # type: ignore[no-any-return]
 
     def _persisted(self, operation: str, sha: str, variables: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -52,7 +52,7 @@ class Gql:
 
     # ── Playback tokens ───────────────────────────────────────────────────
 
-    async def _playback_token(self, *, is_live: bool, login: str = "", vod_id: str = "") -> dict | None:
+    async def _playback_token(self, *, is_live: bool, login: str = "", vod_id: str = "") -> dict[str, Any] | None:
         data = await self.post(
             self._persisted(
                 "PlaybackAccessToken",
@@ -84,7 +84,7 @@ class Gql:
 
     # ── Chapters ──────────────────────────────────────────────────────────
 
-    async def video_moments(self, vod_id: str) -> list[dict] | None:
+    async def video_moments(self, vod_id: str) -> list[dict[str, Any]] | None:
         data = await self.post(
             self._persisted("VideoPreviewCard__VideoMoments", self.settings.gql_hash_moments, {"videoId": vod_id}),
             backup_client=True,
@@ -95,7 +95,7 @@ class Gql:
             return None
         return moments.get("edges") or []
 
-    async def video_game(self, vod_id: str) -> dict | None:
+    async def video_game(self, vod_id: str) -> dict[str, Any] | None:
         data = await self.post(
             self._persisted(
                 "NielsenContentMetadata",
@@ -114,7 +114,9 @@ class Gql:
 
     # ── Chat replay ───────────────────────────────────────────────────────
 
-    async def comments(self, vod_id: str, *, offset: int | None = None, cursor: str | None = None) -> dict | None:
+    async def comments(
+        self, vod_id: str, *, offset: int | None = None, cursor: str | None = None
+    ) -> dict[str, Any] | None:
         variables: dict[str, Any] = {"videoID": vod_id}
         if cursor:
             variables["cursor"] = cursor

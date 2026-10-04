@@ -4,30 +4,40 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import delete
-
 from archive_common import previews as pv
 from archive_common.db import get_sessionmaker
 from archive_common.models import Vod
 from archive_worker import ffmpeg, vod_edits
 from archive_worker.context import StepError
 from archive_worker.steps import previews as step
+from sqlalchemy import delete
 
 VOD, HIDDEN = "test-previews-1", "test-previews-2"
 YT, YT2, YT_HIDDEN = "abcdefghijk", "bcdefghijkl", "cdefghijklm"
-START = dt.datetime(2001, 4, 5, 20, 0, tzinfo=dt.timezone.utc)
+START = dt.datetime(2001, 4, 5, 20, 0, tzinfo=dt.UTC)
 
 
 # ── Layout ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(("duration", "frames", "sheets"), [
-    (0, 1, 1), (9.9, 1, 1), (10, 1, 1), (10.1, 2, 1), (1000, 100, 1), (1000.5, 101, 2), (1249.97, 125, 2),
-    (10800, 1080, 11), (-5, 1, 1),
-])
+@pytest.mark.parametrize(
+    ("duration", "frames", "sheets"),
+    [
+        (0, 1, 1),
+        (9.9, 1, 1),
+        (10, 1, 1),
+        (10.1, 2, 1),
+        (1000, 100, 1),
+        (1000.5, 101, 2),
+        (1249.97, 125, 2),
+        (10800, 1080, 11),
+        (-5, 1, 1),
+    ],
+)
 def test_frame_and_sheet_counts(duration, frames, sheets):
     assert pv.frame_count(duration) == frames
     assert pv.sheet_count(frames) == sheets
@@ -65,22 +75,36 @@ async def _clean():
 async def vods(db):
     await _clean()
     async with get_sessionmaker()() as s:
-        s.add_all([
-            Vod(id=VOD, title="t", created_at=START, duration="00:20:00", youtube=[
-                {"id": YT, "type": "vod", "part": 1, "duration": 600},
-                {"id": YT2, "type": "vod", "part": 2, "duration": 600},
-            ]),
-            Vod(id=HIDDEN, title="h", created_at=START, duration="00:10:00", hidden=True,
-                youtube=[{"id": YT_HIDDEN, "type": "vod", "part": 1, "duration": 600}]),
-        ])
+        s.add_all(
+            [
+                Vod(
+                    id=VOD,
+                    title="t",
+                    created_at=START,
+                    duration="00:20:00",
+                    youtube=[
+                        {"id": YT, "type": "vod", "part": 1, "duration": 600},
+                        {"id": YT2, "type": "vod", "part": 2, "duration": 600},
+                    ],
+                ),
+                Vod(
+                    id=HIDDEN,
+                    title="h",
+                    created_at=START,
+                    duration="00:10:00",
+                    hidden=True,
+                    youtube=[{"id": YT_HIDDEN, "type": "vod", "part": 1, "duration": 600}],
+                ),
+            ]
+        )
         await s.commit()
     yield
     await _clean()
 
 
-async def _youtube(vod_id=VOD) -> list[dict]:
+async def _youtube(vod_id=VOD) -> list[dict[str, Any]]:
     async with get_sessionmaker()() as s:
-        return (await s.get(Vod, vod_id)).youtube
+        return (await s.get(Vod, vod_id)).youtube  # type: ignore[no-any-return]
 
 
 @pytest.fixture
@@ -101,8 +125,11 @@ def fake_sheets(monkeypatch):
 
 
 async def test_previews_step_does_the_uploaded_parts_once(vods, make_ctx, settings, fake_sheets):
-    parts = [{"number": 1, "path": "/w/p1.mp4"}, {"number": 2, "path": "/w/p2-broken.mp4"},
-             {"number": 3, "path": "/w/p3.mp4"}]  # part 3 was not uploaded
+    parts = [
+        {"number": 1, "path": "/w/p1.mp4"},
+        {"number": 2, "path": "/w/p2-broken.mp4"},
+        {"number": 3, "path": "/w/p3.mp4"},
+    ]  # part 3 was not uploaded
     uploaded = {"1": {"id": YT}, "2": {"id": YT2}}
     await step.previews(make_ctx(vod_id=VOD, payload={"parts": parts, "uploaded": uploaded}))
     assert fake_sheets == [Path("/w/p1.mp4")]
@@ -116,7 +143,9 @@ async def test_previews_step_does_the_uploaded_parts_once(vods, make_ctx, settin
 
 async def test_previews_step_off(vods, make_ctx, settings, fake_sheets):
     settings.previews = False
-    await step.previews(make_ctx(vod_id=VOD, payload={"parts": [{"number": 1, "path": "/p"}], "uploaded": {"1": {"id": YT}}}))
+    await step.previews(
+        make_ctx(vod_id=VOD, payload={"parts": [{"number": 1, "path": "/p"}], "uploaded": {"1": {"id": YT}}})
+    )
     assert fake_sheets == []
 
 
@@ -168,8 +197,12 @@ async def test_api_serves_sheets_of_shown_vods_only(vods, settings, preview_api)
             assert r.status_code == 200 and r.content == b"jpg"
         assert r.headers["content-type"] == "image/jpeg"
         assert r.headers["cache-control"] == "public, max-age=31536000, immutable"
-        for path in (f"/v1/previews/{YT}/1.jpg",  # no such sheet
-                     f"/v1/previews/{YT_HIDDEN}/0.jpg",  # hidden VOD
-                     "/v1/previews/ddddddddddd/0.jpg",  # on no VOD
-                     f"/v1/previews/{YT}/0.png", f"/v1/previews/{YT}/..%2F0.jpg", "/v1/previews/short/0.jpg"):
+        for path in (
+            f"/v1/previews/{YT}/1.jpg",  # no such sheet
+            f"/v1/previews/{YT_HIDDEN}/0.jpg",  # hidden VOD
+            "/v1/previews/ddddddddddd/0.jpg",  # on no VOD
+            f"/v1/previews/{YT}/0.png",
+            f"/v1/previews/{YT}/..%2F0.jpg",
+            "/v1/previews/short/0.jpg",
+        ):
             assert (await api.get(path)).status_code == 404, path

@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  conventions:
+    uses: vEXOULZ/conventions/.github/workflows/conventions-check.yml@v1.0.0
+    secrets: inherit
+
+  ci:
+    # The database and contract tests skip here: they need a restored copy of the live DB.
+    uses: vEXOULZ/conventions/.github/workflows/python-ci.yml@v1.0.0
+    with:
+      setup: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+  # One image per service, from the targets of the root Dockerfile. A push to main or dev publishes
+  # ghcr.io/vexoulz/twitch-archive-api and -worker as :main / :dev; a tag vX.Y.Z as :vX.Y.Z.
+  image:
+    needs: ci
+    uses: vEXOULZ/conventions/.github/workflows/publish-image.yml@v1.0.0
+    permissions:
+      contents: read
+      packages: write
+    with:
+      suffix: api
+      target: api
+
+  image-worker:
+    needs: ci
+    uses: vEXOULZ/conventions/.github/workflows/publish-image.yml@v1.0.0
+    permissions:
+      contents: read
+      packages: write
+    with:
+      suffix: worker
+      target: worker

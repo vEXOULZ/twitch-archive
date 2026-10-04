@@ -3,17 +3,23 @@
 import datetime as dt
 
 import pytest
-
 from archive_common.segments import Segment, flatten, resolve, total
 from archive_worker import compose
 from archive_worker.compose import ComposeError, Source
 
-START = dt.datetime(2001, 2, 3, 20, 0, tzinfo=dt.timezone.utc)
+START = dt.datetime(2001, 2, 3, 20, 0, tzinfo=dt.UTC)
 
 
 def _ch(start, length, name="Just Chatting", game_id="509658", restricted=False):
-    return {"gameId": game_id, "name": name, "image": None, "duration": "00:00:00", "start": start, "end": length,
-            "restricted": restricted}
+    return {
+        "gameId": game_id,
+        "name": name,
+        "image": None,
+        "duration": "00:00:00",
+        "start": start,
+        "end": length,
+        "restricted": restricted,
+    }
 
 
 A = Source("a", 7200.0, [_ch(0, 3600), _ch(3600, 3600, "Minecraft", "27471")], START, "https://t/a", "big stream")
@@ -22,20 +28,28 @@ SOURCES = {"a": A, "b": B}
 
 
 def test_parse_defaults_and_back_to_back():
-    segs = compose.parse([{"vodId": "a", "start": 10, "end": 100}, {"vodId": "b", "end": 50, "label": " two "},
-                          {"vodId": "a", "start": 200, "at": 500}])
+    segs = compose.parse(
+        [
+            {"vodId": "a", "start": 10, "end": 100},
+            {"vodId": "b", "end": 50, "label": " two "},
+            {"vodId": "a", "start": 200, "at": 500},
+        ]
+    )
     assert segs == [Segment("a", 10, 100, 0), Segment("b", 0, 50, 90, "two"), Segment("a", 200, None, 500)]
 
 
-@pytest.mark.parametrize("items, message", [
-    ([], "non-empty"),
-    ([{"vodId": "a", "start": 5, "end": 5}], "end after it starts"),
-    ([{"vodId": "a"}, {"vodId": "b"}], "no 'end' to put it after"),
-    ([{"vodId": "a", "start": -1}], ">= 0"),
-    ([{"vodId": "a", "nope": 1}], "unknown field"),
-    ([{"vodId": ""}], "vodId"),
-    ([{"vodId": "a", "label": "x" * 201}], "label"),
-])
+@pytest.mark.parametrize(
+    "items, message",
+    [
+        ([], "non-empty"),
+        ([{"vodId": "a", "start": 5, "end": 5}], "end after it starts"),
+        ([{"vodId": "a"}, {"vodId": "b"}], "no 'end' to put it after"),
+        ([{"vodId": "a", "start": -1}], ">= 0"),
+        ([{"vodId": "a", "nope": 1}], "unknown field"),
+        ([{"vodId": ""}], "vodId"),
+        ([{"vodId": "a", "label": "x" * 201}], "label"),
+    ],
+)
 def test_parse_refused(items, message):
     with pytest.raises(ComposeError, match=message):
         compose.parse(items)
@@ -52,14 +66,17 @@ def test_check_id():
         assert compose.check_id(vod_id) == vod_id
 
 
-@pytest.mark.parametrize("segments, message", [
-    ([Segment("a", 0, 10, 5)], "must be at 0"),
-    ([Segment("x", 0, 10, 0)], "no VOD x"),
-    ([Segment("a", 7200, None, 0)], "at or after the end"),
-    ([Segment("a", 0, 7300, 0)], "after the end"),
-    ([Segment("a", 0, 100, 0), Segment("b", 0, None, 50)], "inside segments"),
-    ([Segment("a", 0, 100, 0), Segment("b", 0, 10, 200), Segment("b", 20, 30, 150)], "sort segments"),
-])
+@pytest.mark.parametrize(
+    "segments, message",
+    [
+        ([Segment("a", 0, 10, 5)], "must be at 0"),
+        ([Segment("x", 0, 10, 0)], "no VOD x"),
+        ([Segment("a", 7200, None, 0)], "at or after the end"),
+        ([Segment("a", 0, 7300, 0)], "after the end"),
+        ([Segment("a", 0, 100, 0), Segment("b", 0, None, 50)], "inside segments"),
+        ([Segment("a", 0, 100, 0), Segment("b", 0, 10, 200), Segment("b", 20, 30, 150)], "sort segments"),
+    ],
+)
 def test_validate_refused(segments, message):
     with pytest.raises(ComposeError, match=message):
         compose.validate(segments, SOURCES)
@@ -77,8 +94,12 @@ def test_nesting_refuses_cycles_and_depth():
     compose.check_nesting("q", [Segment("p", 0, None, 0)], inner)
     with pytest.raises(ComposeError, match="m -> p -> m: a synthetic VOD cannot be made of itself"):
         compose.check_nesting("m", [Segment("p", 0, None, 0)], inner)
-    deep = {"s1": [Segment("s2", 0, None, 0)], "s2": [Segment("s3", 0, None, 0)], "s3": [Segment("s4", 0, None, 0)],
-            "s4": [Segment("a", 0, None, 0)]}
+    deep = {
+        "s1": [Segment("s2", 0, None, 0)],
+        "s2": [Segment("s3", 0, None, 0)],
+        "s3": [Segment("s4", 0, None, 0)],
+        "s4": [Segment("a", 0, None, 0)],
+    }
     compose.check_nesting("top", [Segment("s2", 0, None, 0)], deep)  # s2, s3, s4: 3 levels
     with pytest.raises(ComposeError, match="nested at most 3 deep"):
         compose.check_nesting("top", [Segment("s1", 0, None, 0)], deep)
@@ -161,14 +182,21 @@ def test_split_anywhere():
 
 
 def test_playthrough_windows_back_to_back():
-    chapters = [_ch(0, 600), _ch(600, 1200, "Minecraft", "27471"), _ch(1800, 0.5, "Minecraft", "27471"),
-                _ch(1800.5, 100, "Minecraft", "27471"), _ch(2000, 300, "Minecraft", "27471", restricted=True),
-                _ch(2400, 600, "Minecraft", "27471")]
+    chapters = [
+        _ch(0, 600),
+        _ch(600, 1200, "Minecraft", "27471"),
+        _ch(1800, 0.5, "Minecraft", "27471"),
+        _ch(1800.5, 100, "Minecraft", "27471"),
+        _ch(2000, 300, "Minecraft", "27471", restricted=True),
+        _ch(2400, 600, "Minecraft", "27471"),
+    ]
     assert compose.game_windows(chapters, "27471") == [(600, 1900.5), (2400, 3000)]
     windows = [{"vodId": "a", "start": 3600, "end": 7200}, {"vodId": "b", "start": 0, "end": 3600}]
     segs = compose.parse(windows)
     compose.validate(segs, SOURCES)
     d = compose.derive(segs, SOURCES)
     assert d["duration"] == "02:00:00"
-    assert [(c["start"], c["end"], c["name"]) for c in d["chapters"]] == [(0, 3600, "Minecraft"),
-                                                                         (3600, 3600, "Minecraft")]
+    assert [(c["start"], c["end"], c["name"]) for c in d["chapters"]] == [
+        (0, 3600, "Minecraft"),
+        (3600, 3600, "Minecraft"),
+    ]

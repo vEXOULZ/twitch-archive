@@ -1,5 +1,6 @@
 """The admin password is local-only; Twitch sign-in through vexoulz-auth (faked here) works from anywhere."""
 
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -43,7 +44,7 @@ class FakeAuth:
     def authorize_url(self, state: str) -> str:
         return f"https://auth.test/authorize?client_id=vods-admin&state={state}"
 
-    def approve(self, user: dict, sid: str = "sid-1") -> str:
+    def approve(self, user: dict[str, Any], sid: str = "sid-1") -> str:
         code = f"code-{len(self.codes)}"
         self.codes[code] = SignedIn(user, sid)
         return code
@@ -86,8 +87,9 @@ def admin(deps, fake):
     return client
 
 
-async def sign_in(c: httpx.AsyncClient, fake: FakeAuth, user: dict = ALICE, next: str = "/admin/jobs",
-                  sid: str = "sid-1") -> httpx.Response:
+async def sign_in(
+    c: httpx.AsyncClient, fake: FakeAuth, user: dict[str, Any] = ALICE, next: str = "/admin/jobs", sid: str = "sid-1"
+) -> httpx.Response:
     start = await c.get("/admin/signin", params={"next": next})
     assert start.status_code == 302
     state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
@@ -109,7 +111,7 @@ async def test_password_is_refused_outside_the_local_network(admin):
         assert (await c.get("/admin/session")).json()["passwordLogin"] is False
         r = await c.post("/admin/session", json={"password": "correct horse"})
         assert r.status_code == 403 and "local network" in r.json()["msg"]
-    async with admin("192.168.1.20") as c:
+    async with admin("192.168.1.20") as c:  # conventions:allow-infra
         assert (await c.get("/admin/session")).json()["passwordLogin"] is True
         assert (await c.post("/admin/session", json={"password": "correct horse"})).status_code == 200
     async with admin("::1") as c:
@@ -119,7 +121,7 @@ async def test_password_is_refused_outside_the_local_network(admin):
 async def test_password_networks_can_be_opened_or_narrowed(admin):
     async with admin("203.0.113.5", networks=["*"]) as c:
         assert (await c.post("/admin/session", json={"password": "correct horse"})).status_code == 200
-    async with admin("192.168.1.20", networks=["10.0.0.0/8"]) as c:
+    async with admin("192.168.1.20", networks=["10.0.0.0/8"]) as c:  # conventions:allow-infra
         assert (await c.post("/admin/session", json={"password": "correct horse"})).status_code == 403
 
 
@@ -128,7 +130,7 @@ async def test_password_behind_a_proxy_counts_the_real_client(admin, deps):
     async with admin("127.0.0.1") as c:
         outside = {"X-Forwarded-For": "203.0.113.9"}
         assert (await c.post("/admin/session", json={"password": "correct horse"}, headers=outside)).status_code == 403
-        inside = {"X-Forwarded-For": "192.168.1.9"}
+        inside = {"X-Forwarded-For": "192.168.1.9"}  # conventions:allow-infra
         assert (await c.post("/admin/session", json={"password": "correct horse"}, headers=inside)).status_code == 200
 
 
@@ -175,7 +177,9 @@ async def test_state_must_be_ours_and_used_once(admin, fake):
 
         start = await c.get("/admin/signin")
         state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
-        assert (await c.get("/admin/signin/callback", params={"code": fake.approve(ALICE), "state": state})).status_code == 302
+        assert (
+            await c.get("/admin/signin/callback", params={"code": fake.approve(ALICE), "state": state})
+        ).status_code == 302
         again = await c.get("/admin/signin/callback", params={"code": fake.approve(ALICE), "state": state})
         assert error_of(again) == "expired"
 
@@ -281,7 +285,8 @@ def test_client_is_built_only_when_fully_configured(settings):
     url = urlsplit(client.authorize_url("st"))
     assert (url.scheme, url.netloc, url.path) == ("https", "auth.test", "/authorize")
     assert parse_qs(url.query) == {
-        "client_id": ["vods-admin"], "state": ["st"],
+        "client_id": ["vods-admin"],
+        "state": ["st"],
         "redirect_uri": ["https://vods.test/backend-admin/admin/signin/callback"],
     }
 
@@ -299,8 +304,14 @@ async def test_client_talks_to_vexoulz_auth():
             return httpx.Response(404, json={"active": False})
         return httpx.Response(500)
 
-    client = VexoulzAuth("https://auth.test", "http://auth:8090", "vods-admin", "sec", "https://vods.test/cb",
-                         transport=httpx.MockTransport(handler))
+    client = VexoulzAuth(
+        "https://auth.test",
+        "http://auth:8090",
+        "vods-admin",
+        "sec",
+        "https://vods.test/cb",
+        transport=httpx.MockTransport(handler),
+    )
     assert await client.redeem("c") == SignedIn(ALICE, "s1")
     assert seen[0].url.host == "auth" and seen[0].headers["authorization"].startswith("Basic ")
     assert await client.active("s1") is True
@@ -309,19 +320,23 @@ async def test_client_talks_to_vexoulz_auth():
         await client.active("boom")
 
 
-@pytest.mark.parametrize(("status", "body", "reason"), [
-    (401, {"error": "invalid_client"}, "misconfigured"),
-    (400, {"error": "invalid_request"}, "misconfigured"),
-    (400, {"error": "invalid_grant"}, "expired"),
-    (429, {"error": "rate_limited"}, "unavailable"),
-    (502, None, "unavailable"),
-])
+@pytest.mark.parametrize(
+    ("status", "body", "reason"),
+    [
+        (401, {"error": "invalid_client"}, "misconfigured"),
+        (400, {"error": "invalid_request"}, "misconfigured"),
+        (400, {"error": "invalid_grant"}, "expired"),
+        (429, {"error": "rate_limited"}, "unavailable"),
+        (502, None, "unavailable"),
+    ],
+)
 async def test_refusals_say_why(status, body, reason):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, json=body) if body else httpx.Response(status, text="bad gateway")
 
-    client = VexoulzAuth("https://auth.test", "", "vods-admin", "sec", "https://vods.test/cb",
-                         transport=httpx.MockTransport(handler))
+    client = VexoulzAuth(
+        "https://auth.test", "", "vods-admin", "sec", "https://vods.test/cb", transport=httpx.MockTransport(handler)
+    )
     with pytest.raises(SignInError) as caught:
         await client.redeem("c")
     assert caught.value.reason == reason
@@ -331,8 +346,9 @@ async def test_unreachable_is_unavailable():
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route")
 
-    client = VexoulzAuth("https://auth.test", "", "vods-admin", "sec", "https://vods.test/cb",
-                         transport=httpx.MockTransport(handler))
+    client = VexoulzAuth(
+        "https://auth.test", "", "vods-admin", "sec", "https://vods.test/cb", transport=httpx.MockTransport(handler)
+    )
     with pytest.raises(SignInError) as caught:
         await client.redeem("c")
     assert caught.value.reason == "unavailable"
@@ -348,8 +364,8 @@ def test_pending_states_and_safe_next():
     now[0] = 10
     assert states.finish(b) is None
     first, second, third = states.start("/1"), states.start("/2", quiet=True), states.start("/3")
-    assert states.finish(first) is None and states.finish(third).next == "/3"
-    assert states.finish(second)[:2] == ("/2", True)
+    assert states.finish(first) is None and states.finish(third).next == "/3"  # type: ignore[union-attr]
+    assert states.finish(second)[:2] == ("/2", True)  # type: ignore[index]
 
     assert with_admin("/vods/1", True) == "/vods/1?admin=1"
     assert with_admin("/vods/1?t=90&admin=1#chat", False) == "/vods/1?t=90&admin=0#chat"

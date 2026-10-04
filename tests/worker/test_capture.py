@@ -3,7 +3,6 @@ import json
 import httpx
 import pytest
 import respx
-
 from archive_common.twitch.gql import GQL_URL
 from archive_worker import hls
 from archive_worker.steps import capture as cap

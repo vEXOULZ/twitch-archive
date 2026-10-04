@@ -22,7 +22,7 @@ from archive_common.timeutil import format_hhmmss
 
 
 def chapters_from_moments(
-    edges: list[dict], vod_duration: float, restricted_games: list[str]
+    edges: list[dict[str, Any]], vod_duration: float, restricted_games: list[str]
 ) -> list[dict[str, Any]]:
     out = []
     for edge in edges:
@@ -32,22 +32,36 @@ def chapters_from_moments(
         dur_ms = node.get("durationMilliseconds") or 0
         start = pos_ms / 1000
         name = game.get("displayName") if game else None
-        out.append(chapter(
-            game.get("id") if game else None, name, game.get("boxArtURL") if game else None,
-            start, dur_ms / 1000 if dur_ms else vod_duration - start,
-            bool(name and name in restricted_games),
-        ))
+        out.append(
+            chapter(
+                game.get("id") if game else None,
+                name,
+                game.get("boxArtURL") if game else None,
+                start,
+                dur_ms / 1000 if dur_ms else vod_duration - start,
+                bool(name and name in restricted_games),
+            )
+        )
     return out
 
 
-def single_chapter(game: dict | None, box_art: str | None, vod_duration: float, restricted_games: list[str]) -> dict:
+def single_chapter(
+    game: dict[str, Any] | None, box_art: str | None, vod_duration: float, restricted_games: list[str]
+) -> dict[str, Any]:
     name = game.get("displayName") if game else None
-    return chapter(game.get("id") if game else None, name, box_art_image(box_art), 0, vod_duration,
-                   bool(name and name in restricted_games))
+    return chapter(
+        game.get("id") if game else None,
+        name,
+        box_art_image(box_art),
+        0,
+        vod_duration,
+        bool(name and name in restricted_games),
+    )
 
 
-def chapter(game_id: str | None, name: str | None, image: str | None, start: float, length: float,
-            restricted: bool) -> dict[str, Any]:
+def chapter(
+    game_id: str | None, name: str | None, image: str | None, start: float, length: float, restricted: bool
+) -> dict[str, Any]:
     """One chapter in the legacy shape (see above: ``duration`` is the start, ``end`` the length)."""
     return {
         "gameId": game_id,
@@ -65,7 +79,7 @@ def num_seconds(v: float) -> int | float:
     return int(v) if v.is_integer() else v
 
 
-def is_restricted(chapter: dict, restricted_games: list[str]) -> bool:
+def is_restricted(chapter: dict[str, Any], restricted_games: list[str]) -> bool:
     return bool(chapter.get("restricted")) or (chapter.get("name") in restricted_games)
 
 
@@ -85,7 +99,7 @@ class Part:
 
 def plan_parts(
     duration: float,
-    chapters: list[dict] | None,
+    chapters: list[dict[str, Any]] | None,
     restricted_games: list[str],
     split_duration: int,
     min_part: float = 1.0,
@@ -130,7 +144,7 @@ def select_parts(parts: list[Part], start_part: int | None, end_part: int | None
 
 def local_date(created_at: dt.datetime, tz: str) -> str:
     if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=dt.timezone.utc)
+        created_at = created_at.replace(tzinfo=dt.UTC)
     return created_at.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d")
 
 
@@ -147,7 +161,7 @@ def base_description(domain: str, vod_id: str, stream_title: str | None, extra: 
     return f"Chat Replay: https://{domain}/youtube/{vod_id}\nStream Title: {clean}\n{extra}"
 
 
-def chapter_lines(chapters: list[dict] | None, part: Part, restricted_games: list[str]) -> list[str]:
+def chapter_lines(chapters: list[dict[str, Any]] | None, part: Part, restricted_games: list[str]) -> list[str]:
     lines = []
     for ch in chapters or []:
         if is_restricted(ch, restricted_games):
@@ -162,7 +176,7 @@ def chapter_lines(chapters: list[dict] | None, part: Part, restricted_games: lis
 def full_description(
     base: str,
     this_part: int,
-    siblings: list[dict],
+    siblings: list[dict[str, Any]],
     chapters: list[str],
 ) -> str:
     """Rebuilt from scratch every time, so re-running describe is idempotent."""
@@ -191,7 +205,7 @@ def youtube_thumbnail(video_id: str) -> str:
     return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
 
 
-def upsert_youtube_entry(entries: list[dict] | None, entry: dict) -> list[dict]:
+def upsert_youtube_entry(entries: list[dict[str, Any]] | None, entry: dict[str, Any]) -> list[dict]:  # type: ignore[type-arg]
     out = [e for e in (entries or []) if not (e.get("type") == entry["type"] and e.get("part") == entry["part"])]
     out.append(entry)
     out.sort(key=lambda e: (e.get("type") != "vod", e.get("part") or 0))
@@ -213,12 +227,12 @@ class DmcaPlan:
         return not self.mute and not self.blackout
 
 
-def plan_dmca(claims: list[dict]) -> DmcaPlan:
+def plan_dmca(claims: list[dict[str, Any]]) -> DmcaPlan:
     """Turn YouTube Studio claim objects into mute / blackout ranges."""
     mute: list[tuple[float, float]] = []
     black: list[tuple[float, float]] = []
     for claim in claims:
-        policy = (((claim.get("claimPolicy") or {}).get("primaryPolicy") or {}).get("policyType"))
+        policy = ((claim.get("claimPolicy") or {}).get("primaryPolicy") or {}).get("policyType")
         if policy not in BLOCKING_POLICIES:
             continue
         details = claim.get("matchDetails") or {}

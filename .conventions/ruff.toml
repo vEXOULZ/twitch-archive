@@ -1,0 +1,13 @@
+# Synced from vEXOULZ/conventions: change it there, not here.
+#
+# A repo uses it with, in pyproject.toml:
+#
+#     [tool.ruff]
+#     extend = ".conventions/ruff.toml"
+#
+# and may add `extend-exclude`, `extend-select` or per-file ignores, but not change the values below.
+line-length = 120
+target-version = "py313"
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]
