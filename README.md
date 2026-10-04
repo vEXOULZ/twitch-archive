@@ -84,7 +84,9 @@ All settings are environment variables with the `ARCHIVE_` prefix. They can also
 
 Settings marked **†** in the archive-worker table can also be changed from the admin dashboard while the worker runs ([Runtime settings](#runtime-settings)); the env value is then the default.
 
-In production, non-secret settings go in `.env` (see `.env.example`). Secrets go in `secrets/api.env` and `secrets/worker.env` (see `deploy/secrets.example/`), so each container only receives the secrets it needs.
+Secrets can also be files: one per setting, named like its variable in lowercase (`archive_admin_api_key`), in `/run/secrets` or the directory `ARCHIVE_SECRETS_DIR` names. A variable in the environment wins over its file.
+
+In production, non-secret settings go in `.env` (see `.env.example`). Secrets are files in `secrets/` (see `secrets.example/` and its README), which `compose.yaml` mounts as docker secrets, so each container only receives the secrets it needs.
 
 ### Shared
 
@@ -663,7 +665,8 @@ If the host is an unprivileged LXC container, Docker needs `nesting=1,keyctl=1`,
    ```bash
    git clone https://github.com/vEXOULZ/twitch-archive.git && cd twitch-archive
    cp .env.example .env && $EDITOR .env
-   mkdir -p secrets && cp deploy/secrets.example/*.env secrets/ && chmod 600 secrets/*.env && $EDITOR secrets/*.env
+   cp -r secrets.example secrets && rm secrets/README.md && $EDITOR secrets/*
+   chmod 0600 secrets/admin.env && chmod 0400 secrets/*_* && sudo chown 1000:1000 secrets/*_*   # the images run as uid 1000
    docker compose build
    ```
 3. **Migrate** as the superuser. This is safe on a live database: the baseline uses `CREATE TABLE IF NOT EXISTS`, and the `logs` indexes are built `CONCURRENTLY`. `secrets/admin.env` holds the superuser URL and the two role passwords. It is never mounted into a container.
@@ -675,7 +678,7 @@ If the host is an unprivileged LXC container, Docker needs `nesting=1,keyctl=1`,
    ```bash
    bash deploy/apply-roles.sh
    ```
-   The passwords in `secrets/admin.env` must match the ones in the `ARCHIVE_DATABASE_URL` of `secrets/api.env` and `secrets/worker.env`. The script feeds `roles.sql` to `psql` on stdin, because the `postgres` user usually cannot read the checkout.
+   The passwords in `secrets/admin.env` must match the ones in `secrets/api_database_url` and `secrets/worker_database_url`. The script feeds `roles.sql` to `psql` on stdin, because the `postgres` user usually cannot read the checkout.
 5. **Authorize YouTube** ([§3](#3-youtube-oauth-setup)).
 6. **Start:** `docker compose up -d --wait`.
 
@@ -738,7 +741,8 @@ services/worker/archive_worker/   monitor, job runner, steps/, hls, ffmpeg, yout
 migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before, 0003 manual step control, … 0007 VOD merges and splits, 0008 bot chat, 0009 admin sessions, 0010 hidden VODs, 0011 runtime settings, 0012 vex-platform jobs schema + audit_log)
 tests/api_contract/               golden responses from the legacy API + replay tests
 tests/worker/                     HLS parsing, planning, capture (respx), ffmpeg, DB-backed steps/runner
-deploy/                           roles.sql, example secrets
+deploy/                           roles.sql, apply-roles.sh
+secrets.example/                  the secrets files compose mounts, and admin.env
 Dockerfile                        both images, as targets: --target api, --target worker
 docs/adr/                         architecture decisions
 ```
