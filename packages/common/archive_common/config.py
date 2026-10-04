@@ -4,10 +4,15 @@ Everything comes from environment variables prefixed ``ARCHIVE_`` (or a
 ``.env`` file in the working directory). List values are JSON, e.g.
 ``ARCHIVE_RESTRICTED_GAMES='["Artifact"]'``. The admin dashboard can override some of
 the worker's (archive_worker/runtime_settings.py); the env value is then the default.
+
+Secrets can also come from files: one per setting, named like its variable in lowercase
+(``archive_admin_api_key``), in ``/run/secrets`` (where compose mounts them) or
+``ARCHIVE_SECRETS_DIR``. A variable set in the environment wins over its file.
 """
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -15,9 +20,16 @@ from typing import Literal
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+SECRETS_DIR = Path(os.environ.get("ARCHIVE_SECRETS_DIR", "/run/secrets"))
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ARCHIVE_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="ARCHIVE_",
+        env_file=".env",
+        extra="ignore",
+        secrets_dir=SECRETS_DIR if SECRETS_DIR.is_dir() else None,
+    )
 
     # ── Shared ────────────────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://postgres:dev@127.0.0.1:55433/archive"

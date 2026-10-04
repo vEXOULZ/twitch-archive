@@ -7,6 +7,9 @@
 #
 # Images are published to GHCR (`:main`, `:dev`, `:vX.Y.Z`); TAG picks one. The guest still builds them
 # from its checkout until it switches to pulling. Health checks are in the Dockerfile.
+#
+# Non-secret settings come from .env (.env.example). Secrets are files in secrets/, one value each
+# (secrets.example/), mounted at /run/secrets: each container gets only the ones it needs.
 name: twitch-archive
 
 x-service: &service
@@ -22,7 +25,10 @@ services:
     <<: *service
     build: { context: ., target: api }
     image: ghcr.io/vexoulz/twitch-archive-api:${TAG:-main}
-    env_file: [.env, secrets/api.env]
+    env_file: [.env]
+    secrets:
+      - { source: api_database_url, target: archive_database_url }
+      - archive_twitch_client_secret
     volumes:
       # Read-only, for the seek-bar previews the worker makes (GET /v1/previews/...). The whole data dir, not
       # just previews/: Docker would create a missing previews/ owned by root, which the worker can't write.
@@ -32,7 +38,25 @@ services:
     <<: *service
     build: { context: ., target: worker }
     image: ghcr.io/vexoulz/twitch-archive-worker:${TAG:-main}
-    env_file: [.env, secrets/worker.env]
+    env_file: [.env]
+    secrets:
+      - { source: worker_database_url, target: archive_database_url }
+      - archive_twitch_client_secret
+      - archive_admin_api_key
+      - archive_admin_password
+      - archive_admin_auth_client_secret
+      - archive_google_client_secret
+      - archive_doomtp_api_key
     volumes:
       - ${ARCHIVE_HOST_DATA_DIR:-./data}:/data
     stop_grace_period: 60s  # let ffmpeg / uploads be cancelled cleanly; jobs resume on start
+
+secrets:
+  api_database_url: { file: ./secrets/api_database_url }
+  worker_database_url: { file: ./secrets/worker_database_url }
+  archive_twitch_client_secret: { file: ./secrets/archive_twitch_client_secret }
+  archive_admin_api_key: { file: ./secrets/archive_admin_api_key }
+  archive_admin_password: { file: ./secrets/archive_admin_password }
+  archive_admin_auth_client_secret: { file: ./secrets/archive_admin_auth_client_secret }
+  archive_google_client_secret: { file: ./secrets/archive_google_client_secret }
+  archive_doomtp_api_key: { file: ./secrets/archive_doomtp_api_key }
