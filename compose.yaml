@@ -1,26 +1,101 @@
-# Production stack. Postgres runs natively on the host; host networking lets
-# the containers reach it on 127.0.0.1:5432 without changing pg_hba.
+# Production stack: Postgres 17 (db), the api and the worker, plus two one-shot steps that every `up` runs
+# before the services start (docs/adr/0002):
 #
-#   docker compose build
-#   docker compose up -d
+#   migrate   alembic upgrade head, as the superuser, from the api image
+#   roles     deploy/roles.sql: the archive_api / archive_worker roles, their passwords and grants
+#
+#   docker compose up -d --wait
 #   docker compose logs -f worker
+#   docker compose --profile tools run --rm backup      # pg_dump -Fc into ARCHIVE_BACKUP_DIR
 #
-# Images are published to GHCR (`:main`, `:dev`, `:vX.Y.Z`); TAG picks one. The guest still builds them
-# from its checkout until it switches to pulling. Health checks are in the Dockerfile.
+# Images are published to GHCR (`:main`, `:dev`, `:vX.Y.Z`); TAG picks one, and `docker compose build`
+# builds them from the checkout instead. Health checks are in the Dockerfile. If either step fails, the
+# running api and worker are not replaced.
 #
 # Non-secret settings come from .env (.env.example). Secrets are files in secrets/, one value each
 # (secrets.example/), mounted at /run/secrets: each container gets only the ones it needs.
 name: twitch-archive
 
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
 x-service: &service
   restart: unless-stopped
-  network_mode: host
   init: true
-  logging:
-    driver: json-file
-    options: { max-size: "10m", max-file: "5" }
+  logging: *logging
+  security_opt: ["no-new-privileges:true"]
+  depends_on:
+    db: { condition: service_healthy }
+    roles: { condition: service_completed_successfully }
 
 services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: archive
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Only this compose network reaches it. To look at it: docker compose exec db psql -U postgres archive
+    expose: ["5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d archive"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  migrate:
+    image: ghcr.io/vexoulz/twitch-archive-api:${TAG:-main}
+    restart: "no"
+    # Compose can't put a secret's contents into an environment variable, so the superuser URL is built
+    # here from the password file (`$$` escapes compose's own interpolation). The password must be
+    # URL-safe: `openssl rand -hex 32`.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        ARCHIVE_MIGRATION_DATABASE_URL="postgresql+asyncpg://postgres:$$(cat /run/secrets/postgres_password)@db:5432/archive"
+        exec alembic upgrade head
+    env_file: [.env]
+    secrets: [postgres_password]
+    depends_on:
+      db: { condition: service_healthy }
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+
+  roles:
+    image: postgres:17-alpine
+    restart: "no"
+    # The role passwords are the ones in the two database URLs, so each lives in one file. URL-safe, like
+    # the superuser's.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        pw() { sed -E 's#^[^:]+://[^:]+:([^@]*)@.*#\1#' "$$1"; } &&
+        PGPASSWORD="$$(cat /run/secrets/postgres_password)"
+        exec psql -h db -U postgres -d archive -X -q
+        -v api_password="$$(pw /run/secrets/api_database_url)"
+        -v worker_password="$$(pw /run/secrets/worker_database_url)"
+        -f /roles.sql
+    configs:
+      - { source: roles_sql, target: /roles.sql }
+    secrets: [postgres_password, api_database_url, worker_database_url]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+
   api:
     <<: *service
     build: { context: ., target: api }
@@ -29,6 +104,10 @@ services:
     secrets:
       - { source: api_database_url, target: archive_database_url }
       - archive_twitch_client_secret
+    ports:
+      # Localhost by default. ARCHIVE_PUBLISH_ADDR=0.0.0.0 (or one address) when a proxy on another host
+      # serves it.
+      - "${ARCHIVE_PUBLISH_ADDR:-127.0.0.1}:${ARCHIVE_API_PORT:-3030}:${ARCHIVE_API_PORT:-3030}"
     volumes:
       # Read-only, for the seek-bar previews the worker makes (GET /v1/previews/...). The whole data dir, not
       # just previews/: Docker would create a missing previews/ owned by root, which the worker can't write.
@@ -47,11 +126,42 @@ services:
       - archive_admin_auth_client_secret
       - archive_google_client_secret
       - archive_doomtp_api_key
+    ports:
+      # The admin API: never behind a public proxy (README §7).
+      - "${ARCHIVE_PUBLISH_ADDR:-127.0.0.1}:${ARCHIVE_ADMIN_PORT:-3031}:${ARCHIVE_ADMIN_PORT:-3031}"
     volumes:
       - ${ARCHIVE_HOST_DATA_DIR:-./data}:/data
     stop_grace_period: 60s  # let ffmpeg / uploads be cancelled cleanly; jobs resume on start
 
+  # One-shot dump: docker compose --profile tools run --rm backup
+  # Writes archive-YYYY-MM-DD-HHMM.dump (pg_dump -Fc) into ARCHIVE_BACKUP_DIR and keeps the newest seven.
+  backup:
+    profiles: ["tools"]
+    image: postgres:17-alpine
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        set -e; umask 077;
+        f=/backups/archive-$$(date +%F-%H%M).dump;
+        PGPASSWORD="$$(cat /run/secrets/postgres_password)" pg_dump -h db -U postgres -Fc archive > "$$f.partial";
+        mv "$$f.partial" "$$f"; echo "wrote $$f";
+        ls -1t /backups/archive-*.dump | tail -n +8 | xargs -r rm --
+    secrets: [postgres_password]
+    volumes:
+      - ${ARCHIVE_BACKUP_DIR:-./backups}:/backups
+    depends_on:
+      db: { condition: service_healthy }
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  pgdata:
+
+configs:
+  roles_sql: { file: ./deploy/roles.sql }
+
 secrets:
+  postgres_password: { file: ./secrets/postgres_password }
   api_database_url: { file: ./secrets/api_database_url }
   worker_database_url: { file: ./secrets/worker_database_url }
   archive_twitch_client_secret: { file: ./secrets/archive_twitch_client_secret }

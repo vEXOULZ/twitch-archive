@@ -28,6 +28,7 @@ build/
 .coverage
 # conventions:end
 
-# Database dumps and the worker's data directory
+# Database dumps, the backup service's directory and the worker's data directory
 *.dump
+/backups/
 /data/

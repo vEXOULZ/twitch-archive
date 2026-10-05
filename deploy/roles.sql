@@ -1,7 +1,6 @@
--- Least-privilege database roles for the two services. Idempotent: re-run it
--- after every migration that adds tables (it also resets the passwords).
---
---   bash deploy/apply-roles.sh        (as root; reads secrets/admin.env)
+-- Least-privilege database roles for the two services. Idempotent: compose's
+-- `roles` step runs it on every `up`, after `migrate`, so a migration that adds
+-- tables gets its grants and the passwords follow secrets/*_database_url.
 --
 -- Migrations themselves run as the postgres superuser
 -- (ARCHIVE_MIGRATION_DATABASE_URL), never as these roles.
