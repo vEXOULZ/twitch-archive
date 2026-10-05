@@ -33,6 +33,10 @@ for "what was running last week" other than a commit sha.
 - **A hotfix** branches from `main`, merges into `main`, and then `main` merges back into `dev` in a pull
   request, so `dev` never loses it.
 
+## Amendment (2026-10-05): releases run from release.yml
+
+The release steps above are now a workflow, from vEXOULZ/conventions v2.0.0. **Actions → release → Run workflow** works out the next version from the Conventional Commits since the last tag, writes it into `pyproject.toml` and `uv.lock` on a `release/x-y-z` branch and opens "Release vX.Y.Z" from it into `main`. That replaces the separate version pull request into `dev` and the release pull request from `dev`. When it merges, the workflow tags the merge commit, publishes the GitHub release and opens the pull request that brings `main` back into `dev`. A required check, `conventions / version`, fails any pull request into `main` that doesn't raise the version to one with no tag yet, which closes the gap that left v0.2.0's tag without an image in doomtp-bot. CONTRIBUTING.md has the steps.
+
 ## Options Considered
 
 ### Option A: keep merging features into main

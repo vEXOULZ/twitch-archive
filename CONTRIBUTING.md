@@ -35,10 +35,16 @@ Work integrates on `dev`, and `main` is what production runs. The `pre-commit` h
 made on `main`, `master`, `dev` or `develop`.
 
 - Feature and bugfix branches start from `dev`, and their pull requests target `dev`.
-- A release is a pull request from `dev` (or a `release/*` branch) into `main`, then a `vX.Y.Z` tag on
-  `main`.
-- A `hotfix/*` branch starts from `main` and merges into `main`; `main` then merges back into `dev` so
-  `dev` never loses it.
+- A release is a pull request into `main`, and it has to raise the version (`conventions / version`).
+  Start one from the **Actions → release → Run workflow** button: it works out the next version from
+  the Conventional Commits since the last tag (`feat` is a minor, `!` or `BREAKING CHANGE` a major,
+  anything else a patch; choose a bump to override), writes it on a `release/X-Y-Z` branch and opens
+  "Release vX.Y.Z" into `main`.
+- Merging the release pull request tags the merge commit `vX.Y.Z`, publishes the GitHub release, and
+  opens the pull request that brings `main` back into `dev`. Merge that one too.
+- A `hotfix/*` branch starts from `main`, raises the version (`conventions version set X.Y.Z`) and
+  merges into `main`; it is released the same way, and `main` then merges back into `dev` so `dev`
+  never loses it.
 - The `conventions / branch-name` check refuses any other pull request into `main`.
 
 ```bash
@@ -58,6 +64,9 @@ Every pull request runs:
 - **`conventions / check`:** the synced files match the version pinned in `.conventions.toml`, and the
   repo follows the conventions for its profile. A public repo is also checked for private
   infrastructure (addresses, server paths).
+- **`conventions / version`:** every file that carries the version (`pyproject.toml`, `uv.lock`,
+  `__version__`, `package.json`, `package-lock.json`) says the same. In a `flow = "dev"` repo a pull
+  request into `main` must also raise it, to a version with no tag yet.
 - **`ci / …`:** the repo's lint, tests and build, from the reusable workflows in
   [vEXOULZ/conventions](https://github.com/vEXOULZ/conventions).
 
