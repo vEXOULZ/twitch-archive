@@ -1,4 +1,4 @@
-"""How each VOD tag shows on the site (vods.vexoulz.net's /manage/tags), as both services read it.
+"""How each VOD tag shows on the site (vods.vexoul.net's /manage/tags), as both services read it.
 
 The worker's admin routes write it (archive_worker/site_tags.py), archive-api serves it at
 ``/v1/site/tags``. A tag is ``{name, label, drawn, color, shape, width, height}``, then the text drawn

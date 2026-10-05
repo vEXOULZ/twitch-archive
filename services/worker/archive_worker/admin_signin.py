@@ -1,4 +1,4 @@
-"""Twitch sign-in for the admin dashboard, through vexoulz-auth (the shared *.vexoulz.net sign-in).
+"""Twitch sign-in for the admin dashboard, through vexoulz-auth (the shared *.vexoul.net sign-in).
 
 The browser goes to vexoulz-auth's ``/authorize`` with a one-time ``state``. It comes back to
 ``/admin/signin/callback`` with a code, which this worker trades (with its client secret) for the

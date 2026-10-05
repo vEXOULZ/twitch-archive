@@ -672,7 +672,7 @@ def create_admin_app(
         service.apply_settings()
         return settings_json()
 
-    # ── Site tags (how vods.vexoulz.net shows each VOD tag; archive-api serves them) ──
+    # ── Site tags (how vods.vexoul.net shows each VOD tag; archive-api serves them) ──
 
     async def site_tags_view() -> dict[str, Any]:
         async with get_sessionmaker()() as s:
