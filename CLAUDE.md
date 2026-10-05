@@ -8,6 +8,8 @@ README is the full manual.
 
 - Pull requests go to `dev`; `main` is production and changes only through a release
   (docs/adr/0001). The server rebuilds and restarts on every change to `main`.
+- Releases run from `.github/workflows/release.yml` (Actions → release → Run workflow; CONTRIBUTING
+  "Release flow"): don't bump, tag or back-merge by hand.
 - Migrations are Alembic, in `migrations/`, and must stay additive: the old containers keep running
   against the migrated schema until the new ones start. A schema change is a new revision.
 - The API's response shapes are a contract with the sites (golden tests in `tests/api_contract/`).

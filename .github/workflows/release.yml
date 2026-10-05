@@ -1,0 +1,33 @@
+# Releases, from vEXOULZ/conventions (README "Releasing a flow = "dev" repo"):
+#   Actions → release → Run workflow opens "Release vX.Y.Z" from dev into main; merging it tags the
+#   merge commit, publishes the GitHub release and opens the pull request that brings main back into dev.
+# Both jobs need the repository secret RELEASE_TOKEN, so that CI runs on what they create.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: auto (from the commits), patch, minor or major
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch'
+    uses: vEXOULZ/conventions/.github/workflows/release-prepare.yml@v2.0.0
+    with:
+      bump: ${{ inputs.bump }}
+    secrets: inherit
+
+  finish:
+    if: github.event.pull_request.merged
+    uses: vEXOULZ/conventions/.github/workflows/release-finish.yml@v2.0.0
+    secrets: inherit

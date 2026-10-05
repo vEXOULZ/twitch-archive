@@ -189,9 +189,9 @@ This copies `youtube.auth.refresh_token` into the `app_state` table. `ARCHIVE_GO
 
 ### Option B: run the consent flow again from the dashboard
 
-When the admin API is published behind the site's proxy (vods.vexoulz.net serves it at `/backend-admin`), Google can redirect straight back through it:
+When the admin API is published behind the site's proxy (vods.vexoul.net serves it at `/backend-admin`), Google can redirect straight back through it:
 
-1. In Google Cloud Console → Credentials → your OAuth client, add the authorized redirect URI `https://<site>/backend-admin/admin/refreshtoken` (e.g. `https://vods.vexoulz.net/backend-admin/admin/refreshtoken`).
+1. In Google Cloud Console → Credentials → your OAuth client, add the authorized redirect URI `https://<site>/backend-admin/admin/refreshtoken` (e.g. `https://vods.vexoul.net/backend-admin/admin/refreshtoken`).
 2. Set `ARCHIVE_GOOGLE_REDIRECT_URL` to the same URI and restart the worker.
 3. On the site, Manage → Overview → **Connect YouTube**, sign in with the channel's Google account and allow access. The tab ends on "YouTube authorized. You can close this tab.", and the YouTube tile turns valid.
 
@@ -333,7 +333,7 @@ curl -s "${H[@]}" -X DELETE "$A/admin/settings/keep_hls"   # back to the env val
 
 ### Site tags
 
-How [vods.vexoulz.net](https://vods.vexoulz.net) shows each VOD tag (its `/manage/tags` page edits them; archive-api serves them, [§6](#6-public-api-reference)). They are kept in the database (`site_settings`, `site_tag_shapes`).
+How [vods.vexoul.net](https://vods.vexoul.net) shows each VOD tag (its `/manage/tags` page edits them; archive-api serves them, [§6](#6-public-api-reference)). They are kept in the database (`site_settings`, `site_tag_shapes`).
 
 ```bash
 curl -s "${H[@]}" "$A/admin/site/tags"                  # {tags, updatedAt, updatedBy}; never saved: tags [] and nulls

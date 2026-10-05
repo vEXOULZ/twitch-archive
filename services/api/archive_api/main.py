@@ -222,7 +222,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"}
         )
 
-    # ── Site tags (how vods.vexoulz.net shows each VOD tag; the worker's admin routes save them) ──
+    # ── Site tags (how vods.vexoul.net shows each VOD tag; the worker's admin routes save them) ──
 
     @app.get("/v1/site/tags")
     async def site_tag_list(request: Request):  # type: ignore[no-untyped-def]
