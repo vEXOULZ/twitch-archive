@@ -4,6 +4,7 @@ import asyncio
 import datetime as dt
 from typing import Any
 
+import archive_worker.admin as admin_module
 import asyncpg
 import httpx
 import pytest
@@ -23,11 +24,14 @@ from archive_worker.job_rows import RUNS, subject_of
 from archive_worker.steps import metadata
 from pydantic import SecretStr
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 VOD = "test-admin-dashboard-vod"
 STREAM = 999_000_000_001
 KEY = {"Authorization": "Bearer k"}
 TEMPLATE = "https://static-cdn.jtvnw.net/ttv-boxart/509658-{width}x{height}.jpg"
+
+UNREACHABLE = "postgresql+asyncpg://nobody:nothing@127.0.0.1:1/archive"
 
 
 async def _reset(audit_after: int | None = None):
@@ -549,7 +553,7 @@ async def test_twitch_game_search(app, respx_mock):
 async def test_health(vod, app, monkeypatch, respx_mock):
     deps = app[1].deps
     deps.settings.api_internal_url = "http://api.test"
-    respx_mock.get("http://api.test/healthz").respond(json={"ok": True})
+    respx_mock.get("http://api.test/readyz").respond(json={"ok": True})
     checked = dt.datetime(2026, 9, 25, 12, tzinfo=dt.UTC)
 
     async def cached_check(max_age):
@@ -577,9 +581,26 @@ async def test_health(vod, app, monkeypatch, respx_mock):
     assert set(h["jobs"]["counts"]) == set(jobs.STATES) and h["jobs"]["counts"]["failed"] >= 1
     assert h["jobs"]["recentFailures"][0]["id"] == job.id and len(h["jobs"]["recentFailures"]) <= 5
 
-    respx_mock.get("http://api.test/healthz").mock(side_effect=httpx.ConnectError("down"))
+    respx_mock.get("http://api.test/readyz").mock(side_effect=httpx.ConnectError("down"))
     async with client(app) as c:
         assert (await c.get("/admin/health", headers=KEY)).json()["api"] == {"ok": False}
+    respx_mock.get("http://api.test/readyz").respond(503, json={"ok": False, "error": "database: OSError"})
+    async with client(app) as c:
+        assert (await c.get("/admin/health", headers=KEY)).json()["api"] == {"ok": False}
+
+
+async def test_healthz_and_readyz(app, monkeypatch):
+    async with client(app) as c:
+        assert (await c.get("/healthz")).json() == {"status": "ok", "runningJobs": 0}
+        r = await c.get("/readyz")
+        assert (r.status_code, r.json()) == (200, {"status": "ok", "runningJobs": 0})
+
+    monkeypatch.setattr(admin_module, "get_sessionmaker", lambda: async_sessionmaker(create_async_engine(UNREACHABLE)))
+    async with client(app) as c:
+        assert (await c.get("/healthz")).status_code == 200  # liveness doesn't look at the database
+        r = await c.get("/readyz")
+        assert r.status_code == 503
+        assert r.json()["status"] == "unavailable" and r.json()["error"].startswith("database: ")
 
 
 # ── Audit log ─────────────────────────────────────────────────────────────

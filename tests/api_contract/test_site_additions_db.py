@@ -162,3 +162,8 @@ async def test_status(client: httpx.AsyncClient) -> None:
     else:
         assert body["stream"] is None
         assert body["vod"] == (latest[0] if latest else None)
+
+
+async def test_readyz_answers_with_the_database(client: httpx.AsyncClient) -> None:
+    r = await client.get("/readyz")
+    assert (r.status_code, r.json()) == (200, {"ok": True})
