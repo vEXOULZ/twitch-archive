@@ -231,6 +231,8 @@ To handle the first case and detect the others early, the worker has a keep-aliv
 
 The admin API is served by the worker on port 3031. Keep it on your **private network**: never expose it through your reverse proxy or tunnel. Every call needs `Authorization: Bearer <ARCHIVE_ADMIN_API_KEY>`, or a dashboard login (see [Browser access](#browser-access-dashboard)). The old app accepted any word before the key, and so does this one.
 
+Two routes need no key: `GET /healthz` (`{"status": "ok", "runningJobs": N}` while the process answers; the container's `HEALTHCHECK`, no dependency checks) and `GET /readyz` (the same once the database responds too, else 503 with `"status": "unavailable"` and `"error": "database: <type>"`). Point uptime monitors at `/readyz`. The dashboard's status bar reports the api as up when the api's `/readyz` answers 200.
+
 Long-running actions enqueue a job and return right away with `{"error": false, "msg": "...", "jobId": N}`. Errors return `{"error": true, "msg": "..."}`. Request bodies use the same field names as the old app. `platform` is accepted and ignored.
 
 ```bash
@@ -613,7 +615,8 @@ This is what the frontend uses. The output is compatible with the old Feathers A
 | `GET /v1/vods/:id/comments?content_offset_seconds=N` | Chat replay. 200-row buckets plus a `cursor`. |
 | `GET /v1/vods/:id/comments?cursor=...` | Next page. |
 | `GET /v2/badges` | `{channel: [...], global: [...]}` in the Helix `chat/badges` format, cached for 1h. |
-| `GET /healthz` | `{"ok": true}` once the database responds. |
+| `GET /healthz` | `{"ok": true}` while the process answers (liveness; the container's `HEALTHCHECK`). No dependency checks. |
+| `GET /readyz` | `{"ok": true}` once the database responds too, else 503 with `{"ok": false, "error": "database: <type>"}`. Point uptime monitors here. |
 
 **Additions for the new sites.** The old API never had these; they only add routes and fields, so the old frontend is unaffected.
 
@@ -720,7 +723,7 @@ Pushes and pull requests run CI (`.github/workflows/ci.yml`): lint (ruff, mypy),
 | Task | Command |
 |---|---|
 | Logs | `docker compose logs -f worker` / `docker compose logs -f api` |
-| Status | `docker compose ps` (both services have healthchecks) |
+| Status | `docker compose ps` (both services have healthchecks, on `/healthz`). Is it serving? `curl -s localhost:3030/readyz` and `localhost:3031/readyz`: 503 names the dependency that failed |
 | Failed jobs | `curl -s "${H[@]}" "$A/admin/jobs?state=failed"`, then `.../retry` |
 | Queue a job without the API | `docker compose exec worker archive-worker enqueue chapters 2375792832` |
 | Disk usage | `du -sh $ARCHIVE_HOST_DATA_DIR/*`; files are deleted after a successful upload unless `KEEP_*` is set. Failed jobs keep their files. |

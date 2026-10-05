@@ -24,7 +24,7 @@ from archive_common.twitch.helix import Helix
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -39,6 +39,7 @@ from .status import stream_status
 from .third_party_emotes import fetch_third_party_emotes
 
 log = logging.getLogger("archive_api")
+READY_TIMEOUT_S = 5  # /readyz: a database slower than this counts as down
 
 # Legacy: the limiter covered /vods and the custom routes, not /games /emotes /streams.
 RATE_LIMITED_PREFIXES = ("/vods", "/v1/", "/v2/")
@@ -128,8 +129,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz():  # type: ignore[no-untyped-def]
-        async with engine.connect() as conn:
-            await conn.execute(text("select 1"))
+        """Liveness: the process answers. No dependency checks, so a database outage doesn't get the
+        container restarted for nothing."""
+        return {"ok": True}
+
+    @app.get("/readyz")
+    async def readyz():  # type: ignore[no-untyped-def]
+        """Readiness: the database answers too, within READY_TIMEOUT_S. 503 with the error's type when it
+        doesn't."""
+        try:
+            async with asyncio.timeout(READY_TIMEOUT_S), engine.connect() as conn:
+                await conn.execute(text("select 1"))
+        except Exception as exc:
+            log.warning("not ready: database %s", type(exc).__name__)
+            return JSONResponse({"ok": False, "error": f"database: {type(exc).__name__}"}, status_code=503)
         return {"ok": True}
 
     # ── Feathers services ─────────────────────────────────────────────────
