@@ -93,7 +93,7 @@ In production, non-secret settings go in `.env` (see `.env.example`). Secrets ar
 | Variable | Default | Notes |
 |---|---|---|
 | `ARCHIVE_DATABASE_URL` | `postgresql+asyncpg://postgres:dev@127.0.0.1:55433/archive` | Use the `archive_api` or `archive_worker` role in production |
-| `ARCHIVE_MIGRATION_DATABASE_URL` | – | Superuser URL used only by `alembic` (falls back to `ARCHIVE_DATABASE_URL`) |
+| `ARCHIVE_MIGRATION_DATABASE_URL` | – | Superuser URL used only by `alembic` (falls back to `ARCHIVE_DATABASE_URL`). Compose's `migrate` step builds it from `secrets/postgres_password` |
 | `ARCHIVE_CHANNEL` | – | Channel name used in YouTube titles |
 | `ARCHIVE_DOMAIN_NAME` | – | Frontend host, used in the "Chat Replay" link in descriptions |
 | `ARCHIVE_TIMEZONE` | `UTC` | The date in YouTube titles |
@@ -646,41 +646,33 @@ Rate limit: 20 requests per 5 s per IP on `/vods`, `/v1/*` (except `/v1/previews
 
 ## 7. Deployment (Docker Compose)
 
-`compose.yaml` runs both services with host networking, next to a PostgreSQL that runs natively on the same host (`127.0.0.1:5432`). You need:
+`compose.yaml` is the whole stack: PostgreSQL 17 (`db`, on the named volume `pgdata`), the api and the worker, and two one-shot steps that every `up` runs before the services start (docs/adr/0002):
+
+- **`migrate`** runs `alembic upgrade head` as the superuser, from the api image.
+- **`roles`** runs `deploy/roles.sql`: the `archive_api` and `archive_worker` roles, their passwords (taken from `secrets/api_database_url` and `secrets/worker_database_url`) and their grants.
+
+If either step fails, the running api and worker are left as they are. Only the compose network reaches the database; the api and admin ports are published on `ARCHIVE_PUBLISH_ADDR` (default `127.0.0.1`). You need:
 
 - Docker with the compose plugin.
-- PostgreSQL 14 or later with the `archive` database. Restore the old app's database, or create an empty one and let the migrations build it.
 - A data directory for the worker, set as `ARCHIVE_HOST_DATA_DIR` (default `./data`). A VOD needs about 3–3.5 GB per hour of stream while it is processed; twice that with `MULTI_TRACK`. Files are deleted after upload.
-- A reverse proxy in front of the API port if the frontend is public. The worker's admin port must **not** go through it.
+- A reverse proxy in front of the API port if the frontend is public. The worker's admin port must **not** go through it. A proxy on another host needs `ARCHIVE_PUBLISH_ADDR=0.0.0.0` (or the address it connects to).
 
 If the host is an unprivileged LXC container, Docker needs `nesting=1,keyctl=1`, and a bind-mounted data directory must be writable by the container's uid.
 
 ### 7.1 Install
 
-1. **Back up the database** before touching the schema:
-   ```bash
-   sudo -u postgres pg_dump -Fc archive > ~/archive-$(date +%F).dump
-   ```
-2. **Get the code and configure it:**
+1. **Get the code and configure it:**
    ```bash
    git clone https://github.com/vEXOULZ/twitch-archive.git && cd twitch-archive
-   cp .env.example .env && $EDITOR .env
+   cp .env.example .env && chmod 600 .env && $EDITOR .env
    cp -r secrets.example secrets && rm secrets/README.md && $EDITOR secrets/*
-   chmod 0600 secrets/admin.env && chmod 0400 secrets/*_* && sudo chown 1000:1000 secrets/*_*   # the images run as uid 1000
-   docker compose build
+   chmod 0400 secrets/* && sudo chown 1000:1000 secrets/*   # the images run as uid 1000
    ```
-3. **Migrate** as the superuser. This is safe on a live database: the baseline uses `CREATE TABLE IF NOT EXISTS`, and the `logs` indexes are built `CONCURRENTLY`. `secrets/admin.env` holds the superuser URL and the two role passwords. It is never mounted into a container.
-   ```bash
-   set -a && . secrets/admin.env && set +a
-   docker compose run --rm -e ARCHIVE_MIGRATION_DATABASE_URL api alembic upgrade head
-   ```
-4. **Create the roles.** Re-run this after any migration that adds tables. As root on the database host:
-   ```bash
-   bash deploy/apply-roles.sh
-   ```
-   The passwords in `secrets/admin.env` must match the ones in `secrets/api_database_url` and `secrets/worker_database_url`. The script feeds `roles.sql` to `psql` on stdin, because the `postgres` user usually cannot read the checkout.
-5. **Authorize YouTube** ([§3](#3-youtube-oauth-setup)).
-6. **Start:** `docker compose up -d --wait`.
+   Generate the three database passwords with `openssl rand -hex 32`; they go into URLs as they are.
+2. **Authorize YouTube** ([§3](#3-youtube-oauth-setup)).
+3. **Start:** `docker compose up -d --wait`. On an empty volume `db` creates the `archive` database, `migrate` builds the schema and `roles` creates the roles.
+
+To start from an existing database instead, restore it before step 3 (§7.4).
 
 ### 7.2 Migrating from the old Node app
 
@@ -695,13 +687,29 @@ If the host is an unprivileged LXC container, Docker needs `nesting=1,keyctl=1`,
 
 ```bash
 git pull
-docker compose build && docker compose up -d --wait
-# only if migrations/ changed: run 7.1 step 3 first (and step 4 if it added tables)
+docker compose pull && docker compose up -d --wait
 ```
 
-Running jobs are interrupted by the restart and resume from their current step. The two exceptions are a live recording, which misses the segments that aired during the restart, and an in-flight YouTube upload, which starts that part again from zero. Check `GET /admin/jobs?state=running` first.
+`migrate` and `roles` run first, against the database the old containers are still using; then the api and worker are replaced. Running jobs are interrupted by the restart and resume from their current step. The two exceptions are a live recording, which misses the segments that aired during the restart, and an in-flight YouTube upload, which starts that part again from zero. Check `GET /admin/jobs?state=running` first.
 
 Migrations must stay **additive**: the old containers keep running against the migrated schema until the new ones start, and a code rollback leaves the schema migrated.
+
+**Backups:** `docker compose --profile tools run --rm backup` writes a `pg_dump -Fc` archive into `ARCHIVE_BACKUP_DIR` (default `./backups`) and keeps the newest seven. Run it from a timer, and copy the dumps off the host. Restore one with §7.4's `pg_restore` line.
+
+### 7.4 Restoring a dump, or moving from a native PostgreSQL
+
+Until this release the stack expected PostgreSQL on the host. To move an existing database into `db`:
+
+```bash
+docker compose stop api worker                       # nothing may write during the dump
+sudo -u postgres pg_dump -Fc archive > archive.dump  # on the old server
+# secrets/: add postgres_password, and change both URLs' host to db (new passwords are fine)
+docker compose up -d --wait db
+docker compose exec -T db pg_restore -U postgres -d archive --no-owner --no-privileges < archive.dump
+docker compose up -d --wait                          # migrate, roles (grants), api, worker
+```
+
+`--no-privileges` skips the dump's grants, because the roles don't exist yet when it runs; the `roles` step recreates them and their grants. Compare row counts between the two servers before you switch the old one off, and keep it, stopped, until you're confident: switching back is stopping the stack and pointing the URLs at it again, losing what was written since.
 
 Pushes and pull requests run CI (`.github/workflows/ci.yml`): lint (ruff, mypy), the unit tests and both image builds. Pushes to `dev` and `main` and `vX.Y.Z` tags also publish the images to GHCR. Changes merge into `dev` and reach production in a release from `dev` into `main` (docs/adr/0001). The database and contract tests skip there because they need a copy of a real database; run them locally (§9) before merging anything that touches queries.
 
@@ -741,8 +749,8 @@ services/worker/archive_worker/   monitor, job runner, steps/, hls, ffmpeg, yout
 migrations/                       Alembic (0000 legacy baseline, 0001 jobs/app_state/log indexes, 0002 jobs.not_before, 0003 manual step control, … 0007 VOD merges and splits, 0008 bot chat, 0009 admin sessions, 0010 hidden VODs, 0011 runtime settings, 0012 vex-platform jobs schema + audit_log)
 tests/api_contract/               golden responses from the legacy API + replay tests
 tests/worker/                     HLS parsing, planning, capture (respx), ffmpeg, DB-backed steps/runner
-deploy/                           roles.sql, apply-roles.sh
-secrets.example/                  the secrets files compose mounts, and admin.env
+deploy/                           roles.sql, which compose's roles step runs
+secrets.example/                  the secrets files compose mounts
 Dockerfile                        both images, as targets: --target api, --target worker
 docs/adr/                         architecture decisions
 ```
