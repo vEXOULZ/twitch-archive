@@ -39,6 +39,7 @@ from .status import stream_status
 from .third_party_emotes import fetch_third_party_emotes
 
 log = logging.getLogger("archive_api")
+READY_TIMEOUT_S = 5  # /readyz: a database slower than this counts as down
 
 # Legacy: the limiter covered /vods and the custom routes, not /games /emotes /streams.
 RATE_LIMITED_PREFIXES = ("/vods", "/v1/", "/v2/")
@@ -134,9 +135,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/readyz")
     async def readyz():  # type: ignore[no-untyped-def]
-        """Readiness: the database answers too. 503 with the error's type when it doesn't."""
+        """Readiness: the database answers too, within READY_TIMEOUT_S. 503 with the error's type when it
+        doesn't."""
         try:
-            async with engine.connect() as conn:
+            async with asyncio.timeout(READY_TIMEOUT_S), engine.connect() as conn:
                 await conn.execute(text("select 1"))
         except Exception as exc:
             log.warning("not ready: database %s", type(exc).__name__)
