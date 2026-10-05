@@ -324,7 +324,7 @@ class RuntimeSetting(Base):
 
 
 class SiteSetting(Base):
-    """A setting of the site (vods.vexoulz.net) edited from its admin pages (Alembic 0018); ``tags``:
+    """A setting of the site (vods.vexoul.net) edited from its admin pages (Alembic 0018); ``tags``:
     how each VOD tag shows (see site_tags)."""
 
     __tablename__ = "site_settings"
