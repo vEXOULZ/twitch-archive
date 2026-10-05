@@ -548,14 +548,26 @@ def create_admin_app(
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
-        async with get_sessionmaker()() as s:
-            await s.execute(text("select 1"))
+        """Liveness: the process answers. No dependency checks."""
+        return {"status": "ok", "runningJobs": service.running}
+
+    @app.get("/readyz", response_model=None)
+    async def readyz() -> dict[str, Any] | JSONResponse:
+        """Readiness: the database answers too. 503 with the error's type when it doesn't."""
+        try:
+            async with get_sessionmaker()() as s:
+                await s.execute(text("select 1"))
+        except Exception as exc:
+            log.warning("not ready: database %s", type(exc).__name__)
+            body = {"status": "unavailable", "error": f"database: {type(exc).__name__}", "runningJobs": service.running}
+            return JSONResponse(body, status_code=503)
         return {"status": "ok", "runningJobs": service.running}
 
     async def api_ok() -> bool:
+        """Whether the api can serve: its /readyz, which checks its database too."""
         url = (settings.api_internal_url or f"http://127.0.0.1:{settings.api_port}").rstrip("/")
         try:
-            resp = await http.get_client().get(f"{url}/healthz", timeout=3)
+            resp = await http.get_client().get(f"{url}/readyz", timeout=3)
             return resp.status_code == 200
         except Exception:  # connection refused, timeout, ...
             return False
