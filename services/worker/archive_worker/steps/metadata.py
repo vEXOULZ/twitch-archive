@@ -31,6 +31,15 @@ async def vod_duration(ctx: JobContext, vod: Vod | None = None) -> float:
     return float(ctx.payload.get("duration") or hhmmss_to_seconds(vod.duration))
 
 
+def file_chapters(ctx: JobContext, vod: Vod) -> list[dict[str, Any]] | None:
+    """The VOD's chapters on the timeline of the job's file. A live recording's differs (see
+    planning.recording_timeline); one recorded before timelines were saved keeps the VOD's."""
+    timeline = ctx.payload.get("timeline")
+    if ctx.video_type != "live" or not timeline:
+        return vod.chapters
+    return planning.chapters_on_recording(vod.chapters, vod.created_at.timestamp(), timeline)
+
+
 # ── Chapters ──────────────────────────────────────────────────────────────
 
 
