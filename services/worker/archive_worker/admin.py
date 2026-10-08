@@ -613,6 +613,7 @@ def create_admin_app(
                 "authorized": yt["authorized"],
                 "valid": yt["valid"],
                 "error": yt.get("error"),
+                "channel": yt.get("channel"),
                 "checkedAt": iso_utc(yt["checkedAt"]),
             },
             "live": {

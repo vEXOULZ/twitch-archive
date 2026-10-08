@@ -223,7 +223,7 @@ To handle the first case and detect the others early, the worker has a keep-aliv
 - `YouTube token refreshed (keep-alive)`: all good.
 - `ERROR ... YouTube token is not usable (RefreshError: invalid_grant ...)`: run Option B again before the next stream ends.
 
-`GET /admin/youtube/status` does the same refresh on demand and returns `{"authorized": true, "valid": true, "accessTokenExpiry": "..."}`, or `{"authorized": ..., "valid": false, "error": "..."}`. `authorized` means a refresh token is stored. `valid` means Google accepted it just now.
+`GET /admin/youtube/status` does the same refresh on demand and returns `{"authorized": true, "valid": true, "accessTokenExpiry": "...", "channel": {"id": "UC…", "title": "...", "url": "https://www.youtube.com/@…"}}`, or `{"authorized": ..., "valid": false, "error": "..."}`. `authorized` means a refresh token is stored. `valid` means Google accepted it just now and the account has a YouTube channel to upload to: `channel` is that channel (one quota unit per check), and `null` with `valid: false` when the account has none, which uploads would refuse with `youtubeSignupRequired`. If the channel lookup itself fails (quota, network), `channel` is left out and `valid` stands. `/admin/health`'s `youtube` carries the same `channel`.
 
 ---
 
