@@ -13,7 +13,7 @@ import httpx
 from archive_common import http
 from archive_common.timeutil import format_hhmmss
 
-from .. import hls
+from .. import hls, planning
 from ..context import JobContext, StepError
 
 SEGMENT_RETRY_STATUSES = (403, 429, 500, 502, 503, 504)  # Twitch lists segments before they are ready
@@ -204,6 +204,12 @@ async def _live_variant(ctx: JobContext, login: str) -> str | None:
     return (source or max(variants, key=lambda v: v.bandwidth)).uri
 
 
+def _load_times(path: Path) -> list[tuple[float, float | None]]:
+    """(duration, wall-clock start) of each recorded segment; None in entries saved before it was."""
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    return [(e["duration"], e.get("pdt")) for e in (json.loads(line) for line in lines if line.strip())]
+
+
 def _load_entries(path: Path) -> list[tuple[str, float, bool]]:
     if not path.exists():
         return []
@@ -290,7 +296,9 @@ async def live_record(ctx: JobContext) -> None:
                     ctx.log.warning("live segment %s failed: %s", seg.sequence, failed[name])
                     pending_disc = True
                     continue
-                index.write(json.dumps({"name": name, "duration": seg.duration, "disc": pending_disc}) + "\n")
+                pdt = seg.pdt.timestamp() if seg.pdt else None
+                entry = {"name": name, "duration": seg.duration, "disc": pending_disc, "pdt": pdt}
+                index.write(json.dumps(entry) + "\n")
                 index.flush()
                 pending_disc = False
 
@@ -313,7 +321,9 @@ async def live_record(ctx: JobContext) -> None:
     playlist = hls.write_local_playlist(entries, init_name=init_name)
     (d / "index.m3u8").write_text(playlist, encoding="utf-8")
     ctx.payload["fmp4"] = bool(init_name)
-    ctx.log.info("live recording finished: %d segments", len(entries))
+    timeline = planning.recording_timeline(_load_times(index_file))
+    ctx.payload["timeline"] = timeline  # where the VOD's chapters are in the recording (split, describe)
+    ctx.log.info("live recording finished: %d segments in %d stretch(es) without a gap", len(entries), len(timeline))
 
 
 async def _still_live(ctx: JobContext, stream_id: str | None = None) -> bool:

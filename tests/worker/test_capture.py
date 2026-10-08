@@ -128,6 +128,43 @@ async def test_live_record_skips_ads_and_handles_rollover(make_ctx, settings, mo
     assert names == ["000000010.ts", "000000011.ts", "000000013.ts"]
     # the ad break becomes a discontinuity before the next real segment
     assert "#EXT-X-DISCONTINUITY\n#EXTINF:2.000,\n000000013.ts" in text
+    assert ctx.payload["timeline"] == []  # the playlists carry no program date-times
+
+
+def _timed(text: str, times: dict[str, str]) -> str:
+    for uri, at in times.items():
+        text = text.replace(f"#EXTINF:2.000,live\n{uri}", f"#EXT-X-PROGRAM-DATE-TIME:{at}\n#EXTINF:2.000,live\n{uri}")
+    return text
+
+
+@respx.mock
+async def test_live_record_saves_where_its_gaps_are(make_ctx, settings, monkeypatch):
+    settings.live_poll_interval_seconds = 0
+    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexoulz"})
+
+    async def no_save():
+        return None
+
+    monkeypatch.setattr(ctx, "save", no_save)
+    respx.post(GQL_URL).mock(side_effect=_token_response)
+    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexoulz.m3u8").respond(
+        200, text='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,VIDEO="chunked"\nhttps://edge.example/live.m3u8\n'
+    )
+    times = {
+        "https://edge.example/s10.ts": "2026-10-08T12:00:00Z",
+        "https://edge.example/s13.ts": "2026-10-08T12:00:30Z",  # after the ad break
+    }
+    respx.get("https://edge.example/live.m3u8").mock(
+        side_effect=[httpx.Response(200, text=_timed(LIVE_1, times)), httpx.Response(200, text=_timed(LIVE_2, times))]
+    )
+    for n in (10, 11, 13):
+        respx.get(f"https://edge.example/s{n}.ts").respond(200, content=f"seg{n}".encode())
+    respx.get("https://edge.example/ad.ts").respond(200, content=b"ad")
+
+    await cap.live_record(ctx)
+
+    t0 = 1_791_460_800.0  # 2026-10-08T12:00:00Z; s11 follows s10 without a time of its own
+    assert ctx.payload["timeline"] == [[0.0, t0, 4.0], [4.0, t0 + 30, 2.0]]
 
 
 @respx.mock
