@@ -108,7 +108,16 @@ async def exchange_code(settings: Settings, code: str) -> dict[str, Any]:
     if "refresh_token" not in data:
         existing = await load_token() or {}
         data["refresh_token"] = existing.get("refresh_token")
-    token = {"refresh_token": data["refresh_token"], "token": data.get("access_token"), "scopes": SCOPES}
+    now = dt.datetime.now(dt.UTC)
+    # Google sends refresh_token_expires_in only for a time-limited grant; connectedAt dates the token either way.
+    lifetime = data.get("refresh_token_expires_in")
+    token = {
+        "refresh_token": data["refresh_token"],
+        "token": data.get("access_token"),
+        "scopes": SCOPES,
+        "connectedAt": now.isoformat(),
+        "refreshTokenExpiresAt": (now + dt.timedelta(seconds=int(lifetime))).isoformat() if lifetime else None,
+    }
     await save_token(token)
     return token
 
@@ -182,12 +191,19 @@ class YouTube:
         except Exception as exc:  # RefreshError (invalid_grant) or network trouble
             self._creds = None
             return {"authorized": True, "valid": False, "error": f"{type(exc).__name__}: {exc}"}
+        token = await load_token() or {}
         if creds.refresh_token and creds.refresh_token != stored_refresh:
             # Google rarely rotates refresh tokens, but keep the new one if it does.
-            token = await load_token() or {}
             await save_token({**token, "refresh_token": creds.refresh_token, "token": creds.token})
         expiry = creds.expiry.replace(tzinfo=dt.UTC).isoformat() if creds.expiry else None
-        result: dict[str, Any] = {"authorized": True, "valid": True, "accessTokenExpiry": expiry}
+        result: dict[str, Any] = {
+            "authorized": True,
+            "valid": True,
+            "accessTokenExpiry": expiry,
+            # None for a token imported from the legacy config, which never recorded either.
+            "connectedAt": token.get("connectedAt"),
+            "refreshTokenExpiresAt": token.get("refreshTokenExpiresAt"),
+        }
         # A token that refreshes can still be for an account with no channel, which can't upload.
         try:
             channel = await self.own_channel()

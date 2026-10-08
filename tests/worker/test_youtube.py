@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from archive_common import http
 from archive_worker import youtube
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
@@ -69,6 +70,8 @@ async def test_check_always_refreshes_and_keeps_rotated_token(yt, monkeypatch):
         "authorized": True,
         "valid": True,
         "accessTokenExpiry": "2030-01-01T00:00:00+00:00",
+        "connectedAt": None,
+        "refreshTokenExpiresAt": None,
         "channel": CHANNEL,
     }
     assert yt.stored["token"]["refresh_token"] == "r2"
@@ -91,6 +94,33 @@ def _fresh(monkeypatch):
         self.token = "fresh"
 
     monkeypatch.setattr(Credentials, "refresh", refresh)
+
+
+async def test_check_reports_when_the_token_was_connected(yt, monkeypatch):
+    when = {"connectedAt": "2026-10-01T12:00:00+00:00", "refreshTokenExpiresAt": "2026-10-08T12:00:00+00:00"}
+    yt.stored["token"] = {"refresh_token": "r1", "token": "stale", "scopes": None, **when}
+    _fresh(monkeypatch)
+    monkeypatch.setattr(yt, "own_channel", _returns(CHANNEL))
+    result = await yt.check()
+    assert result["connectedAt"] == when["connectedAt"]
+    assert result["refreshTokenExpiresAt"] == when["refreshTokenExpiresAt"]
+
+
+@pytest.mark.parametrize(("reply", "lifetime"), [({"refresh_token_expires_in": 604799}, 604799), ({}, None)])
+async def test_exchange_code_dates_the_token(yt, settings, monkeypatch, reply, lifetime):
+    async def request(method, url, **kwargs):
+        return SimpleNamespace(json=lambda: {"access_token": "a", "refresh_token": "r", "expires_in": 3599, **reply})
+
+    monkeypatch.setattr(http, "request", request)
+    before = dt.datetime.now(dt.UTC)
+    token = await youtube.exchange_code(settings, "code")
+    connected = dt.datetime.fromisoformat(token["connectedAt"])
+    assert before <= connected <= dt.datetime.now(dt.UTC)
+    if lifetime is None:
+        assert token["refreshTokenExpiresAt"] is None
+    else:
+        assert dt.datetime.fromisoformat(token["refreshTokenExpiresAt"]) - connected == dt.timedelta(seconds=lifetime)
+    assert yt.stored["token"] == token
 
 
 async def test_check_flags_an_account_without_a_channel(yt, monkeypatch):

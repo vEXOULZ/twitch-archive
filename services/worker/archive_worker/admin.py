@@ -614,6 +614,8 @@ def create_admin_app(
                 "valid": yt["valid"],
                 "error": yt.get("error"),
                 "channel": yt.get("channel"),
+                "connectedAt": yt.get("connectedAt"),
+                "refreshTokenExpiresAt": yt.get("refreshTokenExpiresAt"),
                 "checkedAt": iso_utc(yt["checkedAt"]),
             },
             "live": {
