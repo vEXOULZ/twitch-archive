@@ -96,10 +96,12 @@ def test_descriptions_are_rebuilt():
 
 
 def test_privacy():
-    assert planning.privacy("vod", public=False, multi_track=False) == "unlisted"
-    assert planning.privacy("vod", public=True, multi_track=False) == "public"
-    assert planning.privacy("vod", public=True, multi_track=True) == "unlisted"
-    assert planning.privacy("live", public=True, multi_track=True) == "public"
+    assert planning.privacy("vod", public=False, live_record=False) == "unlisted"
+    assert planning.privacy("vod", public=True, live_record=False) == "public"
+    assert planning.privacy("live", public=True, live_record=False) == "unlisted"  # an external recorder's copy
+    assert planning.privacy("vod", public=True, live_record=True) == "unlisted"
+    assert planning.privacy("live", public=True, live_record=True) == "public"
+    assert planning.privacy("live", public=False, live_record=True) == "unlisted"
 
 
 def test_upsert_youtube_entry():

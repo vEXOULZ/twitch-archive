@@ -50,18 +50,32 @@ class Entry:
     help: str
     min: float | None = None
     max: float | None = None
+    requires: str | None = None  # a bool setting this one does nothing without
 
 
 ENTRIES = (
     Entry("vod_download", "bool", "Capture", "now", "Archive every stream's Twitch VOD"),
     Entry("chat_download", "bool", "Capture", "next job", "Save the chat replay"),
     Entry("live_record", "bool", "Capture", "now", "Record the live stream itself"),
-    Entry("multi_track", "bool", "Capture", "now", "Upload both the VOD copy and the live copy"),
+    Entry(
+        "multi_track",
+        "bool",
+        "Capture",
+        "now",
+        "Also upload the VOD copy, unlisted, next to the live copy",
+        requires="live_record",
+    ),
     Entry(
         "monitor_interval_seconds", "int", "Capture", "now", "How often Twitch is checked for a live stream", 5, 3600
     ),
     Entry("youtube_upload", "bool", "YouTube", "next job", "Upload to YouTube"),
-    Entry("youtube_public", "bool", "YouTube", "next job", "Public instead of unlisted (for the main copy)"),
+    Entry(
+        "youtube_public",
+        "bool",
+        "YouTube",
+        "next job",
+        "Public instead of unlisted (the main copy: the live one when live_record is on)",
+    ),
     Entry("youtube_description", "text", "YouTube", "next job", "Last line of every description"),
     Entry(
         "youtube_keepalive_hours",
@@ -187,6 +201,8 @@ class RuntimeSettings:
             }
             if e.type == "steps":
                 item["choices"] = jobs.KINDS
+            if e.requires:
+                item["requires"] = e.requires
             out.append(item)
         return out
 

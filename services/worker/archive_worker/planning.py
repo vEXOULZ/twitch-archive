@@ -245,10 +245,11 @@ def full_description(
     return text[:5000]
 
 
-def privacy(kind: str, public: bool, multi_track: bool) -> str:
-    if public and ((multi_track and kind == "live") or (not multi_track and kind == "vod")):
-        return "public"
-    return "unlisted"
+def privacy(kind: str, public: bool, live_record: bool) -> str:
+    """``public`` applies to the main copy only: the live copy when live_record is on, the VOD
+    copy otherwise. multi_track only adds the VOD copy as an unlisted second upload."""
+    main = "live" if live_record else "vod"
+    return "public" if public and kind == main else "unlisted"
 
 
 def youtube_thumbnail(video_id: str) -> str:

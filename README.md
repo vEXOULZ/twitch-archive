@@ -135,9 +135,9 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_DOOMTP_LOGIN` | `ARCHIVE_TWITCH_USERNAME` | The channel's login on the bot |
 | `ARCHIVE_DOOMTP_API_KEY` | empty | A read-scope key for the bot's log. With it, moderation entries and removed messages are saved too (flagged `deleted_at`/`cleared_at`); without it, the public log |
 | `ARCHIVE_LIVE_RECORD` † | `false` | Record the live stream itself; see [§5](#5-live-recordings-and-multitrack) |
-| `ARCHIVE_MULTI_TRACK` † | `false` | Upload both the VOD copy and the live copy |
+| `ARCHIVE_MULTI_TRACK` † | `false` | With `LIVE_RECORD`, also upload the VOD copy (unlisted). Ignored when `LIVE_RECORD` is off |
 | `ARCHIVE_YOUTUBE_UPLOAD` † | `true` | |
-| `ARCHIVE_YOUTUBE_PUBLIC` † | `false` | Public instead of unlisted (for the main copy; see §5) |
+| `ARCHIVE_YOUTUBE_PUBLIC` † | `false` | Public instead of unlisted, for the main copy: the live copy when `LIVE_RECORD` is on, the VOD copy otherwise (§5) |
 | `ARCHIVE_YOUTUBE_DESCRIPTION` † | `VOD` | Last line of every description |
 | `ARCHIVE_YOUTUBE_KEEPALIVE_HOURS` † | `24` | How often the worker refreshes the YouTube token; see [§3](#3-youtube-oauth-setup) |
 | `ARCHIVE_RESTRICTED_GAMES` † | `[]` | Chapters of these games are left out of uploads |
@@ -303,7 +303,7 @@ Job kinds and their steps:
 | `archive` | capture → finalize → chapters → chat → emotes → split → upload → describe → previews → cleanup | monitor (stream went live), `/admin/hls/download` |
 | `download` | ensure_source → fetch_vod → finalize → chapters → split → upload → describe → previews → cleanup | `/admin/download` |
 | `reupload` | ensure_source → fetch_vod → finalize → split → upload → describe → previews → cleanup | `/admin/reupload` |
-| `live` | live_record → resolve_vod → finalize → chapters → split → upload → describe → previews → cleanup | monitor (when `LIVE_RECORD=true`) |
+| `live` | live_record → resolve_vod → finalize → chapters → chat → emotes → split → upload → describe → previews → cleanup | monitor (when `LIVE_RECORD=true`) |
 | `live_file` | ensure_source → chapters → split → upload → describe → previews | `/v2/live` |
 | `dmca` | ensure_source → fetch_vod → finalize → dmca_edit → split → upload → describe → previews → cleanup | `/admin/dmca` |
 | `part_dmca` | ensure_source → fetch_vod → finalize → split → dmca_edit → upload → describe → previews → cleanup | `/admin/part/dmca` |
@@ -326,7 +326,7 @@ curl -s "${H[@]}" -X PATCH "$A/admin/settings" -d '{"keep_hls":true,"runner_conc
 curl -s "${H[@]}" -X DELETE "$A/admin/settings/keep_hls"   # back to the env value
 ```
 
-- Keys are the setting names without `ARCHIVE_`, in lower case. `GET` answers `{data: [{key, value, default, overridden, type, group, applies, help, min, max, updatedAt, updatedBy}]}`; `manual_steps` also carries `choices` (every kind's steps). `PATCH` and `DELETE` answer the same.
+- Keys are the setting names without `ARCHIVE_`, in lower case. `GET` answers `{data: [{key, value, default, overridden, type, group, applies, help, min, max, updatedAt, updatedBy}]}`; `manual_steps` also carries `choices` (every kind's steps). `multi_track` carries `requires: "live_record"`: it does nothing while that is off, so the dashboard can disable it. `PATCH` and `DELETE` answer the same.
 - **Types:** `bool`, `int` and `float` (within `min`–`max`), `text`, `list` (names) and `steps` (`{kind: [step, ...]}`, checked like `ARCHIVE_MANUAL_STEPS`). A `PATCH` with any refused value changes nothing (400).
 - **`applies`:** `now` settings are read on every use: the monitor's next check (`vod_download`, `live_record`, `monitor_interval_seconds`), the runner's next pick (`runner_concurrency`, `max_attempts`), the next step boundary (`manual_steps`) and the next token refresh (`youtube_keepalive_hours`). `next job` settings are read when a job starts or resumes, so a running job finishes with what it started with.
 - Both changes are audited with `{before, after}`. Secrets, keys, URLs, paths, the channel and the database are never editable here.
@@ -586,7 +586,7 @@ curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 | `LIVE_RECORD` | `MULTI_TRACK` | Uploaded | `YOUTUBE_PUBLIC=true` makes public |
 |---|---|---|---|
 | false | – | VOD copy | the VOD copy |
-| true | false | **live copy only** (the VOD is still downloaded for chat and chapters) | nothing (the live copy stays unlisted) |
+| true | false | **live copy only**: no `archive` job runs; the `live` job saves the VOD's chapters, chat and emotes | the live copy |
 | true | true | both | the live copy (the VOD copy stays unlisted) |
 
 The frontend (`YoutubeVod.js`) plays `live` entries whenever a VOD has any, and falls back to `vod` entries otherwise. Chat sync works the same way for both.
