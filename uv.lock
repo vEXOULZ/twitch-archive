@@ -124,7 +124,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "archive-common", editable = "packages/common" },
-    { name = "defusedxml", specifier = ">=0.7" },
+    { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "google-api-python-client", specifier = ">=2.140" },
     { name = "google-auth", specifier = ">=2.34" },
