@@ -120,6 +120,8 @@ def test_without_text_or_pattern_the_rest_is_dropped():
         "hwb(120 10% 20%)",
         "oklch(from var(--vx-accent) calc(l - 0.15) c h)",
         "color-mix(in oklch, var(--vx-ok) 60%, white)",
+        "var(--k-accent)",  # any site's theme tokens
+        "oklch(from var(--k-ok) calc(l - 0.1) c h)",
         "color(display-p3 1 0 0)",
         "rgb(calc(255 * 0.5) max(1, 2) clamp(0, 3, 9))",
         "color-mix(in srgb, color-mix(in srgb, red, blue), rgb(calc(min(1, 2))))",  # 4 deep
@@ -151,9 +153,11 @@ def test_colors_allowed(color):
         "rgb(1) red",
         "red rgb(1)",
         "calc(1 + 2)",
-        "var(--other)",
+        "var(--)",
+        "var(--1x)",
+        "var(--k-a, red)",
         "var(--vx-a, red)",
-        "rgb(var(--x))",
+        "rgb(var(--x) --y)",
         "rgb(1 -- 2)",
         "rgb(v(1))",
         "rgb(" + "1" * 156 + ")",
@@ -188,7 +192,7 @@ def test_colors_refused(color):
         ({"drawn": "yes"}, "drawn"),
         ({"drawn": None}, "drawn"),
         ({"color": "#ggg"}, "color"),
-        ({"color": "var(--other)"}, "color"),
+        ({"color": "var(--other, red)"}, "color"),
         ({"color": "re"}, "color"),
         ({"color": "url(http://x)"}, "color"),
         ({"color": "rgb(1;x:expression(1))"}, "color"),
@@ -215,7 +219,7 @@ def test_colors_refused(color):
         ({"pattern": ""}, "pattern"),
         ({"pattern": "stripes", "patternSize": 1}, "patternSize"),
         ({"pattern": "stripes", "patternSize": 41}, "patternSize"),
-        ({"pattern": "stripes", "patternColor": "var(--x)"}, "patternColor"),
+        ({"pattern": "stripes", "patternColor": "var(--x, red)"}, "patternColor"),
     ],
 )
 def test_refused_field_named(fields, field):
