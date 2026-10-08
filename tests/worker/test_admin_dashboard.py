@@ -575,6 +575,7 @@ async def test_health(vod, app, monkeypatch, respx_mock):
         "authorized": True,
         "valid": False,
         "error": "RefreshError: invalid_grant",
+        "channel": None,
         "checkedAt": "2026-09-25T12:00:00+00:00",
     }
     assert h["live"]["live"] is True and h["live"]["streamId"] == str(STREAM) and h["live"]["startedAt"]
