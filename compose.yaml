@@ -118,6 +118,9 @@ services:
     build: { context: ., target: worker }
     image: ghcr.io/vexoulz/twitch-archive-worker:${TAG:-main}
     env_file: [.env]
+    environment:
+      # /admin/health's check of the api. The setting's own default, 127.0.0.1, is this container.
+      ARCHIVE_API_INTERNAL_URL: ${ARCHIVE_API_INTERNAL_URL:-http://api:${ARCHIVE_API_PORT:-3030}}
     secrets:
       - { source: worker_database_url, target: archive_database_url }
       - archive_twitch_client_secret
