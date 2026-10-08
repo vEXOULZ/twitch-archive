@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import secrets
+import time
 from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlencode
@@ -1360,11 +1361,20 @@ def create_admin_app(
 
     # ── YouTube OAuth ─────────────────────────────────────────────────────
 
+    # Who started each consent flow, by its state, so the callback (which has no session) can audit
+    # the connect as them. In memory: after a restart the connect is audited as the system.
+    connecting: dict[str, tuple[float, Actor]] = {}
+
     @app.get("/admin/youtube/auth", dependencies=auth)
     async def youtube_auth(redirect: bool = False):  # type: ignore[no-untyped-def]
         if not settings.google_client_id:
             raise AdminError(500, "google_client_id is not configured")
-        url = youtube.consent_url(settings)
+        state = youtube.new_state(settings)
+        now = time.monotonic()
+        for key in [k for k, (at, _) in connecting.items() if now - at > 900]:
+            del connecting[key]
+        connecting[state] = (now, _actor.get())
+        url = youtube.consent_url(settings, state)
         if redirect:
             return RedirectResponse(url)
         return {"error": False, "url": url, **await youtube.token_status()}
@@ -1383,8 +1393,18 @@ def create_admin_app(
         # the HMAC-signed ``state`` from /admin/youtube/auth proves the request.
         if not code or not state or not youtube.verify_state(settings, state):
             raise AdminError(403, "Invalid or expired OAuth state; start again at /admin/youtube/auth")
-        await youtube.exchange_code(settings, code)
+        actor = connecting.pop(state, (0.0, SYSTEM))[1]
+        before = youtube.token_summary(await youtube.load_token())
+        if before is not None and deps.youtube.last_check:
+            before["channel"] = deps.youtube.last_check.get("channel")
+        try:
+            token = await youtube.exchange_code(settings, code)
+        except Exception as exc:
+            await youtube.audit_connect(actor, before, None, error=f"{type(exc).__name__}: {exc}")
+            raise
         status = await deps.youtube.check()
+        after = {**(youtube.token_summary(token) or {}), "channel": status.get("channel")}
+        await youtube.audit_connect(actor, before, after, error=None if status["valid"] else status["error"])
         if not status["valid"]:
             raise AdminError(500, f"Token stored but not usable: {status['error']}")
         return _ok("YouTube authorized. You can close this tab.")
