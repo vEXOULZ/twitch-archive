@@ -579,6 +579,7 @@ curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 3. Twitch ad segments (stitched-ad `DATERANGE`s and `Amazon` segments) are skipped and turned into discontinuities. If the connection drops, the recorder reconnects with a new token.
 4. The recording ends when the playlist ends, or when no new segments have appeared for about 3 minutes and Helix confirms the stream is over.
 5. `resolve_vod` attaches the recording to the stream's VOD row. After that the job runs finalize → chapters → split → upload as `type: "live"`, with the title `… Twitch Live VOD - YYYY-MM-DD`.
+6. The recording is not on the VOD's timeline: it starts after the stream does, and ad breaks and reconnects leave holes in it. The recorder saves each segment's `EXT-X-PROGRAM-DATE-TIME` in `hls/segments.jsonl`, and the job keeps the stretches recorded without a gap in `payload.timeline` (`[recording start, wall-clock start, length]`). `split` and `describe` move the VOD's chapters onto the recording through it (VOD time is wall-clock time since the VOD's `createdAt`), so restricted games are cut, and the description's chapters placed, where they are in the recording. A chapter boundary that falls in a hole moves to the hole's end. Recordings made before timelines were saved, and `live` jobs without a recording (reupload, DMCA), use the VOD's chapters as they are.
 
 **Which copies are uploaded:**
 

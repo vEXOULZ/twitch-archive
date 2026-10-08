@@ -1,3 +1,5 @@
+import datetime as dt
+
 from archive_worker import hls
 
 MASTER = """#EXTM3U
@@ -133,3 +135,20 @@ def test_write_local_playlist():
     assert '#EXT-X-MAP:URI="init.mp4"' in text
     assert "#EXT-X-DISCONTINUITY\n#EXTINF:12.400,\nb.ts" in text
     assert text.endswith("#EXT-X-ENDLIST\n")
+
+
+def test_segments_carry_their_wall_clock_start():
+    pl = hls.parse_media(LIVE_WITH_ADS)
+    start = dt.datetime(2026, 2, 21, 3, tzinfo=dt.UTC)
+    assert [s.pdt for s in pl.segments] == [start + dt.timedelta(seconds=n) for n in (0, 2, 4, 6, 8)]
+
+
+def test_an_untimed_segment_continues_the_one_before():
+    text = (
+        "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-PROGRAM-DATE-TIME:2026-02-21T03:00:00\n"
+        "#EXTINF:2.000,live\na.ts\n#EXTINF:2.500,live\nb.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:2.000,live\nc.ts\n"
+    )
+    a, b, c = hls.parse_media(text).segments
+    assert a.pdt == dt.datetime(2026, 2, 21, 3, tzinfo=dt.UTC)  # no zone: UTC
+    assert b.pdt == a.pdt + dt.timedelta(seconds=2)
+    assert c.pdt is None  # after a discontinuity the time is not known

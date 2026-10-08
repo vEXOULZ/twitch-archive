@@ -13,7 +13,7 @@ from .. import ffmpeg, planning
 from ..context import JobContext, StepError
 from ..vods import upsert_vod, vod_id_for_stream
 from .capture import capture
-from .metadata import vod_duration
+from .metadata import file_chapters, vod_duration
 
 
 async def resolve_vod(ctx: JobContext) -> None:
@@ -110,7 +110,7 @@ async def split(ctx: JobContext) -> None:
     s = ctx.settings
     vod = await ctx.get_vod()
     duration = await vod_duration(ctx, vod)
-    all_parts = planning.plan_parts(duration, vod.chapters, s.restricted_games, s.split_duration)
+    all_parts = planning.plan_parts(duration, file_chapters(ctx, vod), s.restricted_games, s.split_duration)
     if not all_parts:
         raise StepError("nothing to upload (VOD is empty or entirely restricted)")
     parts = planning.select_parts(all_parts, ctx.payload.get("start_part"), ctx.payload.get("end_part"))
