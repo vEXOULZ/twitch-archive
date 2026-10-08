@@ -1,10 +1,12 @@
 import datetime as dt
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from archive_worker import youtube
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
+from googleapiclient.errors import HttpError
 from pydantic import SecretStr
 
 
@@ -60,10 +62,109 @@ async def test_check_always_refreshes_and_keeps_rotated_token(yt, monkeypatch):
         self.expiry = dt.datetime(2030, 1, 1)
 
     monkeypatch.setattr(Credentials, "refresh", refresh)
+    monkeypatch.setattr(yt, "own_channel", _returns(CHANNEL))
     result = await yt.check()
     assert calls == ["r1"]
-    assert result == {"authorized": True, "valid": True, "accessTokenExpiry": "2030-01-01T00:00:00+00:00"}
+    assert result == {
+        "authorized": True,
+        "valid": True,
+        "accessTokenExpiry": "2030-01-01T00:00:00+00:00",
+        "channel": CHANNEL,
+    }
     assert yt.stored["token"]["refresh_token"] == "r2"
+
+
+CHANNEL = {"id": "UC123", "title": "keeki", "url": "https://www.youtube.com/@keeki"}
+
+
+def _returns(value):
+    async def fn():
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    return fn
+
+
+def _fresh(monkeypatch):
+    def refresh(self, request):
+        self.token = "fresh"
+
+    monkeypatch.setattr(Credentials, "refresh", refresh)
+
+
+async def test_check_flags_an_account_without_a_channel(yt, monkeypatch):
+    yt.stored["token"] = {"refresh_token": "r1", "token": "stale", "scopes": None}
+    _fresh(monkeypatch)
+    monkeypatch.setattr(yt, "own_channel", _returns(None))
+    result = await yt.check()
+    assert result["authorized"] is True and result["valid"] is False and result["channel"] is None
+    assert result["error"] == youtube.NO_CHANNEL
+
+
+async def test_check_stays_valid_when_the_channel_lookup_fails(yt, monkeypatch):
+    yt.stored["token"] = {"refresh_token": "r1", "token": "stale", "scopes": None}
+    _fresh(monkeypatch)
+    monkeypatch.setattr(yt, "own_channel", _returns(OSError("down")))
+    result = await yt.check()
+    assert result["valid"] is True and "channel" not in result
+
+
+class _Channels:
+    def __init__(self, outcome):
+        self.outcome = outcome
+
+    def channels(self):
+        return self
+
+    def list(self, **params):
+        assert params == {"part": "snippet", "mine": True}
+        return self
+
+    def execute(self):
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (
+            {"items": [{"id": "UC123", "snippet": {"title": "keeki", "customUrl": "@keeki"}}]},
+            CHANNEL,
+        ),
+        (
+            {"items": [{"id": "UC123", "snippet": {"title": "keeki", "customUrl": "oldname"}}]},
+            {"id": "UC123", "title": "keeki", "url": "https://www.youtube.com/channel/UC123"},
+        ),
+        ({"items": []}, None),
+        ({}, None),
+    ],
+)
+async def test_own_channel(yt, monkeypatch, response, expected):
+    async def service():
+        return _Channels(response)
+
+    monkeypatch.setattr(yt, "_service", service)
+    assert await yt.own_channel() == expected
+
+
+async def test_own_channel_signup_required_is_no_channel(yt, monkeypatch):
+    content = b'{"error": {"errors": [{"reason": "youtubeSignupRequired"}], "message": "Unauthorized"}}'
+    signup = HttpError(SimpleNamespace(status=401, reason="Unauthorized"), content)
+    other = HttpError(
+        SimpleNamespace(status=403, reason="Forbidden"), b'{"error": {"errors": [{"reason": "quotaExceeded"}]}}'
+    )
+
+    async def service(outcome):
+        return _Channels(outcome)
+
+    monkeypatch.setattr(yt, "_service", lambda: service(signup))
+    assert await yt.own_channel() is None
+    monkeypatch.setattr(yt, "_service", lambda: service(other))
+    with pytest.raises(HttpError):
+        await yt.own_channel()
 
 
 async def test_check_unconfigured(settings):

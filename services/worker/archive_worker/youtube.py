@@ -40,6 +40,12 @@ CHUNK = 64 * 1024 * 1024
 RETRIABLE_STATUS = {500, 502, 503, 504}
 
 
+NO_CHANNEL = (
+    "This Google account has no YouTube channel. Create one on youtube.com, or connect again and pick the "
+    "channel's own (brand) account."
+)
+
+
 class YouTubeNotAuthorized(RuntimeError):
     pass
 
@@ -181,7 +187,36 @@ class YouTube:
             token = await load_token() or {}
             await save_token({**token, "refresh_token": creds.refresh_token, "token": creds.token})
         expiry = creds.expiry.replace(tzinfo=dt.UTC).isoformat() if creds.expiry else None
-        return {"authorized": True, "valid": True, "accessTokenExpiry": expiry}
+        result: dict[str, Any] = {"authorized": True, "valid": True, "accessTokenExpiry": expiry}
+        # A token that refreshes can still be for an account with no channel, which can't upload.
+        try:
+            channel = await self.own_channel()
+        except Exception as exc:  # quota or network trouble: the token is still fine, so say nothing
+            log.warning("YouTube channel lookup failed: %s", exc)
+            return result
+        if channel is None:
+            return {**result, "valid": False, "channel": None, "error": NO_CHANNEL}
+        return {**result, "channel": channel}
+
+    async def own_channel(self) -> dict[str, str] | None:
+        """The channel uploads go to (the connected account's own), or None if the account has none.
+        One quota unit."""
+        service = await self._service()  # type: ignore[no-untyped-call]
+        try:
+            resp = await asyncio.to_thread(service.channels().list(part="snippet", mine=True).execute)
+        except HttpError as exc:
+            if "youtubeSignupRequired" in str(exc):
+                return None
+            raise
+        items = resp.get("items") or []
+        if not items:
+            return None
+        channel_id = items[0]["id"]
+        snippet = items[0].get("snippet") or {}
+        handle = snippet.get("customUrl") or ""
+        # A handle ("@name") has a URL of its own; an old custom URL may not, so the id is safer then.
+        path = handle if handle.startswith("@") else f"channel/{channel_id}"
+        return {"id": channel_id, "title": snippet.get("title") or channel_id, "url": f"https://www.youtube.com/{path}"}
 
     async def keepalive(self) -> None:
         """Refresh the token every ``youtube_keepalive_hours`` while uploads are on (never returns).
