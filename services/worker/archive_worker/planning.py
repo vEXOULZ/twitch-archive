@@ -83,6 +83,57 @@ def is_restricted(chapter: dict[str, Any], restricted_games: list[str]) -> bool:
     return bool(chapter.get("restricted")) or (chapter.get("name") in restricted_games)
 
 
+# ── Live recordings ───────────────────────────────────────────────────────
+#
+# A live recording is not on the VOD's timeline: it starts after the stream does, and ad breaks,
+# reconnects and restarts leave holes in it. Its ``timeline`` maps it to wall-clock time, from the
+# segments' EXT-X-PROGRAM-DATE-TIME: [recording start, wall-clock start (epoch s), length] for each
+# stretch recorded without a gap. The VOD's own time is wall-clock time since ``vods.created_at``.
+
+TIMELINE_TOLERANCE = 1.0  # seconds of clock jitter between segments that are not a gap
+
+
+def recording_timeline(segments: list[tuple[float, float | None]]) -> list[list[float]]:
+    """(duration, wall-clock start or None) of each recorded segment, in order -> the spans.
+    An untimed segment continues the span before it; none timed at all (old recordings) gives []."""
+    spans: list[list[float]] = []
+    rec = 0.0
+    for duration, wall in segments:
+        if spans and (wall is None or abs(wall - (spans[-1][1] + spans[-1][2])) <= TIMELINE_TOLERANCE):
+            spans[-1][2] += duration
+        elif wall is not None:
+            spans.append([rec, wall, duration])
+        rec += duration
+    return [[round(r, 3), round(w, 3), round(n, 3)] for r, w, n in spans]
+
+
+def recording_time(vod_seconds: float, vod_start: float, timeline: list[list[float]]) -> float:
+    """Where ``vod_seconds`` into the VOD is in the recording. A moment that was not recorded
+    maps to the next one that was (the recording's end, past the last)."""
+    wall = vod_start + vod_seconds
+    for rec, start, length in timeline:
+        if wall < start:
+            return rec
+        if wall <= start + length:
+            return rec + (wall - start)
+    rec, _, length = timeline[-1]
+    return rec + length
+
+
+def chapters_on_recording(
+    chapters: list[dict[str, Any]] | None, vod_start: float, timeline: list[list[float]]
+) -> list[dict[str, Any]]:
+    """The VOD's chapters moved onto a live recording; one that was not recorded at all is left out."""
+    out = []
+    for ch in chapters or []:
+        s = float(ch.get("start") or 0)
+        a = recording_time(s, vod_start, timeline)
+        b = recording_time(s + float(ch.get("end") or 0), vod_start, timeline)
+        if b > a:
+            out.append(ch | {"duration": format_hhmmss(a), "start": num_seconds(a), "end": num_seconds(b - a)})
+    return out
+
+
 # ── Parts ─────────────────────────────────────────────────────────────────
 
 
@@ -194,10 +245,11 @@ def full_description(
     return text[:5000]
 
 
-def privacy(kind: str, public: bool, multi_track: bool) -> str:
-    if public and ((multi_track and kind == "live") or (not multi_track and kind == "vod")):
-        return "public"
-    return "unlisted"
+def privacy(kind: str, public: bool, live_record: bool) -> str:
+    """``public`` applies to the main copy only: the live copy when live_record is on, the VOD
+    copy otherwise. multi_track only adds the VOD copy as an unlisted second upload."""
+    main = "live" if live_record else "vod"
+    return "public" if public and kind == main else "unlisted"
 
 
 def youtube_thumbnail(video_id: str) -> str:

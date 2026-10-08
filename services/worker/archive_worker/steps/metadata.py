@@ -31,6 +31,21 @@ async def vod_duration(ctx: JobContext, vod: Vod | None = None) -> float:
     return float(ctx.payload.get("duration") or hhmmss_to_seconds(vod.duration))
 
 
+async def twitch_vod_duration(ctx: JobContext, vod: Vod) -> float:
+    """The Twitch VOD's length. A live job's own file is its recording, which is shorter."""
+    seconds = hhmmss_to_seconds(vod.duration) if ctx.video_type == "live" else 0
+    return float(seconds) if seconds else await vod_duration(ctx, vod)
+
+
+def file_chapters(ctx: JobContext, vod: Vod) -> list[dict[str, Any]] | None:
+    """The VOD's chapters on the timeline of the job's file. A live recording's differs (see
+    planning.recording_timeline); one recorded before timelines were saved keeps the VOD's."""
+    timeline = ctx.payload.get("timeline")
+    if ctx.video_type != "live" or not timeline:
+        return vod.chapters
+    return planning.chapters_on_recording(vod.chapters, vod.created_at.timestamp(), timeline)
+
+
 # ── Chapters ──────────────────────────────────────────────────────────────
 
 
@@ -43,7 +58,7 @@ async def chapters(ctx: JobContext) -> None:
     if vod.chapters_locked and ctx.payload.get("force") is not True:
         ctx.log.info("chapters of %s were edited by hand (locked); keeping them", vod_id)
         return
-    duration = await vod_duration(ctx, vod)
+    duration = await twitch_vod_duration(ctx, vod)  # chapters are on the VOD's timeline
     edges = await gql.video_moments(vod_id)
     if edges is None:
         ctx.log.warning("no chapter data for %s (VOD deleted?); keeping existing chapters", vod_id)

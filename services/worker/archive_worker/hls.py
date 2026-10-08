@@ -125,6 +125,7 @@ class Segment:
     sequence: int = 0
     discontinuity: bool = False
     ad: bool = False
+    pdt: dt.datetime | None = None  # wall-clock start (EXT-X-PROGRAM-DATE-TIME, or the previous one's end)
 
 
 @dataclass
@@ -177,10 +178,13 @@ def parse_media(text: str) -> MediaPlaylist:
             if seq is None:
                 seq = pl.media_sequence
             is_ad = "Amazon" in title or title.startswith("stitched-ad")
+            t = _parse_date(pdt) if pdt else None
+            prev = pl.segments[-1] if pl.segments else None
+            if t is None and not disc and prev and prev.pdt:
+                t = prev.pdt + dt.timedelta(seconds=prev.duration)
             if not is_ad and pdt and ad_ranges:
-                t = _parse_date(pdt)
                 is_ad = t is not None and any(start <= t < end for start, end in ad_ranges)
-            pl.segments.append(Segment(uri=line, duration=duration, sequence=seq, discontinuity=disc, ad=is_ad))
+            pl.segments.append(Segment(uri=line, duration=duration, sequence=seq, discontinuity=disc, ad=is_ad, pdt=t))
             seq += 1
             duration, title, disc, pdt = None, "", False, None
     return pl
@@ -188,9 +192,10 @@ def parse_media(text: str) -> MediaPlaylist:
 
 def _parse_date(value: str) -> dt.datetime | None:
     try:
-        return dt.datetime.fromisoformat(value)
+        t = dt.datetime.fromisoformat(value)
     except ValueError:
         return None
+    return t if t.tzinfo else t.replace(tzinfo=dt.UTC)
 
 
 # ── Muted segments ────────────────────────────────────────────────────────

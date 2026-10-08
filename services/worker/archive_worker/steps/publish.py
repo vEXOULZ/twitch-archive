@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from .. import ffmpeg, planning
 from ..context import JobContext
-from .metadata import vod_duration
+from .metadata import file_chapters, vod_duration
 
 
 def _publishing_disabled(ctx: JobContext) -> str | None:
@@ -45,7 +45,7 @@ async def upload(ctx: JobContext) -> None:
     vod = await ctx.get_vod()
     total = int(ctx.payload.get("total_parts") or len(ctx.payload["parts"]))
     description = planning.base_description(s.domain_name, vod.id, vod.title, s.youtube_description)
-    status = planning.privacy(ctx.video_type, s.youtube_public, s.multi_track)
+    status = planning.privacy(ctx.video_type, s.youtube_public, s.live_record)
     uploaded: dict[str, dict[str, Any]] = ctx.payload.setdefault("uploaded", {})
 
     parts = ctx.payload["parts"]
@@ -92,12 +92,13 @@ async def describe(ctx: JobContext) -> None:
         ctx.log.info("no %s uploads to describe", ctx.video_type)
         return
     duration = await vod_duration(ctx, vod)
-    windows = {p.number: p for p in planning.plan_parts(duration, vod.chapters, s.restricted_games, s.split_duration)}
+    chapters = file_chapters(ctx, vod)
+    windows = {p.number: p for p in planning.plan_parts(duration, chapters, s.restricted_games, s.split_duration)}
     base = planning.base_description(s.domain_name, vod.id, vod.title, s.youtube_description)
     for entry in entries:
         number = int(entry.get("part") or 1)
         window = windows.get(number)
-        lines = planning.chapter_lines(vod.chapters, window, s.restricted_games) if window else []
+        lines = planning.chapter_lines(chapters, window, s.restricted_games) if window else []
         text = planning.full_description(base, number, entries, lines)
         await ctx.deps.youtube.update_description(entry["id"], text)
         ctx.log.info("described %s part %d", entry["id"], number)

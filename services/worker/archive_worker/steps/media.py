@@ -7,19 +7,24 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from archive_common.timeutil import format_hhmmss
+from archive_common.timeutil import format_hhmmss, parse_helix_duration
 
 from .. import ffmpeg, planning
 from ..context import JobContext, StepError
 from ..vods import upsert_vod, vod_id_for_stream
 from .capture import capture
-from .metadata import vod_duration
+from .metadata import file_chapters, vod_duration
 
 
 async def resolve_vod(ctx: JobContext) -> None:
     """Live jobs start before Twitch has a VOD; attach the vod id by stream id."""
     if ctx.vod_id:
         return
+    await _attach_vod(ctx)
+    await _save_final_duration(ctx)
+
+
+async def _attach_vod(ctx: JobContext) -> None:
     stream_id = str(ctx.payload["stream_id"])
     for _attempt in range(30):
         vod_id = await vod_id_for_stream(stream_id)
@@ -34,6 +39,22 @@ async def resolve_vod(ctx: JobContext) -> None:
             return
         await asyncio.sleep(60)
     raise StepError(f"no Twitch VOD found for stream {stream_id} (VODs disabled on the channel?)")
+
+
+async def _save_final_duration(ctx: JobContext) -> None:
+    """The stream is over, so Helix has the VOD's final length. An archive job measures it from its
+    own file; without one (live_record without multi_track) the row would keep the length it had
+    when the monitor first saw the VOD."""
+    from .. import jobs  # jobs imports the steps
+
+    stream_id = str(ctx.payload["stream_id"])
+    if not ctx.deps.helix.configured or await jobs.exists_any("archive", stream_id=stream_id):
+        return
+    video = await ctx.deps.helix.video_for_stream(ctx.settings.twitch_id, stream_id)
+    seconds = parse_helix_duration((video or {}).get("duration", ""))
+    if seconds:
+        await ctx.update_vod(duration=format_hhmmss(seconds))
+        ctx.log.info("vod %s is %s long", ctx.vod_id, format_hhmmss(seconds))
 
 
 async def finalize(ctx: JobContext) -> None:
@@ -89,7 +110,7 @@ async def split(ctx: JobContext) -> None:
     s = ctx.settings
     vod = await ctx.get_vod()
     duration = await vod_duration(ctx, vod)
-    all_parts = planning.plan_parts(duration, vod.chapters, s.restricted_games, s.split_duration)
+    all_parts = planning.plan_parts(duration, file_chapters(ctx, vod), s.restricted_games, s.split_duration)
     if not all_parts:
         raise StepError("nothing to upload (VOD is empty or entirely restricted)")
     parts = planning.select_parts(all_parts, ctx.payload.get("start_part"), ctx.payload.get("end_part"))

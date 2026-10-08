@@ -96,10 +96,12 @@ def test_descriptions_are_rebuilt():
 
 
 def test_privacy():
-    assert planning.privacy("vod", public=False, multi_track=False) == "unlisted"
-    assert planning.privacy("vod", public=True, multi_track=False) == "public"
-    assert planning.privacy("vod", public=True, multi_track=True) == "unlisted"
-    assert planning.privacy("live", public=True, multi_track=True) == "public"
+    assert planning.privacy("vod", public=False, live_record=False) == "unlisted"
+    assert planning.privacy("vod", public=True, live_record=False) == "public"
+    assert planning.privacy("live", public=True, live_record=False) == "unlisted"  # an external recorder's copy
+    assert planning.privacy("vod", public=True, live_record=True) == "unlisted"
+    assert planning.privacy("live", public=True, live_record=True) == "public"
+    assert planning.privacy("live", public=False, live_record=True) == "unlisted"
 
 
 def test_upsert_youtube_entry():
@@ -131,3 +133,43 @@ def test_plan_dmca():
     assert plan.mute == [(10, 35), (200, 210)]
     assert plan.blackout == [(100, 105), (200, 210)]
     assert planning.plan_dmca([]).empty
+
+
+def test_recording_timeline_splits_at_gaps():
+    t0 = 1_800_000_000.0
+    segments = [(2.0, t0), (2.0, t0 + 2.3), (2.0, None), (2.0, t0 + 30), (2.0, t0 + 32)]
+    # 0.3 s of jitter is not a gap; the untimed segment continues; 22 s of ads is
+    assert planning.recording_timeline(segments) == [[0.0, t0, 6.0], [6.0, t0 + 30, 4.0]]
+    assert planning.recording_timeline([(2.0, None), (2.0, None)]) == []  # recorded before timelines
+
+
+def test_recording_time():
+    t0 = 1_800_000_000.0
+    vod_start = t0 - 60  # the recording started a minute into the stream
+    timeline = [[0.0, t0, 600.0], [600.0, t0 + 720, 300.0]]  # then 2 minutes of ads
+    assert planning.recording_time(0, vod_start, timeline) == 0.0  # before it started: its start
+    assert planning.recording_time(90, vod_start, timeline) == 30.0
+    assert planning.recording_time(700, vod_start, timeline) == 600.0  # in the ad break: after it
+    assert planning.recording_time(800, vod_start, timeline) == 620.0
+    assert planning.recording_time(5000, vod_start, timeline) == 900.0  # past the end: the end
+
+
+def test_restricted_chapters_are_cut_where_they_are_in_the_recording():
+    t0 = 1_800_000_000.0
+    vod_start = t0 - 60
+    timeline = [[0.0, t0, 600.0], [600.0, t0 + 720, 3000.0]]
+    chapters = [
+        planning.chapter("1", "Just Chatting", None, 0, 30, False),  # before the recording started
+        planning.chapter("2", "Celeste", None, 30, 970, False),
+        planning.chapter("3", "Artifact", None, 1000, 600, True),
+        planning.chapter("4", "Celeste", None, 1600, 2180, False),
+    ]
+    moved = planning.chapters_on_recording(chapters, vod_start, timeline)
+    assert [(c["name"], c["start"], c["end"]) for c in moved] == [
+        ("Celeste", 0, 820),
+        ("Artifact", 820, 600),
+        ("Celeste", 1420, 2180),
+    ]
+    assert moved[1]["duration"] == "00:13:40"
+    parts = planning.plan_parts(3600, moved, ["Artifact"], 10800)
+    assert [(p.start, p.end) for p in parts] == [(0, 820), (1420, 3600)]

@@ -85,12 +85,15 @@ KINDS: dict[str, list[str]] = {
         "cleanup",
     ],
     "reupload": ["ensure_source", "fetch_vod", "finalize", "split", "upload", "describe", "previews", "cleanup"],
-    # Recording of the live stream itself (unmuted), uploaded as type "live".
+    # Recording of the live stream itself (unmuted), uploaded as type "live". It saves the VOD's
+    # chat and emotes too: without multi_track no archive job runs for the stream.
     "live": [
         "live_record",
         "resolve_vod",
         "finalize",
         "chapters",
+        "chat",
+        "emotes",
         "split",
         "upload",
         "describe",
