@@ -39,15 +39,15 @@ COLOR_DEPTH = 4
 _I = re.I | re.A  # re.A: [a-z] under re.I would also take "ſ" and the Kelvin sign
 _COLOR_CHARS = re.compile(r"[#0-9a-z.,%\s/()*+-]+", _I)
 _HEX_OR_NAME = re.compile(r"#[0-9a-f]{3,8}|[a-z]{3,20}", _I)
-_TOKEN = re.compile(r"var\(--vx-[a-z0-9-]+\)", _I)
+_TOKEN = re.compile(r"var\(--[a-z][a-z0-9-]*\)", _I)  # any site's theme token, no fallback
 _LEFTOVER = re.compile(r"--|var\(", _I)
 _OUTER = re.compile(r"([a-z-]+)\(", _I)
 _BRACKET = re.compile(r"([a-z-]*)\(|\)", _I)
 
 
 def is_color(value: Any) -> bool:
-    """A hex, a color name, a theme token (``var(--vx-…)``), or one color function around the whole
-    value, holding only theme tokens, color and math functions (at most 4 deep)."""
+    """A hex, a color name, a theme token (``var(--…)``, any site's: ``--vx-ok``, ``--k-ok``), or one color
+    function around the whole value, holding only theme tokens, color and math functions (at most 4 deep)."""
     if not isinstance(value, str) or len(value) > COLOR_MAX or not _COLOR_CHARS.fullmatch(value):
         return False
     if _HEX_OR_NAME.fullmatch(value):
@@ -87,7 +87,7 @@ def _within(value: Any, bounds: tuple[int, int]) -> bool:
     return value is None or (type(value) is int and bounds[0] <= value <= bounds[1])
 
 
-COLOR_RULE = "null or a color: a hex, a color name, var(--vx-…), or a color function (rgb() … oklch(), color-mix())"
+COLOR_RULE = "null or a color: a hex, a color name, var(--…), or a color function (rgb() … oklch(), color-mix())"
 NUMBERS = {
     "width": (SIZE, "px"),
     "height": (SIZE, "px"),
