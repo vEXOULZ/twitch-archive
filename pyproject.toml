@@ -1,6 +1,6 @@
 [project]
 name = "twitch-archive"
-version = "0.10.1"
+version = "0.10.2"
 description = "Twitch stream archiver (worker) + read-only VOD API, Python rewrite of the Feathers archive backend"
 requires-python = ">=3.13"
 dependencies = ["archive-common", "archive-api", "archive-worker"]
