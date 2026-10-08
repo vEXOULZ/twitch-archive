@@ -1686,7 +1686,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "mypy", specifier = ">=1.11" },
+    { name = "mypy", specifier = ">=2.4.0" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
