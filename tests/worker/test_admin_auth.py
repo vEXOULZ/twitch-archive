@@ -1,5 +1,7 @@
 """Browser login for the admin API: password, sessions, CSRF, login rate limit (no database needed)."""
 
+from urllib.parse import parse_qs, urlparse
+
 import httpx
 import pytest
 from archive_worker import jobs, youtube
@@ -235,18 +237,35 @@ async def test_youtube_callback_answers_with_and_without_slash(admin, deps, monk
         r = await c.get(path, params={"state": "1.bad", "code": "c"})
     assert r.status_code == 403
 
-    monkeypatch.setattr(youtube, "verify_state", lambda settings, state: True)
     exchanged = []
+    connects = []
 
     async def exchange(settings, code):
         exchanged.append(code)
+        return {"refresh_token": "new", "token": "a", "connectedAt": "now"}
 
     async def check():
-        return {"authorized": True, "valid": True, "error": None}
+        return {"authorized": True, "valid": True, "error": None, "channel": {"id": "UC1"}}
+
+    async def load():
+        return {"refresh_token": "old", "token": "x"}
+
+    async def audit_connect(actor, before, after, *, error=None):
+        connects.append((actor, before, after, error))
 
     monkeypatch.setattr(youtube, "exchange_code", exchange)
+    monkeypatch.setattr(youtube, "load_token", load)
+    monkeypatch.setattr(youtube, "audit_connect", audit_connect)
     monkeypatch.setattr(deps.youtube, "check", check)
+    deps.settings.google_client_id = "client"
     async with admin() as c:
-        r = await c.get(path, params={"state": "s", "code": "c"})
+        assert (await c.post("/admin/session", json={"password": "correct horse"})).status_code == 200
+        url = (await c.get("/admin/youtube/auth")).json()["url"]
+        state = parse_qs(urlparse(url).query)["state"][0]
+        r = await c.get(path, params={"state": state, "code": "c"})
     assert r.status_code == 200 and r.json()["msg"].startswith("YouTube authorized")
     assert exchanged == ["c"]
+    [(actor, before, after, error)] = connects
+    assert (actor.kind, error) == ("user", None)  # who started the flow, not the system
+    assert before["refreshToken"] == youtube.fingerprint("old")
+    assert after["refreshToken"] == youtube.fingerprint("new") and after["channel"] == {"id": "UC1"}
