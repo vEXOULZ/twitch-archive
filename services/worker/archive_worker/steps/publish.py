@@ -45,7 +45,7 @@ async def upload(ctx: JobContext) -> None:
     vod = await ctx.get_vod()
     total = int(ctx.payload.get("total_parts") or len(ctx.payload["parts"]))
     description = planning.base_description(s.domain_name, vod.id, vod.title, s.youtube_description)
-    status = planning.privacy(ctx.video_type, s.youtube_public, s.multi_track)
+    status = planning.privacy(ctx.video_type, s.youtube_public, s.live_record)
     uploaded: dict[str, dict[str, Any]] = ctx.payload.setdefault("uploaded", {})
 
     parts = ctx.payload["parts"]

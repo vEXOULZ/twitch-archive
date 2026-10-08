@@ -57,6 +57,14 @@ def test_no_secret_or_path_is_editable():
         assert not any(word in key for word in ("secret", "key", "url", "dir", "hash", "password", "database"))
 
 
+def test_requires_names_a_bool_setting(settings):
+    rows = {r["key"]: r for r in RuntimeSettings(settings).describe()}
+    assert rows["multi_track"]["requires"] == "live_record"
+    assert "requires" not in rows["keep_hls"]
+    for e in BY_KEY.values():
+        assert e.requires is None or BY_KEY[e.requires].type == "bool"
+
+
 def test_a_job_keeps_the_settings_it_started_with(deps):
     ctx = JobContext(1, "archive", "1", {}, deps)
     deps.settings.keep_hls = True
