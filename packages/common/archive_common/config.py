@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     admin_auth_client_secret: SecretStr = SecretStr("")
     # This worker's /admin/signin/callback as browsers reach it; registered with vexoulz-auth.
     admin_auth_redirect_url: str = ""
+    # The redirect URI a code from vexoulz-auth's POST /v1/codes carries: the client's first registered
+    # one. Empty = admin_auth_redirect_url.
+    admin_auth_code_redirect_url: str = ""
+    # Site origins (e.g. https://vods.example.net) that may call /admin/session from the browser, with
+    # cookies: CORS answers only them, and a sign-in with a code from any other origin is refused.
+    admin_site_origins: list[str] = []
     # Where /admin/health looks for archive-api; empty = http://127.0.0.1:<api_port>.
     api_internal_url: str = ""
     # GET /admin/vods/{id}/merge-candidates: VODs that started up to this long after one ended.

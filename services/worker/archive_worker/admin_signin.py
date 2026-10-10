@@ -10,6 +10,11 @@ A *quiet* sign-in (``/admin/signin?quiet=1``) is the site checking whether someo
 to the site is an admin: vexoulz-auth answers at once for a signed-in browser, and the callback always
 goes back to ``next`` with ``admin=1`` (a dashboard session was made) or ``admin=0`` (anything else),
 never to the login page.
+
+A *code* sign-in (``POST /admin/session {code}``) needs no redirect at all: the site mints a code with
+vexoulz-auth's ``POST /v1/codes`` from the browser and hands it over, and the worker redeems it like
+the callback's. Such a code carries the client's first registered redirect URI (``code_redirect_uri``),
+not the callback's.
 """
 
 from __future__ import annotations
@@ -64,7 +69,10 @@ class SignedIn:
 class AuthClient(Protocol):
     def authorize_url(self, state: str) -> str: ...
 
-    async def redeem(self, code: str) -> SignedIn: ...
+    async def redeem(self, code: str, fetched: bool = False) -> SignedIn:
+        """The user and session behind ``code``; ``fetched``: minted by ``POST /v1/codes``, not
+        ``/authorize``. Raises SignInError."""
+        ...
 
     async def active(self, sid: str) -> bool:
         """Whether the vexoulz-auth session is still signed in. Raises SignInError if unsure."""
@@ -80,10 +88,12 @@ class VexoulzAuth:
         secret: str,
         redirect_uri: str,
         transport: httpx.AsyncBaseTransport | None = None,
+        code_redirect_uri: str = "",
     ) -> None:
         self.public_url = public_url.rstrip("/")
         self.client_id = client_id
         self.redirect_uri = redirect_uri
+        self.code_redirect_uri = code_redirect_uri or redirect_uri
         self._http = httpx.AsyncClient(
             base_url=(internal_url or public_url).rstrip("/"),
             auth=(client_id, secret),
@@ -102,15 +112,17 @@ class VexoulzAuth:
             settings.admin_auth_client_id,
             secret,
             settings.admin_auth_redirect_url,
+            code_redirect_uri=settings.admin_auth_code_redirect_url,
         )
 
     def authorize_url(self, state: str) -> str:
         query = urlencode({"client_id": self.client_id, "redirect_uri": self.redirect_uri, "state": state})
         return f"{self.public_url}/authorize?{query}"
 
-    async def redeem(self, code: str) -> SignedIn:
+    async def redeem(self, code: str, fetched: bool = False) -> SignedIn:
+        redirect_uri = self.code_redirect_uri if fetched else self.redirect_uri
         try:
-            r = await self._http.post("/v1/token", json={"code": code, "redirect_uri": self.redirect_uri})
+            r = await self._http.post("/v1/token", json={"code": code, "redirect_uri": redirect_uri})
         except httpx.HTTPError as exc:
             raise SignInError(f"vexoulz-auth unreachable: {exc}") from exc
         if r.status_code != 200:
