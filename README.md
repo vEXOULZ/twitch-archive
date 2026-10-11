@@ -108,7 +108,7 @@ In production, non-secret settings go in `.env` (see `.env.example`). Secrets ar
 |---|---|
 | `ARCHIVE_GQL_CLIENT_ID` | `kimne78kx3ncx6brgo4mv6wki5h1ko` (twitch.tv web client) |
 | `ARCHIVE_GQL_BACKUP_CLIENT_ID` | `kd1unb4b3q4t58fwlpcbzcbnm76a8fp` (used for comment cursors and moments) |
-| `ARCHIVE_TWITCH_VIEWER_CLIENT_ID` | `kd1unb4b3q4t58fwlpcbzcbnm76a8fp` (Twitch's Android app: the device flow that [links an ad-free account](#recording-without-ads-a-linked-twitch-account)) |
+| `ARCHIVE_TWITCH_VIEWER_CLIENT_ID` | `ue6666qo983tsx6so1t0vnawi233wa` (Twitch's TV app: the device flow that [links an ad-free account](#recording-without-ads-a-linked-twitch-account)) |
 | `ARCHIVE_GQL_HASH_PLAYBACK_TOKEN` | `ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9` |
 | `ARCHIVE_GQL_HASH_COMMENTS` | `b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a` |
 | `ARCHIVE_GQL_HASH_MOMENTS` | `7399051b2d46f528d5f0eedf8b0db8d485bb1bb4c0a2c6707be6f1290cdcb31a` |
