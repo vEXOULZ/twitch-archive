@@ -1291,6 +1291,11 @@ def create_admin_app(
         """Current global sets onto every emotes row that has none (optionally only ``vodIds``)."""
         return await backfill("global_emotes_backfill", "global emotes", body)
 
+    @app.post("/admin/live-gaps/backfill", dependencies=auth)
+    async def live_gaps_backfill(body: dict[str, Any] | None = Body(None)) -> dict[str, Any]:
+        """``gaps`` on the live uploads saved without them, from their live jobs (optionally only ``vodIds``)."""
+        return await backfill("live_gaps_backfill", "live gaps", body)
+
     @app.post("/admin/bot-chat", dependencies=auth)
     async def bot_chat(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         """Read the VOD's chat from doomtp-bot into bot_logs (adds or updates rows only)."""
