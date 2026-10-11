@@ -37,8 +37,9 @@ from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds, parse_heli
 from fastapi import Body, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy import delete, func, insert, or_, select, text, tuple_, update
+from starlette.middleware.base import RequestResponseEndpoint
 from vex_platform.actor import SYSTEM, Actor
-from vex_platform.api import ApiError
+from vex_platform.api import ApiError, problem
 
 from . import api_v2, api_v2_routes, jobs, site_tags, splices, svg_clean, vod_edits, youtube
 from .admin_auth import (
@@ -82,6 +83,12 @@ SESSION_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite"
 # set over HTTP, so there it goes without. The password only works from the local network anyway.
 LAN_SESSION_COOKIE_ARGS = {**SESSION_COOKIE_ARGS, "secure": False}
 STATE_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite": "lax"}
+SESSION_PATH = "/admin/session"  # the one route a site's page may call from its own origin (CORS)
+CORS_HEADERS = {
+    "Access-Control-Allow-Methods": "GET, POST, DELETE",
+    "Access-Control-Allow-Headers": "Content-Type, X-CSRF-Token",
+    "Access-Control-Max-Age": "600",
+}
 AUDITED_PREFIXES = ("/admin/", "/v2/")
 JOB_ROUTES = "/admin/jobs"  # audited by the runtime (and JobService), not by the request
 YOUTUBE_CHECK_MAX_AGE = 600  # /admin/health refreshes the YouTube token at most this often
@@ -245,6 +252,10 @@ def create_admin_app(
     signin = signin or VexoulzAuth.from_settings(settings)
     twitch_ids = {str(i) for i in settings.admin_twitch_ids}
     pending = PendingStates()
+    site_origins = {o.strip().rstrip("/").lower() for o in settings.admin_site_origins if o.strip()}
+
+    def site_origin(origin: str) -> bool:
+        return origin.rstrip("/").lower() in site_origins
 
     def session_cookie_args(request: Request) -> dict[str, Any]:
         return LAN_SESSION_COOKIE_ARGS if plain_http(request, trusted_proxies) else SESSION_COOKIE_ARGS
@@ -357,6 +368,24 @@ def create_admin_app(
             )
         )
 
+    # ── CORS for /admin/session: the configured site origins only ────────
+
+    @app.middleware("http")
+    async def session_cors(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        origin = request.headers.get("origin")
+        if request.url.path != SESSION_PATH or not origin:
+            return await call_next(request)
+        allowed = {"Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true"}
+        if request.method == "OPTIONS" and "access-control-request-method" in request.headers:
+            if not site_origin(origin):
+                return Response(status_code=403, headers={"Vary": "Origin"})
+            return Response(status_code=204, headers={**allowed, **CORS_HEADERS, "Vary": "Origin"})
+        response = await call_next(request)
+        response.headers.append("Vary", "Origin")
+        if site_origin(origin):
+            response.headers.update(allowed)
+        return response
+
     # ── Session (browser login) ───────────────────────────────────────────
 
     def password_here(request: Request) -> bool:
@@ -378,6 +407,8 @@ def create_admin_app(
 
     @app.post("/admin/session")
     async def login(request: Request, body: dict[str, Any] | None = Body(None)) -> Response:
+        if isinstance(body, dict) and "code" in body:
+            return await code_login(request, body["code"])
         if not passwords.enabled:
             raise AdminError(404, "Password login is off (ARCHIVE_ADMIN_PASSWORD is not set)")
         address = client_address(request, trusted_proxies)
@@ -400,6 +431,47 @@ def create_admin_app(
         request.state.actor = "password"
         response = JSONResponse(session_json(request, session))
         response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **session_cookie_args(request))
+        return response
+
+    def refused(status: int, code: str, detail: str) -> Response:
+        """A code sign-in's refusal, as RFC 9457 problem details."""
+        response: Response = problem(status, code, detail)
+        return response
+
+    async def code_login(request: Request, code: Any) -> Response:
+        """``POST /admin/session {code}``: a Twitch sign-in from a code the site minted with vexoulz-auth's
+        ``POST /v1/codes``, without a redirect. An admin gets the dashboard session the callback would
+        make; anyone else ``{"admin": false}`` and no cookie. Refusals are problem details."""
+        origin = request.headers.get("origin")
+        if origin is not None and not site_origin(origin):
+            log.warning("admin code sign-in refused from origin %s (not in ARCHIVE_ADMIN_SITE_ORIGINS)", origin)
+            return refused(403, "origin_not_allowed", "This origin is not one of ARCHIVE_ADMIN_SITE_ORIGINS")
+        if signin is None:
+            return refused(404, "signin_off", "Twitch sign-in is off (see ARCHIVE_ADMIN_AUTH_* in the README)")
+        if not isinstance(code, str) or not code:
+            return refused(400, "invalid_code", "Missing parameter: code")
+        try:
+            signed_in = await signin.redeem(code, fetched=True)
+        except SignInError as exc:
+            log.warning("admin code sign-in failed (%s): %s", exc.reason, exc)
+            if exc.reason == "expired":
+                return refused(400, "invalid_code", "The code is unknown, expired or already used")
+            if exc.reason == "misconfigured":
+                return refused(502, "misconfigured", "vexoulz-auth refused this worker's client credentials")
+            return refused(503, "unavailable", "vexoulz-auth could not be reached; try again")
+        user_id = str(signed_in.user.get("id", ""))
+        if user_id not in twitch_ids:
+            # Every signed-in viewer's check: not worth a warning.
+            log.info("admin code sign-in: twitch:%s (%s) is not an admin", user_id, signed_in.user.get("login"))
+            return JSONResponse({"admin": False})
+        await passwords.logout(request.cookies.get(SESSION_COOKIE))
+        session = await passwords.login(f"twitch:{user_id}", signed_in.user, signed_in.sid)
+        request.state.actor = session.actor  # audited as session.login, without the code
+        request.state.actor_login = login_of(session)
+        request.state.audit_detail = {"via": "code"}
+        response = JSONResponse({"admin": True, **session_json(request, session)})
+        cookie: dict[str, Any] = SESSION_COOKIE_ARGS  # the callback's: always Secure
+        response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **cookie)
         return response
 
     # ── Twitch sign-in (through vexoulz-auth) ─────────────────────────────

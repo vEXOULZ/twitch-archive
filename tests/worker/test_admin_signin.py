@@ -1,5 +1,6 @@
 """The admin password is local-only; Twitch sign-in through vexoulz-auth (faked here) works from anywhere."""
 
+import json
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -40,6 +41,7 @@ class FakeAuth:
         self.down = False
         self.refuse: str | None = None
         self.checks = 0
+        self.fetched: list[bool] = []  # per redemption: was it a POST /v1/codes code
 
     def authorize_url(self, state: str) -> str:
         return f"https://auth.test/authorize?client_id=vods-admin&state={state}"
@@ -49,7 +51,8 @@ class FakeAuth:
         self.codes[code] = SignedIn(user, sid)
         return code
 
-    async def redeem(self, code: str) -> SignedIn:
+    async def redeem(self, code: str, fetched: bool = False) -> SignedIn:
+        self.fetched.append(fetched)
         if self.down:
             raise SignInError("down")
         if self.refuse:
@@ -57,7 +60,7 @@ class FakeAuth:
         try:
             return self.codes.pop(code)
         except KeyError:
-            raise SignInError("refused") from None
+            raise SignInError("refused", "expired") from None  # invalid_grant
 
     async def active(self, sid: str) -> bool:
         self.checks += 1
@@ -76,6 +79,7 @@ def admin(deps, fake):
     deps.settings.admin_api_key = SecretStr("k")
     deps.settings.admin_password = SecretStr("correct horse")
     deps.settings.admin_twitch_ids = ["100"]
+    deps.settings.admin_site_origins = ["https://vods.test/"]
 
     def client(peer: str = "203.0.113.5", *, networks: list[str] | None = None, signin=fake) -> httpx.AsyncClient:
         if networks is not None:
@@ -265,6 +269,129 @@ async def test_sign_out_everywhere_is_noticed_after_check_interval(deps, fake):
         assert (await c.get("/admin/session")).json()["authenticated"] is False
 
 
+# ── Code sign-in: POST /admin/session {code} ─────────────────────────────
+
+SITE = {"Origin": "https://vods.test"}
+
+
+def problem_code(r: httpx.Response, status: int) -> str:
+    assert r.status_code == status and r.headers["content-type"] == "application/problem+json"
+    assert SESSION_COOKIE not in r.headers.get("set-cookie", "")
+    return r.json()["code"]  # type: ignore[no-any-return]
+
+
+async def test_code_sign_in_makes_the_dashboard_session_for_an_admin(admin, fake):
+    async with admin() as c:
+        r = await c.post("/admin/session", json={"code": fake.approve(ALICE)}, headers=SITE)
+        assert r.status_code == 200 and fake.fetched == [True]  # redeemed with the code's redirect URI
+        body = r.json()
+        assert body["admin"] is True and body["authenticated"] is True and body["user"] == ALICE and body["csrf"]
+        cookie = r.headers["set-cookie"].lower()
+        for attr in (f"{SESSION_COOKIE}=", "httponly", "secure", "samesite=strict", "path=/", "max-age=28800"):
+            assert attr in cookie
+        assert r.headers["access-control-allow-origin"] == "https://vods.test"
+        assert r.headers["access-control-allow-credentials"] == "true" and "Origin" in r.headers["vary"]
+
+        session = (await c.get("/admin/session", headers=SITE)).json()
+        assert session["authenticated"] and session["user"] == ALICE and session["csrf"] == body["csrf"]
+        assert (await c.get("/admin/kinds")).status_code == 200
+        assert (await c.patch("/admin/jobs/1", json={"pauseNext": True})).status_code == 403  # CSRF still applies
+
+
+async def test_code_sign_in_without_an_origin_header_works(admin, fake):
+    async with admin() as c:  # not a browser: nothing for CORS to say
+        r = await c.post("/admin/session", json={"code": fake.approve(ALICE)})
+        assert r.status_code == 200 and r.json()["admin"] is True
+        assert "access-control-allow-origin" not in r.headers
+
+
+async def test_code_sign_in_answers_not_an_admin_without_a_cookie(admin, fake):
+    async with admin() as c:
+        r = await c.post("/admin/session", json={"code": fake.approve(MALLORY)}, headers=SITE)
+        assert r.status_code == 200 and r.json() == {"admin": False}
+        assert "set-cookie" not in r.headers
+        assert r.headers["access-control-allow-origin"] == "https://vods.test"
+        assert (await c.get("/admin/session")).json()["authenticated"] is False
+        assert (await c.get("/admin/kinds")).status_code == 403
+
+
+async def test_code_sign_in_refuses_a_bad_code_with_problem_details(admin, fake):
+    async with admin() as c:
+        made_up = await c.post("/admin/session", json={"code": "made-up"}, headers=SITE)
+        assert problem_code(made_up, 400) == "invalid_code"
+        code = fake.approve(ALICE)
+        assert (await c.post("/admin/session", json={"code": code}, headers=SITE)).status_code == 200
+        c.cookies.clear()
+        reused = await c.post("/admin/session", json={"code": code}, headers=SITE)
+        assert problem_code(reused, 400) == "invalid_code"
+        assert reused.headers["access-control-allow-origin"] == "https://vods.test"  # the site can read why
+        for missing in ({"code": ""}, {"code": None}, {"code": 5}):
+            assert problem_code(await c.post("/admin/session", json=missing, headers=SITE), 400) == "invalid_code"
+        assert (await c.get("/admin/session")).json()["authenticated"] is False
+
+        fake.refuse = "expired"  # what VexoulzAuth makes of invalid_grant (expired, used, signed out meanwhile)
+        r = await c.post("/admin/session", json={"code": fake.approve(ALICE)}, headers=SITE)
+        assert problem_code(r, 400) == "invalid_code"
+        fake.refuse = "misconfigured"
+        assert problem_code(await c.post("/admin/session", json={"code": "x"}, headers=SITE), 502) == "misconfigured"
+        fake.refuse, fake.down = None, True
+        r = await c.post("/admin/session", json={"code": fake.approve(ALICE)}, headers=SITE)
+        assert problem_code(r, 503) == "unavailable"
+    fake.down = False
+
+
+async def test_code_sign_in_refuses_other_origins(admin, fake):
+    evil = {"Origin": "https://evil.test"}
+    async with admin() as c:
+        code = fake.approve(ALICE)
+        r = await c.post("/admin/session", json={"code": code}, headers=evil)
+        assert problem_code(r, 403) == "origin_not_allowed"
+        assert "access-control-allow-origin" not in r.headers
+        assert code in fake.codes and fake.fetched == []  # never sent to vexoulz-auth
+
+        preflight = {"Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"}
+        refused = await c.options("/admin/session", headers={**evil, **preflight})
+        assert refused.status_code == 403 and "access-control-allow-origin" not in refused.headers
+        ok = await c.options("/admin/session", headers={**SITE, **preflight})
+        assert ok.status_code == 204 and ok.headers["access-control-allow-origin"] == "https://vods.test"
+        assert ok.headers["access-control-allow-credentials"] == "true"
+        assert "POST" in ok.headers["access-control-allow-methods"]
+        assert "content-type" in ok.headers["access-control-allow-headers"].lower()
+
+        # Only /admin/session answers CORS; the rest of the API stays same-origin.
+        assert "access-control-allow-origin" not in (await c.get("/admin/kinds", headers=SITE)).headers
+
+        assert (await c.post("/admin/session", json={"code": code}, headers=SITE)).status_code == 200
+
+
+async def test_code_session_is_rechecked_with_vexoulz_auth(deps, fake):
+    from archive_worker.admin_signin import CHECK_S
+
+    deps.settings.admin_twitch_ids = ["100"]
+    app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)), signin=fake)
+    transport = httpx.ASGITransport(app=app, client=("203.0.113.5", 1234))
+    clock = Clock()
+    app.state.admin_sessions.clock = clock
+    async with httpx.AsyncClient(transport=transport, base_url="https://admin") as c:
+        r = await c.post("/admin/session", json={"code": fake.approve(ALICE, sid="sid-7")})
+        assert r.json()["admin"] is True
+        assert (await c.get("/admin/kinds")).status_code == 200 and fake.checks == 0
+
+        clock.now += CHECK_S
+        assert (await c.get("/admin/kinds")).status_code == 200 and fake.checks == 1  # still signed in
+
+        fake.signed_out.add("sid-7")  # "sign out everywhere" on any site
+        clock.now += CHECK_S
+        assert (await c.get("/admin/kinds")).status_code == 403
+        assert (await c.get("/admin/session")).json()["authenticated"] is False
+
+
+async def test_code_sign_in_off_without_settings(deps):
+    app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://admin") as c:
+        assert problem_code(await c.post("/admin/session", json={"code": "c"}), 404) == "signin_off"
+
+
 async def test_twitch_sign_in_off_without_settings(deps):
     deps.settings.admin_api_key = SecretStr("k")
     app = create_admin_app(deps, jobs.JobService(deps, jobs.create_runtime(deps)))
@@ -289,6 +416,31 @@ def test_client_is_built_only_when_fully_configured(settings):
         "state": ["st"],
         "redirect_uri": ["https://vods.test/backend-admin/admin/signin/callback"],
     }
+    assert client.code_redirect_uri == client.redirect_uri
+    settings.admin_auth_code_redirect_url = "https://vods.test/first"
+    built = VexoulzAuth.from_settings(settings)
+    assert built is not None and built.code_redirect_uri == "https://vods.test/first"
+
+
+async def test_a_fetched_code_is_redeemed_with_the_first_registered_redirect_uri():
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"user": ALICE, "sid": "s1", "expiresAt": "x"})
+
+    client = VexoulzAuth(
+        "https://auth.test",
+        "",
+        "vods-admin",
+        "sec",
+        "https://vods.test/cb",
+        transport=httpx.MockTransport(handler),
+        code_redirect_uri="https://vods.test/first",
+    )
+    await client.redeem("a")
+    await client.redeem("b", fetched=True)
+    assert [b["redirect_uri"] for b in bodies] == ["https://vods.test/cb", "https://vods.test/first"]
 
 
 async def test_client_talks_to_vexoulz_auth():
@@ -314,6 +466,7 @@ async def test_client_talks_to_vexoulz_auth():
     )
     assert await client.redeem("c") == SignedIn(ALICE, "s1")
     assert seen[0].url.host == "auth" and seen[0].headers["authorization"].startswith("Basic ")
+    assert json.loads(seen[0].content) == {"code": "c", "redirect_uri": "https://vods.test/cb"}
     assert await client.active("s1") is True
     assert await client.active("gone") is False
     with pytest.raises(SignInError):

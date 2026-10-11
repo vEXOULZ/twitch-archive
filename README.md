@@ -166,6 +166,8 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_ADMIN_AUTH_INTERNAL_URL` | `ARCHIVE_ADMIN_AUTH_URL` | vexoulz-auth as the worker reaches it |
 | `ARCHIVE_ADMIN_AUTH_CLIENT_ID` / `ARCHIVE_ADMIN_AUTH_CLIENT_SECRET` | `vods-admin` / – | This worker's client registration in vexoulz-auth |
 | `ARCHIVE_ADMIN_AUTH_REDIRECT_URL` | – | `/admin/signin/callback` as browsers reach it (through the dashboard's proxy); registered with vexoulz-auth |
+| `ARCHIVE_ADMIN_AUTH_CODE_REDIRECT_URL` | `ARCHIVE_ADMIN_AUTH_REDIRECT_URL` | The client's **first** redirect URI registered with vexoulz-auth, which a code from its `POST /v1/codes` carries. Set it only if that isn't the callback above. See [Sign-in from a site's page](#sign-in-from-a-sites-page-post-adminsession-code) |
+| `ARCHIVE_ADMIN_SITE_ORIGINS` | `[]` | Site origins (JSON list, e.g. `["https://vods.example.net"]`) whose pages may call `/admin/session` with cookies. CORS answers only them, and `POST /admin/session {code}` refuses any other `Origin` |
 | `ARCHIVE_API_INTERNAL_URL` | `http://127.0.0.1:<api port>`; `http://api:<api port>` in `compose.yaml` | Where `/admin/health` checks archive-api |
 | `ARCHIVE_MERGE_CANDIDATE_MINUTES` | `30` | `merge-candidates` lists VODs that started up to this long after a VOD ended; see [Merging and splitting VODs](#merging-and-splitting-vods) |
 | `ARCHIVE_GOOGLE_CLIENT_ID` / `ARCHIVE_GOOGLE_CLIENT_SECRET` | – | Google OAuth client for YouTube |
@@ -528,12 +530,67 @@ A web dashboard logs in instead of carrying the API key: with Twitch through [ve
 | `GET /admin/session` | No auth. `{"authenticated", "csrf", "expiresAt", "passwordLogin", "twitchLogin", "user"}`. `passwordLogin`: the password is offered to this address. `user`: the Twitch user, `null` for a password login |
 | `POST /admin/session` `{"password"}` | Logs in: the same shape plus the `archive_admin` cookie. `401` wrong password, `403` from outside `ARCHIVE_ADMIN_PASSWORD_NETWORKS`, `429` + `Retry-After` after 5 failed logins in 5 minutes from one address, `404` when password login is off |
 | `GET /admin/signin?next=/admin/...` | Starts a Twitch sign-in: redirects to vexoulz-auth, which comes back to `/admin/signin/callback`. That sets the same cookie and redirects to `next`, or to `/admin/login?auth_error=<denied\|expired\|twitch\|not_allowed\|unavailable\|misconfigured>&next=...`. `404` when Twitch sign-in is off |
-| `GET /admin/signin?quiet=1&next=/...` | A quiet sign-in: the site checking whether someone already signed in to it is an admin. The same trip, but the callback never shows the login page: it redirects to `next` with `admin=1` added when it made a session, or `admin=0` for anything else (not listed, denied, unavailable). vexoulz-auth answers a signed-in browser at once, so nobody sees Twitch |
+| `POST /admin/session` `{"code"}` | A Twitch sign-in from a code the site's page got from vexoulz-auth, with no redirect: see [Sign-in from a site's page](#sign-in-from-a-sites-page-post-adminsession-code) |
+| `GET /admin/signin?quiet=1&next=/...` | A quiet sign-in (the older way to do what `POST /admin/session {code}` does; it stays until the sites have moved): the site checking whether someone already signed in to it is an admin. The same trip, but the callback never shows the login page: it redirects to `next` with `admin=1` added when it made a session, or `admin=0` for anything else (not listed, denied, unavailable). vexoulz-auth answers a signed-in browser at once, so nobody sees Twitch |
 | `DELETE /admin/session` | Logs out (`204`) and clears the cookie |
 
 Only `ARCHIVE_ADMIN_TWITCH_IDS` get in through Twitch. A Twitch session is checked with vexoulz-auth again every minute, so signing out everywhere on any vexoulz site ends it too; if vexoulz-auth can't be reached, the session stands until it can.
 
 The cookie is `HttpOnly; Secure; SameSite=Strict` and lasts 8 hours. Sessions are kept in the `admin_sessions` table (by the sha256 of the cookie's token, never the token itself), so they outlast a restart; expired ones are dropped at the next login. With the cookie, every request except `GET` must also send the session's `csrf` value as `X-CSRF-Token`, or it gets `403`. `Secure` means browsers only send the cookie over HTTPS (or to `localhost`), so serve the dashboard through something that terminates TLS. The one exception is a password login that reached the worker over plain HTTP, such as a LAN address with no TLS: that cookie goes without `Secure`, since a browser would otherwise drop it (the password only works from `ARCHIVE_ADMIN_PASSWORD_NETWORKS` anyway). Twitch sign-in always comes back over HTTPS. If a reverse proxy sits in front, list its address in `ARCHIVE_ADMIN_TRUSTED_PROXIES` so the login rate limit and the password networks see the real client and not the proxy (a proxy on this host would otherwise make every request look local), and so its `X-Forwarded-Proto` says whether the browser used HTTPS. Forwarded headers from any other address are ignored.
+
+#### Sign-in from a site's page (`POST /admin/session {code}`)
+
+A site page can learn, in two `fetch`es and with no page redirect, whether the person signed in to the
+vexoulz sites is an archive admin, and get the dashboard session if they are. It needs vexoulz-auth
+`v0.3.0` or later.
+
+1. The page asks vexoulz-auth for a one-time code for this worker's client:
+
+   ```js
+   const me = await fetch(`${AUTH}/v1/me`, { credentials: "include" });   // 401: not signed in, so not an admin
+   const { csrf } = await me.json();
+   const r = await fetch(`${AUTH}/v1/codes`, {
+     method: "POST",
+     credentials: "include",
+     headers: { "Content-Type": "application/json", "X-Vexoulz-CSRF": csrf },
+     body: JSON.stringify({ client_id: "vods-admin" }),   // ARCHIVE_ADMIN_AUTH_CLIENT_ID
+   });
+   // 200 {code}; 401 signed_out (not an admin); 400 unknown_client, 403 csrf, 409 scope_missing, 429 rate_limited
+   ```
+
+2. It hands the code to the worker, as the dashboard reaches it:
+
+   ```js
+   const s = await fetch(`${WORKER}/admin/session`, {
+     method: "POST",
+     credentials: "include",
+     headers: { "Content-Type": "application/json" },
+     body: JSON.stringify({ code }),
+   });
+   ```
+
+The worker redeems the code with vexoulz-auth's `POST /v1/token` (its client id and secret, and the
+redirect URI the code carries: `ARCHIVE_ADMIN_AUTH_CODE_REDIRECT_URL`), then:
+
+| Answer | When |
+|---|---|
+| `200` `{"admin": true, "authenticated": true, "csrf", "expiresAt", "passwordLogin", "twitchLogin", "user"}` + the `archive_admin` cookie | The user is in `ARCHIVE_ADMIN_TWITCH_IDS`. The same session, cookie and once-a-minute check with vexoulz-auth as `/admin/signin/callback` makes; send `csrf` as `X-CSRF-Token` on writes |
+| `200` `{"admin": false}`, no cookie | Signed in, but not an admin |
+| `400` `invalid_code` | The code is missing, unknown, expired (codes last 60 seconds), already used, or its vexoulz-auth session has ended. A wrong `ARCHIVE_ADMIN_AUTH_CODE_REDIRECT_URL` looks like this too |
+| `403` `origin_not_allowed` | The request's `Origin` isn't in `ARCHIVE_ADMIN_SITE_ORIGINS`. The code is not redeemed |
+| `404` `signin_off` | Twitch sign-in isn't configured |
+| `502` `misconfigured` | vexoulz-auth refused the worker's client id or secret |
+| `503` `unavailable` | vexoulz-auth couldn't be reached or is rate-limiting; try again |
+
+Refusals are RFC 9457 problem details (`application/problem+json`, with `code` as above). A request
+without an `Origin` header (not a browser) is let through; a browser always sends one with a `POST`.
+`/admin/session` answers CORS for `ARCHIVE_ADMIN_SITE_ORIGINS` only (credentials allowed; `GET`,
+`POST`, `DELETE`; headers `Content-Type` and `X-CSRF-Token`), and no other admin route answers CORS at
+all. The cookie stays `SameSite=Strict`, so the page must be same-site with the worker's address (a
+sibling host of the same domain, or the site's own proxy to the worker). The audit log records the
+sign-in as `session.login` by `twitch:<id>`, with detail `{"via": "code"}`; the code itself is never
+stored. Any script on one of those origins can do this for whoever is signed in; it gains nothing it
+couldn't already do there with that person's cookies.
 
 What the dashboard reads and edits (all take the key or the cookie):
 
