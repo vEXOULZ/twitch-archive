@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from archive_common.db import get_sessionmaker
-from archive_common.models import Vod
+from archive_common.models import Job, Vod
+from archive_common.timeutil import hhmmss_to_seconds
 from sqlalchemy import select
 
 from .. import ffmpeg, planning
 from ..context import JobContext
-from .metadata import file_chapters, vod_duration
+from ..vods import splice_reason
+from .metadata import file_chapters, part_gaps, vod_duration
 
 
 def _publishing_disabled(ctx: JobContext) -> str | None:
@@ -26,10 +28,16 @@ def _publishing_disabled(ctx: JobContext) -> str | None:
 
 
 async def _save_entry(vod_id: str, entry: dict[str, Any]) -> None:
-    """Upsert one {id,type,duration,part,thumbnail_url} into vods.youtube (row-locked,
-    since the live and VOD jobs of one stream may finish at the same time)."""
+    """Upsert one {id,type,duration,part,thumbnail_url[,gaps]} into vods.youtube (row-locked,
+    since the live and VOD jobs of one stream may finish at the same time). A re-upload of a part
+    (a job without the recording's timeline) keeps the gaps of the upload it replaces."""
     async with get_sessionmaker()() as s:
         vod = (await s.execute(select(Vod).where(Vod.id == vod_id).with_for_update())).scalar_one()
+        replaced: dict[str, Any] = next(
+            (e for e in vod.youtube or [] if e.get("type") == entry["type"] and e.get("part") == entry["part"]), {}
+        )
+        if "gaps" not in entry and replaced.get("gaps"):
+            entry = {**entry, "gaps": replaced["gaps"]}
         vod.youtube = planning.upsert_youtube_entry(vod.youtube, entry)
         if entry.get("thumbnail_url"):
             vod.thumbnail_url = entry["thumbnail_url"]
@@ -47,6 +55,10 @@ async def upload(ctx: JobContext) -> None:
     description = planning.base_description(s.domain_name, vod.id, vod.title, s.youtube_description)
     status = planning.privacy(ctx.video_type, s.youtube_public, s.live_record)
     uploaded: dict[str, dict[str, Any]] = ctx.payload.setdefault("uploaded", {})
+    all_parts = planning.plan_parts(
+        await vod_duration(ctx, vod), file_chapters(ctx, vod), s.restricted_games, s.split_duration
+    )
+    gaps = part_gaps(ctx, vod, all_parts)
 
     parts = ctx.payload["parts"]
     for part in parts:
@@ -71,6 +83,8 @@ async def upload(ctx: JobContext) -> None:
             "part": part["number"],
             "thumbnail_url": (thumbs.get("medium") or {}).get("url") or planning.youtube_thumbnail(res["id"]),
         }
+        if gaps.get(part["number"]):
+            entry["gaps"] = gaps[part["number"]]  # VOD time this part's recording missed (ad breaks)
         await _save_entry(vod.id, entry)
         uploaded[key] = entry
         await ctx.save()
@@ -102,3 +116,59 @@ async def describe(ctx: JobContext) -> None:
         text = planning.full_description(base, number, entries, lines)
         await ctx.deps.youtube.update_description(entry["id"], text)
         ctx.log.info("described %s part %d", entry["id"], number)
+
+
+# ── Gaps backfill ─────────────────────────────────────────────────────────
+
+
+def recorded_gaps(
+    payload: dict[str, Any], vod_seconds: float, vod_start: float, chapters: Any, restricted_games: list[str]
+) -> dict[str, list[list[float]]]:
+    """YouTube id -> ``gaps`` for the uploads of a finished ``live`` job, from its payload (the
+    recording's ``timeline``, its ``parts`` and what it ``uploaded``). Empty when the payload lacks
+    any of them, or holds only some of the recording's parts."""
+    parts = [planning.Part(int(p["number"]), float(p["start"]), float(p["end"])) for p in payload.get("parts") or []]
+    if not parts or len(parts) != int(payload.get("total_parts") or len(parts)):
+        return {}
+    timeline = payload.get("timeline") or []
+    gaps = planning.part_gaps(vod_seconds, vod_start, chapters, restricted_games, timeline, parts)
+    uploaded = payload.get("uploaded") or {}
+    return {uploaded[str(n)]["id"]: g for n, g in gaps.items() if str(n) in uploaded}
+
+
+async def live_gaps_backfill(ctx: JobContext) -> None:
+    """``gaps`` on the live uploads made before they were saved, from each finished ``live``
+    job's payload. A VOD whose live uploads already have gaps is left alone, as is a merged,
+    split or synthetic one (its length and chapters are no longer the recording's VOD's).
+    ``payload.vod_ids`` limits it to those VODs. Running it again changes nothing."""
+    stmt = select(Job.vod_id, Job.payload).where(Job.kind == "live", Job.state == "done", Job.vod_id.is_not(None))
+    if ctx.payload.get("vod_ids"):
+        stmt = stmt.where(Job.vod_id.in_([str(v) for v in ctx.payload["vod_ids"]]))
+    async with get_sessionmaker()() as s:
+        found = (await s.execute(stmt.order_by(Job.id))).all()
+    updated = 0
+    for vod_id, payload in found:
+        if not payload.get("timeline") or await splice_reason(vod_id):
+            continue
+        async with get_sessionmaker()() as s:
+            vod = (await s.execute(select(Vod).where(Vod.id == vod_id).with_for_update())).scalar_one_or_none()
+            live = [e for e in (vod.youtube if vod else None) or [] if e.get("type") == "live"]
+            if vod is None or not live or any("gaps" in e for e in live):
+                continue
+            gaps = recorded_gaps(
+                payload,
+                hhmmss_to_seconds(vod.duration),
+                vod.created_at.timestamp(),
+                vod.chapters,
+                ctx.settings.restricted_games,
+            )
+            if not any(e.get("id") in gaps for e in live):
+                continue
+            vod.youtube = [
+                {**e, "gaps": gaps[e["id"]]} if e.get("type") == "live" and e.get("id") in gaps else e
+                for e in vod.youtube
+            ]
+            await s.commit()
+            updated += 1
+            ctx.log.info("vod %s: gaps on %d live upload(s)", vod_id, sum(e.get("id") in gaps for e in live))
+    ctx.log.info("saved gaps on %d VOD(s) of %d finished live job(s)", updated, len(found))

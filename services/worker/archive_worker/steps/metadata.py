@@ -46,6 +46,23 @@ def file_chapters(ctx: JobContext, vod: Vod) -> list[dict[str, Any]] | None:
     return planning.chapters_on_recording(vod.chapters, vod.created_at.timestamp(), timeline)
 
 
+def part_gaps(ctx: JobContext, vod: Vod, parts: list[planning.Part]) -> dict[int, list[list[float]]]:
+    """Part number -> the VOD stretches a live recording missed inside that part, for its upload's
+    ``gaps`` (planning.part_gaps). Empty for a VOD download, or a recording made before timelines
+    were saved."""
+    timeline = ctx.payload.get("timeline")
+    if ctx.video_type != "live" or not timeline:
+        return {}
+    return planning.part_gaps(
+        hhmmss_to_seconds(vod.duration),
+        vod.created_at.timestamp(),
+        vod.chapters,
+        ctx.settings.restricted_games,
+        timeline,
+        parts,
+    )
+
+
 # ── Chapters ──────────────────────────────────────────────────────────────
 
 

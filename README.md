@@ -314,6 +314,7 @@ Job kinds and their steps:
 | `part_dmca` | ensure_source → fetch_vod → finalize → split → dmca_edit → upload → describe → previews → cleanup | `/admin/part/dmca` |
 | `chat`, `logs_manual`, `chapters`, `emotes`, `describe` | one step each | the matching admin routes |
 | `global_emotes_backfill` | one step | `/admin/emotes/backfill` |
+| `live_gaps_backfill` | one step | `/admin/live-gaps/backfill` |
 | `bot_chat` | one step | monitor (stream ended, `DOOMTP_URL` set; separate from `archive`), `/admin/bot-chat` |
 | `bot_chat_backfill` | one step: queues a `bot_chat` job per VOD | `/admin/bot-chat/backfill` |
 | `previews_fetch` | one step | `/admin/previews` |
@@ -443,6 +444,15 @@ curl -s "${H[@]}" -X POST "$A/admin/emotes/backfill" -d '{"vodIds":["2375792832"
 curl -s "${H[@]}" -X POST "$A/admin/bot-chat" -d '{"vodId":"2703890458"}'
 curl -s "${H[@]}" -X POST "$A/admin/bot-chat/backfill"
 curl -s "${H[@]}" -X POST "$A/admin/bot-chat/backfill" -d '{"vodIds":["2703890458"]}'   # only these VODs
+```
+
+**Ad breaks in live recordings.** A `live` recording leaves out the ads Twitch stitches into the stream, so the recording is shorter than the VOD and has holes in VOD time. The recording's `timeline` (in the job payload) says when each stretch was recorded. The `upload` step turns it into `gaps` on each live upload's `youtube` entry: `[[at, seconds], ...]`, where `at` is the time in that upload where VOD time skips ahead and `seconds` is how much VOD time is missing there (restricted chapters that overlap a gap are left out of it; they are cut anyway). A recording that ends before the VOD does gets a gap at the end of its last part. Whatever is missing before the first frame stays the upload's delay, as before. Gaps stay with their upload through re-uploads, admin edits of the same type, merges and splits. They apply only to the `live` uploads: the `vod` uploads have the whole VOD.
+
+**Backfill gaps** onto the live uploads made before gaps were saved, from each finished `live` job's `timeline` (run once; running it again changes nothing). VODs whose live uploads already have `gaps`, merged or split VODs and recordings made before timelines were saved are skipped:
+
+```bash
+curl -s "${H[@]}" -X POST "$A/admin/live-gaps/backfill"
+curl -s "${H[@]}" -X POST "$A/admin/live-gaps/backfill" -d '{"vodIds":["2895611509"]}'   # only these VODs
 ```
 
 #### Seek-bar previews
@@ -710,6 +720,7 @@ This is what the frontend uses. The output is compatible with the old Feathers A
 | `GET /v1/site/tags` | `{tags: [{name, label, drawn, color, shape, width, height, text, textColor, textSize, textX, textY, textRotate, pattern, patternColor, patternSize}]}`: how the site shows each VOD tag, in order (see [Site tags](#site-tags)); 404 until it was saved once (the site then uses its defaults). `Cache-Control: public, max-age=60`. |
 | `GET /v1/site/tags/:name.svg` | A tag's shape: the cleaned SVG as `image/svg+xml`, with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox` and `X-Content-Type-Options: nosniff`. `Cache-Control: public, max-age=31536000, immutable` when `?v=` is the current hash (as in the list's `shape`), `max-age=60` otherwise. 404 when the tag has no shape. Not rate limited. |
 | `youtube[].preview` | On uploads that have seek-bar previews: `{v, interval, w, h, cols, rows, count}`; absent otherwise. |
+| `youtube[].gaps` | On `live` uploads whose recording missed part of the VOD (ad breaks, an early end): `[[at, seconds], ...]`, sorted, `at` in seconds into that upload. VOD time jumps `seconds` ahead at `at`. Absent otherwise. The upload's delay is `duration − Σ part durations − Σ gaps − Σ cuts`. See "Ad breaks in live recordings" under [Recipes](#recipes). |
 | `chapters[].imageTemplate` | On every chapter in `/vods` (and in `vod`s embedded elsewhere): the box art with `{width}x{height}` in place of the stored `40x53`, like Helix's `box_art_url`. `image` is unchanged. |
 | `chapters[].length` | Same value as `end`, which holds the chapter's length in seconds, not its end time. |
 | `duration_seconds` | On each VOD next to `duration` (`"HH:MM:SS"`), as a number. Only present when `duration` is. |

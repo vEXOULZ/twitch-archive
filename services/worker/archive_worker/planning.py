@@ -134,6 +134,59 @@ def chapters_on_recording(
     return out
 
 
+def recording_gaps(
+    duration: float,
+    vod_start: float,
+    timeline: list[list[float]],
+    cuts: list[tuple[float, float]],
+    part_lengths: list[float],
+) -> list[list[list[float]]]:
+    """Each part's ``gaps``: [seconds into the part, VOD seconds missing there] for every stretch of
+    the VOD the recording missed after its first frame (ad breaks, reconnects, an early end), less
+    the cuts (restricted chapters, already out of every upload). What is missing before the first
+    frame stays the timeline's ``delay``. Times are VOD seconds; ``cuts`` are (start, end)."""
+    gaps: list[list[list[float]]] = [[] for _ in part_lengths]
+    if not timeline or not part_lengths:
+        return gaps
+    covered = [(w - vod_start, w - vod_start + n) for _, w, n in timeline]
+    holes, t = [], covered[0][1]
+    for s, e in covered[1:]:
+        if s - t > TIMELINE_TOLERANCE:
+            holes.append((t, s))
+        t = max(t, e)
+    if duration - t > TIMELINE_TOLERANCE:
+        holes.append((t, float(duration)))
+    holes = _subtract(holes, cuts)
+    missing = _union([(0.0, covered[0][0]), *cuts, *holes])
+    starts = [sum(part_lengths[:i]) for i in range(len(part_lengths))]
+    for s, e in holes:
+        u = s - sum(max(0.0, min(b, s) - a) for a, b in missing)  # upload time where the hole starts
+        i = next((i for i in range(len(starts)) if u <= starts[i] + part_lengths[i] + 0.001), len(starts) - 1)
+        at = min(max(0.0, u - starts[i]), part_lengths[i])
+        gaps[i].append([num_seconds(at), num_seconds(e - s)])
+    return gaps
+
+
+def _union(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    for s, e in sorted(x for x in spans if x[1] > x[0]):
+        if out and s <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def _subtract(spans: list[tuple[float, float]], minus: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    out = []
+    for s, e in spans:
+        pieces = [(s, e)]
+        for a, b in minus:
+            pieces = [p for lo, hi in pieces for p in ((lo, min(hi, a)), (max(lo, b), hi)) if p[1] - p[0] > 0.001]
+        out += [p for p in pieces if p[1] - p[0] > TIMELINE_TOLERANCE]
+    return out
+
+
 # ── Parts ─────────────────────────────────────────────────────────────────
 
 
@@ -146,6 +199,27 @@ class Part:
     @property
     def duration(self) -> float:
         return self.end - self.start
+
+
+def part_gaps(
+    vod_seconds: float,
+    vod_start: float,
+    chapters: list[dict[str, Any]] | None,
+    restricted_games: list[str],
+    timeline: list[list[float]],
+    parts: list[Part],
+) -> dict[int, list[list[float]]]:
+    """Part number -> its upload's ``gaps`` (recording_gaps), for parts cut from a live recording.
+    ``parts`` are every part of the recording, in order; a part without gaps is left out."""
+    if not vod_seconds or not timeline or not parts:
+        return {}
+    cuts = [
+        (float(c.get("start") or 0), float(c.get("start") or 0) + float(c.get("end") or 0))
+        for c in chapters or []
+        if is_restricted(c, restricted_games)
+    ]
+    gaps = recording_gaps(vod_seconds, vod_start, timeline, cuts, [p.duration for p in parts])
+    return {p.number: g for p, g in zip(parts, gaps, strict=True) if g}
 
 
 def plan_parts(

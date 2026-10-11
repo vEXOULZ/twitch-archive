@@ -132,6 +132,8 @@ KINDS: dict[str, list[str]] = {
     "global_emotes_backfill": ["global_emotes_backfill"],
     # One-off: add 7TV's zero-width flags to channel sets saved before flags were kept.
     "seventv_flags_backfill": ["seventv_flags_backfill"],
+    # One-off: the ad breaks (gaps) of live uploads made before they were saved, from their live jobs.
+    "live_gaps_backfill": ["live_gaps_backfill"],
     "describe": ["describe"],
     # Chat from doomtp-bot into bot_logs, beside the archive job of the same VOD.
     "bot_chat": ["bot_chat"],

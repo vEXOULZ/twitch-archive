@@ -89,6 +89,7 @@ ROUTE_ACTIONS: dict[str, str] = {
     "POST /admin/emotes/backfill": "emotes.backfill",
     "POST /admin/bot-chat": "vod.bot_chat.fetch",
     "POST /admin/bot-chat/backfill": "bot_chat.backfill",
+    "POST /admin/live-gaps/backfill": "live_gaps.backfill",
     "POST /admin/youtube/parts": "vod.youtube.describe",
     "POST /admin/youtube/chapters": "vod.youtube.describe",
     "POST /admin/twitch/viewer/device": "twitch_viewer.link.start",
