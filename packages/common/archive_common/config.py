@@ -50,8 +50,9 @@ class Settings(BaseSettings):
     gql_client_id: str = "kimne78kx3ncx6brgo4mv6wki5h1ko"
     gql_backup_client_id: str = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"
     # The client id the Manage screen's "Link Twitch account" device flow asks for a token as (Twitch's
-    # Android app, which allows the device flow): the token GQL gets for the live playback token.
-    twitch_viewer_client_id: str = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"
+    # TV app: Twitch refuses the device flow for the web and Android ones with "invalid client"): the
+    # token GQL gets for the live playback token.
+    twitch_viewer_client_id: str = "ue6666qo983tsx6so1t0vnawi233wa"
     gql_hash_playback_token: str = "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9"
     gql_hash_comments: str = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a"
     gql_hash_moments: str = "7399051b2d46f528d5f0eedf8b0db8d485bb1bb4c0a2c6707be6f1290cdcb31a"

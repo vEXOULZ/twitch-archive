@@ -1516,7 +1516,8 @@ def create_admin_app(
         try:
             flow = await twitch_viewer.start_device(settings)
         except twitch_viewer.ViewerTokenError as exc:
-            raise AdminError(502, str(exc)) from exc
+            # Not a 5xx: Cloudflare puts its own page in place of a 502, and the dashboard would lose why.
+            raise AdminError(400, str(exc)) from exc
         now = time.monotonic()
         for key in [k for k, (until, _, _) in linking.items() if until < now]:
             del linking[key]
