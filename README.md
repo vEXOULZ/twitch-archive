@@ -108,6 +108,7 @@ In production, non-secret settings go in `.env` (see `.env.example`). Secrets ar
 |---|---|
 | `ARCHIVE_GQL_CLIENT_ID` | `kimne78kx3ncx6brgo4mv6wki5h1ko` (twitch.tv web client) |
 | `ARCHIVE_GQL_BACKUP_CLIENT_ID` | `kd1unb4b3q4t58fwlpcbzcbnm76a8fp` (used for comment cursors and moments) |
+| `ARCHIVE_TWITCH_VIEWER_CLIENT_ID` | `kd1unb4b3q4t58fwlpcbzcbnm76a8fp` (Twitch's Android app: the device flow that [links an ad-free account](#recording-without-ads-a-linked-twitch-account)) |
 | `ARCHIVE_GQL_HASH_PLAYBACK_TOKEN` | `ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9` |
 | `ARCHIVE_GQL_HASH_COMMENTS` | `b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a` |
 | `ARCHIVE_GQL_HASH_MOMENTS` | `7399051b2d46f528d5f0eedf8b0db8d485bb1bb4c0a2c6707be6f1290cdcb31a` |
@@ -659,6 +660,26 @@ curl -s "${H[@]}" -X POST "$A/v2/live" -d '{"streamId":"318194011992","path":"/d
 ```
 
 That queues a `live_file` job. As with the old app, the call returns **404 when `MULTI_TRACK` is off**, which tells the recorder to delete its file. `driveId` is stored in `vods.drive` but nothing is uploaded to Drive.
+
+### Recording without ads (a linked Twitch account)
+
+Twitch stitches ads into the live stream, and the recorder can only skip them: each ad break is time missing from the live copy (its upload's `gaps`). Twitch leaves the ads out for an account that is ad-free on the channel: one with **Turbo** (every channel), or a **sub** when the channel gives subs ad-free viewing. Link such an account and the worker asks for the live playback token as it; nothing else is done as that account (VOD downloads, chat and chapters stay anonymous).
+
+**Link it from the Manage screen** (Overview → *Twitch (ad-free)* → *Link Twitch account*): the dashboard shows a code; open twitch.tv/activate signed in as the account (the broadcaster's own, typically) and enter it. That is Twitch's device flow, as `ARCHIVE_TWITCH_VIEWER_CLIENT_ID`. From the API:
+
+```bash
+curl -s "${H[@]}" -X POST "$A/admin/twitch/viewer/device"             # {flowId, userCode, verificationUri, expiresIn, interval}
+curl -s "${H[@]}" "$A/admin/twitch/viewer/device/<flowId>"            # {state: pending | linked | failed, status?, error?}
+curl -s "${H[@]}" "$A/admin/twitch/viewer"                            # {linked, valid, login, userId, clientId, method, connectedAt, expiresAt, error, checkedAt}
+curl -s "${H[@]}" -X PUT "$A/admin/twitch/viewer" -d '{"token":"…"}'  # link by pasting a token instead
+curl -s "${H[@]}" -X DELETE "$A/admin/twitch/viewer"                  # unlink
+```
+
+If recordings still have ads with the device-flow token, link by pasting instead: the `auth-token` cookie of twitch.tv signed in as the account (the *Paste a token* button does the same). The worker validates either token with Twitch and keeps the client id it was issued to, since GQL refuses a token sent with another app's client id. Unlinking forgets the token but doesn't revoke it (a pasted one is that browser's sign-in); sign out of Twitch, or disconnect the app under the account's *Connections*, to end it.
+
+The token is stored in `app_state` (key `twitch_viewer_oauth`), never in the config or the logs, and a device-flow token is refreshed before it expires. Anything wrong with it (expired, revoked, Twitch refusing it) only costs the ads: the worker logs a warning and asks for the token anonymously, as without an account. If ads still come through on a token asked for as the account, the recorder logs `stitched ads in the stream although the playback token is <login>'s` once per break: that account isn't ad-free on the channel. `/admin/health`'s `twitchViewer` has the same status as `GET /admin/twitch/viewer` (rechecked at most every 10 minutes). The audit log has `twitch_viewer.link.start`, `twitch_viewer.link` (by whoever started the flow; `failed` with the `error` if Twitch refused), `twitch_viewer.paste` and `twitch_viewer.unlink`, with the account (login, user id, client id, a fingerprint of the token, never the token) as `before`/`after`.
+
+Viewing as a logged-in account is how Twitch's own player works, but whether doing it from a server is within Twitch's terms is the broadcaster's call; leave it unlinked to record as before.
 
 ---
 

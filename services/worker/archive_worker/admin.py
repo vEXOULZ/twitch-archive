@@ -41,7 +41,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 from vex_platform.actor import SYSTEM, Actor
 from vex_platform.api import ApiError, problem
 
-from . import api_v2, api_v2_routes, jobs, site_tags, splices, svg_clean, vod_edits, youtube
+from . import api_v2, api_v2_routes, jobs, site_tags, splices, svg_clean, twitch_viewer, vod_edits, youtube
 from .admin_auth import (
     CSRF_HEADER,
     SESSION_COOKIE,
@@ -676,7 +676,9 @@ def create_admin_app(
                 log.exception("health: database query failed")
                 return None
 
-        db, api, yt = await asyncio.gather(db_state(), api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE))
+        db, api, yt, viewer = await asyncio.gather(
+            db_state(), api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE), viewer_check()
+        )
         db_ok = db is not None
         counts, failures, live = db or ({st: 0 for st in jobs.STATES}, [], None)
         return {
@@ -691,6 +693,7 @@ def create_admin_app(
                 "refreshTokenExpiresAt": yt.get("refreshTokenExpiresAt"),
                 "checkedAt": iso_utc(yt["checkedAt"]),
             },
+            "twitchViewer": viewer,
             "live": {
                 "live": live is not None,
                 "streamId": str(live.id) if live else None,
@@ -1480,6 +1483,99 @@ def create_admin_app(
         if not status["valid"]:
             raise AdminError(500, f"Token stored but not usable: {status['error']}")
         return _ok("YouTube authorized. You can close this tab.")
+
+    # ── Twitch viewer account (live playback tokens without stitched ads) ─
+
+    async def viewer_check(fresh: bool = False) -> dict[str, Any] | None:
+        """The linked account for the dashboard (``twitchViewer`` in /admin/health), or None if the
+        check itself failed."""
+        try:
+            st = await (deps.viewer.check() if fresh else deps.viewer.cached_check(YOUTUBE_CHECK_MAX_AGE))
+        except Exception:
+            log.exception("could not check the Twitch viewer token")
+            return None
+        return {**st, "checkedAt": iso_utc(st["checkedAt"])}
+
+    # Device flows in progress, by an id the dashboard polls with; the device code never leaves the worker.
+    linking: dict[str, tuple[float, str, Actor]] = {}  # id -> (monotonic expiry, device code, who started it)
+
+    @app.get("/admin/twitch/viewer", dependencies=auth)
+    async def twitch_viewer_status() -> dict[str, Any] | None:
+        """The linked account and whether Twitch still accepts its token (checked now)."""
+        return await viewer_check(fresh=True)
+
+    @app.post("/admin/twitch/viewer/device", dependencies=auth)
+    async def twitch_viewer_device(request: Request) -> dict[str, Any]:
+        """Start linking: the code to enter at ``verificationUri`` (twitch.tv/activate), signed in as the
+        account to link. Poll ``GET /admin/twitch/viewer/device/{flowId}`` every ``interval`` seconds."""
+        try:
+            flow = await twitch_viewer.start_device(settings)
+        except twitch_viewer.ViewerTokenError as exc:
+            raise AdminError(502, str(exc)) from exc
+        now = time.monotonic()
+        for key in [k for k, (until, _, _) in linking.items() if until < now]:
+            del linking[key]
+        flow_id = secrets.token_urlsafe(16)
+        linking[flow_id] = (now + int(flow["expires_in"]), flow["device_code"], _actor.get())
+        request.state.audit_target = twitch_viewer.AUDIT_TARGET
+        return {
+            "flowId": flow_id,
+            "userCode": flow["user_code"],
+            "verificationUri": flow["verification_uri"],
+            "expiresIn": int(flow["expires_in"]),
+            "interval": int(flow.get("interval") or 5),
+        }
+
+    @app.get("/admin/twitch/viewer/device/{flow_id}", dependencies=auth)
+    async def twitch_viewer_device_poll(flow_id: str) -> dict[str, Any]:
+        """``state``: ``pending`` until the code is entered, then ``linked`` (with ``status``), or ``failed``
+        (with ``error``: expired, refused, or a token Twitch won't validate)."""
+        found = linking.get(flow_id)
+        if found is None or found[0] < time.monotonic():
+            linking.pop(flow_id, None)
+            return {"state": "failed", "error": "This link expired; start again"}
+        _, device_code, actor = found
+        before = twitch_viewer.token_summary(await twitch_viewer.load_token())
+        try:
+            token = await twitch_viewer.poll_device(settings, device_code)
+        except twitch_viewer.ViewerTokenError as exc:
+            linking.pop(flow_id, None)
+            await twitch_viewer.audit_link(actor, before, None, error=str(exc))
+            return {"state": "failed", "error": str(exc)}
+        if token is None:
+            return {"state": "pending"}
+        linking.pop(flow_id, None)
+        deps.viewer.forget()
+        await twitch_viewer.audit_link(actor, before, twitch_viewer.token_summary(token))
+        return {"state": "linked", "status": await viewer_check(fresh=True)}
+
+    @app.put("/admin/twitch/viewer", dependencies=auth)
+    async def twitch_viewer_paste(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any] | None:
+        """Link by pasting a token (``{"token": ...}``): the ``auth-token`` cookie of twitch.tv signed in as
+        the account, when the device flow's token doesn't get an ad-free stream. Audited without it."""
+        raw = str(body.get("token") or "").strip().removeprefix("OAuth ").strip()
+        if not raw:
+            raise AdminError(400, "token is required")
+        before = twitch_viewer.token_summary(await twitch_viewer.load_token())
+        try:
+            token = await twitch_viewer.store(raw, method="paste")
+        except twitch_viewer.ViewerTokenError as exc:
+            raise AdminError(400, str(exc)) from exc
+        deps.viewer.forget()
+        request.state.audit_target = twitch_viewer.AUDIT_TARGET
+        request.state.audit_detail = {"before": before, "after": twitch_viewer.token_summary(token)}
+        return await viewer_check(fresh=True)
+
+    @app.delete("/admin/twitch/viewer", dependencies=auth)
+    async def twitch_viewer_unlink(request: Request) -> dict[str, Any]:
+        """Forget the linked account: live playback tokens are asked for anonymously again. The token is
+        not revoked (a pasted one is the account's website sign-in); sign out on Twitch to end it."""
+        before = twitch_viewer.token_summary(await twitch_viewer.load_token())
+        await twitch_viewer.clear_token()
+        deps.viewer.forget()
+        request.state.audit_target = twitch_viewer.AUDIT_TARGET
+        request.state.audit_detail = {"before": before, "after": None}
+        return _ok("Twitch account unlinked")
 
     # ── /api/v2 ───────────────────────────────────────────────────────────
 

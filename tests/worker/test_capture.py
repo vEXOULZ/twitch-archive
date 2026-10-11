@@ -1,9 +1,10 @@
 import json
+import logging
 
 import httpx
 import pytest
 import respx
-from archive_common.twitch.gql import GQL_URL
+from archive_common.twitch.gql import GQL_URL, ViewerAuth
 from archive_worker import hls
 from archive_worker.steps import capture as cap
 
@@ -129,6 +130,37 @@ async def test_live_record_skips_ads_and_handles_rollover(make_ctx, settings, mo
     # the ad break becomes a discontinuity before the next real segment
     assert "#EXT-X-DISCONTINUITY\n#EXTINF:2.000,\n000000013.ts" in text
     assert ctx.payload["timeline"] == []  # the playlists carry no program date-times
+
+
+@respx.mock
+async def test_live_record_warns_when_the_linked_account_still_gets_ads(make_ctx, settings, monkeypatch, caplog):
+    settings.live_poll_interval_seconds = 0
+    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexoulz"})
+
+    async def no_save():
+        return None
+
+    async def viewer():
+        return ViewerAuth(client_id="c", token="stand-in", login="adfree")
+
+    monkeypatch.setattr(ctx, "save", no_save)
+    ctx.deps.gql.viewer = viewer
+    respx.post(GQL_URL).mock(side_effect=_token_response)
+    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexoulz.m3u8").respond(
+        200, text='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,VIDEO="chunked"\nhttps://edge.example/live.m3u8\n'
+    )
+    respx.get("https://edge.example/live.m3u8").mock(
+        side_effect=[httpx.Response(200, text=LIVE_1), httpx.Response(200, text=LIVE_2)]
+    )
+    for n in (10, 11, 13):
+        respx.get(f"https://edge.example/s{n}.ts").respond(200, content=f"seg{n}".encode())
+
+    with caplog.at_level(logging.WARNING):
+        await cap.live_record(ctx)
+    assert [r.getMessage() for r in caplog.records if "stitched ads" in r.getMessage()] == [
+        "stitched ads in the stream although the playback token is adfree's: that account isn't ad-free on this "
+        "channel (no Turbo, or a sub without ad-free viewing)"
+    ]
 
 
 def _timed(text: str, times: dict[str, str]) -> str:

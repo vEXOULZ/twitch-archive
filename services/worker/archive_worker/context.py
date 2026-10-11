@@ -18,6 +18,7 @@ from vex_platform.jobs import StepContext, StepError, StepRefused
 from .doomtp import Doomtp
 from .events import JOB_LOGGER, UNITS, JobEvents
 from .job_rows import subject_of, vod_of
+from .twitch_viewer import TwitchViewer
 from .vods import splice_reason
 from .youtube import YouTube
 
@@ -30,9 +31,12 @@ class Deps:
     youtube: YouTube
     events: JobEvents = field(default_factory=JobEvents)  # the job event log (GET /admin/jobs/{id}/events)
     doomtp: Doomtp = field(init=False)  # doomtp-bot's chat log
+    viewer: TwitchViewer = field(init=False)  # the linked ad-free Twitch account, for live playback tokens
 
     def __post_init__(self) -> None:
         self.doomtp = Doomtp(self.settings)
+        self.viewer = TwitchViewer(self.settings)
+        self.gql.viewer = self.viewer.auth
 
 
 # StepError: an expected failure with a readable message (no traceback in last_error).
