@@ -108,6 +108,7 @@ In production, non-secret settings go in `.env` (see `.env.example`). Secrets ar
 |---|---|
 | `ARCHIVE_GQL_CLIENT_ID` | `kimne78kx3ncx6brgo4mv6wki5h1ko` (twitch.tv web client) |
 | `ARCHIVE_GQL_BACKUP_CLIENT_ID` | `kd1unb4b3q4t58fwlpcbzcbnm76a8fp` (used for comment cursors and moments) |
+| `ARCHIVE_TWITCH_VIEWER_CLIENT_ID` | `kd1unb4b3q4t58fwlpcbzcbnm76a8fp` (Twitch's Android app: the device flow that [links an ad-free account](#recording-without-ads-a-linked-twitch-account)) |
 | `ARCHIVE_GQL_HASH_PLAYBACK_TOKEN` | `ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9` |
 | `ARCHIVE_GQL_HASH_COMMENTS` | `b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a` |
 | `ARCHIVE_GQL_HASH_MOMENTS` | `7399051b2d46f528d5f0eedf8b0db8d485bb1bb4c0a2c6707be6f1290cdcb31a` |
@@ -166,6 +167,8 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_ADMIN_AUTH_INTERNAL_URL` | `ARCHIVE_ADMIN_AUTH_URL` | vexoulz-auth as the worker reaches it |
 | `ARCHIVE_ADMIN_AUTH_CLIENT_ID` / `ARCHIVE_ADMIN_AUTH_CLIENT_SECRET` | `vods-admin` / – | This worker's client registration in vexoulz-auth |
 | `ARCHIVE_ADMIN_AUTH_REDIRECT_URL` | – | `/admin/signin/callback` as browsers reach it (through the dashboard's proxy); registered with vexoulz-auth |
+| `ARCHIVE_ADMIN_AUTH_CODE_REDIRECT_URL` | `ARCHIVE_ADMIN_AUTH_REDIRECT_URL` | The client's **first** redirect URI registered with vexoulz-auth, which a code from its `POST /v1/codes` carries. Set it only if that isn't the callback above. See [Sign-in from a site's page](#sign-in-from-a-sites-page-post-adminsession-code) |
+| `ARCHIVE_ADMIN_SITE_ORIGINS` | `[]` | Site origins (JSON list, e.g. `["https://vods.example.net"]`) whose pages may call `/admin/session` with cookies. CORS answers only them, and `POST /admin/session {code}` refuses any other `Origin` |
 | `ARCHIVE_API_INTERNAL_URL` | `http://127.0.0.1:<api port>`; `http://api:<api port>` in `compose.yaml` | Where `/admin/health` checks archive-api |
 | `ARCHIVE_MERGE_CANDIDATE_MINUTES` | `30` | `merge-candidates` lists VODs that started up to this long after a VOD ended; see [Merging and splitting VODs](#merging-and-splitting-vods) |
 | `ARCHIVE_GOOGLE_CLIENT_ID` / `ARCHIVE_GOOGLE_CLIENT_SECRET` | – | Google OAuth client for YouTube |
@@ -311,6 +314,7 @@ Job kinds and their steps:
 | `part_dmca` | ensure_source → fetch_vod → finalize → split → dmca_edit → upload → describe → previews → cleanup | `/admin/part/dmca` |
 | `chat`, `logs_manual`, `chapters`, `emotes`, `describe` | one step each | the matching admin routes |
 | `global_emotes_backfill` | one step | `/admin/emotes/backfill` |
+| `live_gaps_backfill` | one step | `/admin/live-gaps/backfill` |
 | `bot_chat` | one step | monitor (stream ended, `DOOMTP_URL` set; separate from `archive`), `/admin/bot-chat` |
 | `bot_chat_backfill` | one step: queues a `bot_chat` job per VOD | `/admin/bot-chat/backfill` |
 | `previews_fetch` | one step | `/admin/previews` |
@@ -442,6 +446,15 @@ curl -s "${H[@]}" -X POST "$A/admin/bot-chat/backfill"
 curl -s "${H[@]}" -X POST "$A/admin/bot-chat/backfill" -d '{"vodIds":["2703890458"]}'   # only these VODs
 ```
 
+**Ad breaks in live recordings.** A `live` recording leaves out the ads Twitch stitches into the stream, so the recording is shorter than the VOD and has holes in VOD time. The recording's `timeline` (in the job payload) says when each stretch was recorded. The `upload` step turns it into `gaps` on each live upload's `youtube` entry: `[[at, seconds], ...]`, where `at` is the time in that upload where VOD time skips ahead and `seconds` is how much VOD time is missing there (restricted chapters that overlap a gap are left out of it; they are cut anyway). A recording that ends before the VOD does gets a gap at the end of its last part. Whatever is missing before the first frame stays the upload's delay, as before. Gaps stay with their upload through re-uploads, admin edits of the same type, merges and splits. They apply only to the `live` uploads: the `vod` uploads have the whole VOD.
+
+**Backfill gaps** onto the live uploads made before gaps were saved, from each finished `live` job's `timeline` (run once; running it again changes nothing). VODs whose live uploads already have `gaps`, merged or split VODs and recordings made before timelines were saved are skipped:
+
+```bash
+curl -s "${H[@]}" -X POST "$A/admin/live-gaps/backfill"
+curl -s "${H[@]}" -X POST "$A/admin/live-gaps/backfill" -d '{"vodIds":["2895611509"]}'   # only these VODs
+```
+
 #### Seek-bar previews
 
 The sites show a frame of the video when you hover the timeline. The worker makes these as sprite sheets per YouTube upload, in that upload's own time, and keeps them in `<data dir>/previews/<youtube id>/<k>.jpg`. Each sheet has 10×10 tiles of 160×90. Frame `i` is the picture at `i × 10` s (or the keyframe just before), on sheet `i // 100`, column `i % 10`, row `(i // 10) % 10`. Once its sheets exist, the upload's `youtube` entry gets `preview: {v: 1, interval: 10, w: 160, h: 90, cols: 10, rows: 10, count}`, where `count` is the number of frames. An admin edit keeps it as long as the video id stays.
@@ -528,12 +541,67 @@ A web dashboard logs in instead of carrying the API key: with Twitch through [ve
 | `GET /admin/session` | No auth. `{"authenticated", "csrf", "expiresAt", "passwordLogin", "twitchLogin", "user"}`. `passwordLogin`: the password is offered to this address. `user`: the Twitch user, `null` for a password login |
 | `POST /admin/session` `{"password"}` | Logs in: the same shape plus the `archive_admin` cookie. `401` wrong password, `403` from outside `ARCHIVE_ADMIN_PASSWORD_NETWORKS`, `429` + `Retry-After` after 5 failed logins in 5 minutes from one address, `404` when password login is off |
 | `GET /admin/signin?next=/admin/...` | Starts a Twitch sign-in: redirects to vexoulz-auth, which comes back to `/admin/signin/callback`. That sets the same cookie and redirects to `next`, or to `/admin/login?auth_error=<denied\|expired\|twitch\|not_allowed\|unavailable\|misconfigured>&next=...`. `404` when Twitch sign-in is off |
-| `GET /admin/signin?quiet=1&next=/...` | A quiet sign-in: the site checking whether someone already signed in to it is an admin. The same trip, but the callback never shows the login page: it redirects to `next` with `admin=1` added when it made a session, or `admin=0` for anything else (not listed, denied, unavailable). vexoulz-auth answers a signed-in browser at once, so nobody sees Twitch |
+| `POST /admin/session` `{"code"}` | A Twitch sign-in from a code the site's page got from vexoulz-auth, with no redirect: see [Sign-in from a site's page](#sign-in-from-a-sites-page-post-adminsession-code) |
+| `GET /admin/signin?quiet=1&next=/...` | A quiet sign-in (the older way to do what `POST /admin/session {code}` does; it stays until the sites have moved): the site checking whether someone already signed in to it is an admin. The same trip, but the callback never shows the login page: it redirects to `next` with `admin=1` added when it made a session, or `admin=0` for anything else (not listed, denied, unavailable). vexoulz-auth answers a signed-in browser at once, so nobody sees Twitch |
 | `DELETE /admin/session` | Logs out (`204`) and clears the cookie |
 
 Only `ARCHIVE_ADMIN_TWITCH_IDS` get in through Twitch. A Twitch session is checked with vexoulz-auth again every minute, so signing out everywhere on any vexoulz site ends it too; if vexoulz-auth can't be reached, the session stands until it can.
 
 The cookie is `HttpOnly; Secure; SameSite=Strict` and lasts 8 hours. Sessions are kept in the `admin_sessions` table (by the sha256 of the cookie's token, never the token itself), so they outlast a restart; expired ones are dropped at the next login. With the cookie, every request except `GET` must also send the session's `csrf` value as `X-CSRF-Token`, or it gets `403`. `Secure` means browsers only send the cookie over HTTPS (or to `localhost`), so serve the dashboard through something that terminates TLS. The one exception is a password login that reached the worker over plain HTTP, such as a LAN address with no TLS: that cookie goes without `Secure`, since a browser would otherwise drop it (the password only works from `ARCHIVE_ADMIN_PASSWORD_NETWORKS` anyway). Twitch sign-in always comes back over HTTPS. If a reverse proxy sits in front, list its address in `ARCHIVE_ADMIN_TRUSTED_PROXIES` so the login rate limit and the password networks see the real client and not the proxy (a proxy on this host would otherwise make every request look local), and so its `X-Forwarded-Proto` says whether the browser used HTTPS. Forwarded headers from any other address are ignored.
+
+#### Sign-in from a site's page (`POST /admin/session {code}`)
+
+A site page can learn, in two `fetch`es and with no page redirect, whether the person signed in to the
+vexoulz sites is an archive admin, and get the dashboard session if they are. It needs vexoulz-auth
+`v0.3.0` or later.
+
+1. The page asks vexoulz-auth for a one-time code for this worker's client:
+
+   ```js
+   const me = await fetch(`${AUTH}/v1/me`, { credentials: "include" });   // 401: not signed in, so not an admin
+   const { csrf } = await me.json();
+   const r = await fetch(`${AUTH}/v1/codes`, {
+     method: "POST",
+     credentials: "include",
+     headers: { "Content-Type": "application/json", "X-Vexoulz-CSRF": csrf },
+     body: JSON.stringify({ client_id: "vods-admin" }),   // ARCHIVE_ADMIN_AUTH_CLIENT_ID
+   });
+   // 200 {code}; 401 signed_out (not an admin); 400 unknown_client, 403 csrf, 409 scope_missing, 429 rate_limited
+   ```
+
+2. It hands the code to the worker, as the dashboard reaches it:
+
+   ```js
+   const s = await fetch(`${WORKER}/admin/session`, {
+     method: "POST",
+     credentials: "include",
+     headers: { "Content-Type": "application/json" },
+     body: JSON.stringify({ code }),
+   });
+   ```
+
+The worker redeems the code with vexoulz-auth's `POST /v1/token` (its client id and secret, and the
+redirect URI the code carries: `ARCHIVE_ADMIN_AUTH_CODE_REDIRECT_URL`), then:
+
+| Answer | When |
+|---|---|
+| `200` `{"admin": true, "authenticated": true, "csrf", "expiresAt", "passwordLogin", "twitchLogin", "user"}` + the `archive_admin` cookie | The user is in `ARCHIVE_ADMIN_TWITCH_IDS`. The same session, cookie and once-a-minute check with vexoulz-auth as `/admin/signin/callback` makes; send `csrf` as `X-CSRF-Token` on writes |
+| `200` `{"admin": false}`, no cookie | Signed in, but not an admin |
+| `400` `invalid_code` | The code is missing, unknown, expired (codes last 60 seconds), already used, or its vexoulz-auth session has ended. A wrong `ARCHIVE_ADMIN_AUTH_CODE_REDIRECT_URL` looks like this too |
+| `403` `origin_not_allowed` | The request's `Origin` isn't in `ARCHIVE_ADMIN_SITE_ORIGINS`. The code is not redeemed |
+| `404` `signin_off` | Twitch sign-in isn't configured |
+| `502` `misconfigured` | vexoulz-auth refused the worker's client id or secret |
+| `503` `unavailable` | vexoulz-auth couldn't be reached or is rate-limiting; try again |
+
+Refusals are RFC 9457 problem details (`application/problem+json`, with `code` as above). A request
+without an `Origin` header (not a browser) is let through; a browser always sends one with a `POST`.
+`/admin/session` answers CORS for `ARCHIVE_ADMIN_SITE_ORIGINS` only (credentials allowed; `GET`,
+`POST`, `DELETE`; headers `Content-Type` and `X-CSRF-Token`), and no other admin route answers CORS at
+all. The cookie stays `SameSite=Strict`, so the page must be same-site with the worker's address (a
+sibling host of the same domain, or the site's own proxy to the worker). The audit log records the
+sign-in as `session.login` by `twitch:<id>`, with detail `{"via": "code"}`; the code itself is never
+stored. Any script on one of those origins can do this for whoever is signed in; it gains nothing it
+couldn't already do there with that person's cookies.
 
 What the dashboard reads and edits (all take the key or the cookie):
 
@@ -603,6 +671,26 @@ curl -s "${H[@]}" -X POST "$A/v2/live" -d '{"streamId":"318194011992","path":"/d
 
 That queues a `live_file` job. As with the old app, the call returns **404 when `MULTI_TRACK` is off**, which tells the recorder to delete its file. `driveId` is stored in `vods.drive` but nothing is uploaded to Drive.
 
+### Recording without ads (a linked Twitch account)
+
+Twitch stitches ads into the live stream, and the recorder can only skip them: each ad break is time missing from the live copy (its upload's `gaps`). Twitch leaves the ads out for an account that is ad-free on the channel: one with **Turbo** (every channel), or a **sub** when the channel gives subs ad-free viewing. Link such an account and the worker asks for the live playback token as it; nothing else is done as that account (VOD downloads, chat and chapters stay anonymous).
+
+**Link it from the Manage screen** (Overview → *Twitch (ad-free)* → *Link Twitch account*): the dashboard shows a code; open twitch.tv/activate signed in as the account (the broadcaster's own, typically) and enter it. That is Twitch's device flow, as `ARCHIVE_TWITCH_VIEWER_CLIENT_ID`. From the API:
+
+```bash
+curl -s "${H[@]}" -X POST "$A/admin/twitch/viewer/device"             # {flowId, userCode, verificationUri, expiresIn, interval}
+curl -s "${H[@]}" "$A/admin/twitch/viewer/device/<flowId>"            # {state: pending | linked | failed, status?, error?}
+curl -s "${H[@]}" "$A/admin/twitch/viewer"                            # {linked, valid, login, userId, clientId, method, connectedAt, expiresAt, error, checkedAt}
+curl -s "${H[@]}" -X PUT "$A/admin/twitch/viewer" -d '{"token":"…"}'  # link by pasting a token instead
+curl -s "${H[@]}" -X DELETE "$A/admin/twitch/viewer"                  # unlink
+```
+
+If recordings still have ads with the device-flow token, link by pasting instead: the `auth-token` cookie of twitch.tv signed in as the account (the *Paste a token* button does the same). The worker validates either token with Twitch and keeps the client id it was issued to, since GQL refuses a token sent with another app's client id. Unlinking forgets the token but doesn't revoke it (a pasted one is that browser's sign-in); sign out of Twitch, or disconnect the app under the account's *Connections*, to end it.
+
+The token is stored in `app_state` (key `twitch_viewer_oauth`), never in the config or the logs, and a device-flow token is refreshed before it expires. Anything wrong with it (expired, revoked, Twitch refusing it) only costs the ads: the worker logs a warning and asks for the token anonymously, as without an account. If ads still come through on a token asked for as the account, the recorder logs `stitched ads in the stream although the playback token is <login>'s` once per break: that account isn't ad-free on the channel. `/admin/health`'s `twitchViewer` has the same status as `GET /admin/twitch/viewer` (rechecked at most every 10 minutes). The audit log has `twitch_viewer.link.start`, `twitch_viewer.link` (by whoever started the flow; `failed` with the `error` if Twitch refused), `twitch_viewer.paste` and `twitch_viewer.unlink`, with the account (login, user id, client id, a fingerprint of the token, never the token) as `before`/`after`.
+
+Viewing as a logged-in account is how Twitch's own player works, but whether doing it from a server is within Twitch's terms is the broadcaster's call; leave it unlinked to record as before.
+
 ---
 
 ## 6. Public API reference
@@ -632,6 +720,7 @@ This is what the frontend uses. The output is compatible with the old Feathers A
 | `GET /v1/site/tags` | `{tags: [{name, label, drawn, color, shape, width, height, text, textColor, textSize, textX, textY, textRotate, pattern, patternColor, patternSize}]}`: how the site shows each VOD tag, in order (see [Site tags](#site-tags)); 404 until it was saved once (the site then uses its defaults). `Cache-Control: public, max-age=60`. |
 | `GET /v1/site/tags/:name.svg` | A tag's shape: the cleaned SVG as `image/svg+xml`, with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox` and `X-Content-Type-Options: nosniff`. `Cache-Control: public, max-age=31536000, immutable` when `?v=` is the current hash (as in the list's `shape`), `max-age=60` otherwise. 404 when the tag has no shape. Not rate limited. |
 | `youtube[].preview` | On uploads that have seek-bar previews: `{v, interval, w, h, cols, rows, count}`; absent otherwise. |
+| `youtube[].gaps` | On `live` uploads whose recording missed part of the VOD (ad breaks, an early end): `[[at, seconds], ...]`, sorted, `at` in seconds into that upload. VOD time jumps `seconds` ahead at `at`. Absent otherwise. The upload's delay is `duration − Σ part durations − Σ gaps − Σ cuts`. See "Ad breaks in live recordings" under [Recipes](#recipes). |
 | `chapters[].imageTemplate` | On every chapter in `/vods` (and in `vod`s embedded elsewhere): the box art with `{width}x{height}` in place of the stored `40x53`, like Helix's `box_art_url`. `image` is unchanged. |
 | `chapters[].length` | Same value as `end`, which holds the chapter's length in seconds, not its end time. |
 | `duration_seconds` | On each VOD next to `duration` (`"HH:MM:SS"`), as a number. Only present when `duration` is. |

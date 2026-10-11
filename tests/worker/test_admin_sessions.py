@@ -80,3 +80,21 @@ async def test_audit_names_the_twitch_login(db, deps):
     out, signed_in = audit[0], audit[1]
     assert (out["action"], out["actor"], out["actorLogin"]) == ("session.logout", "twitch:100", "alice")
     assert (signed_in["action"], signed_in["actorLogin"]) == ("session.signin", "alice")
+
+
+async def test_a_code_sign_in_is_audited_without_the_code(db, deps):
+    fake = FakeAuth()
+    deps.settings.admin_api_key = SecretStr("k")
+    deps.settings.admin_twitch_ids = ["100"]
+    app = create_admin_app(
+        deps, jobs.JobService(deps, jobs.create_runtime(deps)), signin=fake, sessions=DbSessionStore()
+    )
+    transport = httpx.ASGITransport(app=app, client=("203.0.113.5", 1234))
+    async with httpx.AsyncClient(transport=transport, base_url="https://admin") as c:
+        code = fake.approve(ALICE)
+        assert (await c.post("/admin/session", json={"code": code})).json()["admin"] is True
+        [row] = await rows()
+        assert row.actor == "twitch:100" and row.sid == "sid-1"
+        audit = (await c.get("/admin/audit?limit=1", headers={"Authorization": "Bearer k"})).json()["data"]
+    assert (audit[0]["action"], audit[0]["actor"], audit[0]["actorLogin"]) == ("session.login", "twitch:100", "alice")
+    assert audit[0]["detail"] == {"via": "code"}

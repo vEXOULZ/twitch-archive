@@ -266,3 +266,54 @@ def test_union_emotes_without_duplicates():
     assert out["global_emotes"] == {"7tv": [{"id": "g", "code": "g"}]}  # type: ignore[index]
     assert out["global_emotes_source"] == "captured"  # type: ignore[index]
     assert timeline.union_emotes(None, b) is b and timeline.union_emotes(a, None) is a
+
+
+# ── Gaps (a live recording's ad breaks) ─────────────────────────────────
+
+
+def live(vid, part, duration, gaps):
+    return {**yt(vid, part, duration, "live"), "gaps": gaps}
+
+
+# 4000 s VOD: recording starts 50 s in, misses 150 s at VOD 1850 and 100 s at VOD 3600 (part 2's end).
+GAPPED = side("g", 4000, [ch(0, 4000)], [live("g1", 1, 1950, [[1800, 150]]), live("g2", 2, 1750, [[1750, 100]])])
+
+
+def test_gaps_leave_only_the_missing_start_as_delay():
+    t = timeline.Timeline.of("g", GAPPED.duration, GAPPED.chapters, GAPPED.youtube, "live")
+    assert t.delay == 50
+    assert t.holes == [(1850, 2000), (3900, 4000)]
+    assert t.vod_time(0) == 50
+    assert t.vod_time(1800) == 2000  # right after the ad break
+    assert t.vod_time(1800, ending=True) == 1850
+    assert t.vod_time(2000) == 2200  # part 2 starts 150 s later than without gaps
+    assert t.part_spans() == [(50, 2150), (2150, 4000)]
+
+
+def test_gaps_and_cuts_together():
+    vod = side("g", 2200, [ch(0, 1000), ch(1000, 100, restricted=True), ch(1100, 1100)], GAPPED.youtube[:1])
+    t = timeline.Timeline.of("g", vod.duration, vod.chapters, vod.youtube, "live")
+    assert t.delay == 0  # 2200 − 1950 − 150 − 100
+    assert t.holes == [(1000, 1100), (1900, 2050)]
+    assert t.vod_time(1800) == 2050
+
+
+def test_split_does_not_cut_a_gap_and_the_halves_keep_theirs():
+    points = timeline.split_intervals(GAPPED)
+    assert (2150, 2150) in points  # part 1 ends after its gap
+    first, second = timeline.plan_split(GAPPED, 2150)
+    assert [e.get("gaps") for e in first.youtube] == [[[1800, 150]]]
+    assert [e.get("gaps") for e in second.youtube] == [[[1750, 100]]]
+    assert first.detail["types"]["live"]["firstDelay"] == 50
+    assert first.detail["types"]["live"]["secondDelay"] == 0
+
+
+def test_merge_keeps_each_uploads_gaps():
+    b = side("h", 1000, [ch(0, 1000)], [live("h1", 1, 900, [[400, 90]])])
+    plan = timeline.plan_merge(GAPPED, b, 4100)
+    assert [(e["id"], e.get("gaps")) for e in plan.youtube] == [
+        ("g1", [[1800, 150]]),
+        ("g2", [[1750, 100]]),
+        ("h1", [[400, 90]]),
+    ]
+    assert plan.detail["types"]["live"]["drift"] == 0

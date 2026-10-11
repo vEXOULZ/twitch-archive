@@ -37,10 +37,11 @@ from archive_common.timeutil import format_hhmmss, hhmmss_to_seconds, parse_heli
 from fastapi import Body, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy import delete, func, insert, or_, select, text, tuple_, update
+from starlette.middleware.base import RequestResponseEndpoint
 from vex_platform.actor import SYSTEM, Actor
-from vex_platform.api import ApiError
+from vex_platform.api import ApiError, problem
 
-from . import api_v2, api_v2_routes, jobs, site_tags, splices, svg_clean, vod_edits, youtube
+from . import api_v2, api_v2_routes, jobs, site_tags, splices, svg_clean, twitch_viewer, vod_edits, youtube
 from .admin_auth import (
     CSRF_HEADER,
     SESSION_COOKIE,
@@ -82,6 +83,12 @@ SESSION_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite"
 # set over HTTP, so there it goes without. The password only works from the local network anyway.
 LAN_SESSION_COOKIE_ARGS = {**SESSION_COOKIE_ARGS, "secure": False}
 STATE_COOKIE_ARGS = {"path": "/", "secure": True, "httponly": True, "samesite": "lax"}
+SESSION_PATH = "/admin/session"  # the one route a site's page may call from its own origin (CORS)
+CORS_HEADERS = {
+    "Access-Control-Allow-Methods": "GET, POST, DELETE",
+    "Access-Control-Allow-Headers": "Content-Type, X-CSRF-Token",
+    "Access-Control-Max-Age": "600",
+}
 AUDITED_PREFIXES = ("/admin/", "/v2/")
 JOB_ROUTES = "/admin/jobs"  # audited by the runtime (and JobService), not by the request
 YOUTUBE_CHECK_MAX_AGE = 600  # /admin/health refreshes the YouTube token at most this often
@@ -245,6 +252,10 @@ def create_admin_app(
     signin = signin or VexoulzAuth.from_settings(settings)
     twitch_ids = {str(i) for i in settings.admin_twitch_ids}
     pending = PendingStates()
+    site_origins = {o.strip().rstrip("/").lower() for o in settings.admin_site_origins if o.strip()}
+
+    def site_origin(origin: str) -> bool:
+        return origin.rstrip("/").lower() in site_origins
 
     def session_cookie_args(request: Request) -> dict[str, Any]:
         return LAN_SESSION_COOKIE_ARGS if plain_http(request, trusted_proxies) else SESSION_COOKIE_ARGS
@@ -357,6 +368,24 @@ def create_admin_app(
             )
         )
 
+    # ── CORS for /admin/session: the configured site origins only ────────
+
+    @app.middleware("http")
+    async def session_cors(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        origin = request.headers.get("origin")
+        if request.url.path != SESSION_PATH or not origin:
+            return await call_next(request)
+        allowed = {"Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true"}
+        if request.method == "OPTIONS" and "access-control-request-method" in request.headers:
+            if not site_origin(origin):
+                return Response(status_code=403, headers={"Vary": "Origin"})
+            return Response(status_code=204, headers={**allowed, **CORS_HEADERS, "Vary": "Origin"})
+        response = await call_next(request)
+        response.headers.append("Vary", "Origin")
+        if site_origin(origin):
+            response.headers.update(allowed)
+        return response
+
     # ── Session (browser login) ───────────────────────────────────────────
 
     def password_here(request: Request) -> bool:
@@ -378,6 +407,8 @@ def create_admin_app(
 
     @app.post("/admin/session")
     async def login(request: Request, body: dict[str, Any] | None = Body(None)) -> Response:
+        if isinstance(body, dict) and "code" in body:
+            return await code_login(request, body["code"])
         if not passwords.enabled:
             raise AdminError(404, "Password login is off (ARCHIVE_ADMIN_PASSWORD is not set)")
         address = client_address(request, trusted_proxies)
@@ -400,6 +431,47 @@ def create_admin_app(
         request.state.actor = "password"
         response = JSONResponse(session_json(request, session))
         response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **session_cookie_args(request))
+        return response
+
+    def refused(status: int, code: str, detail: str) -> Response:
+        """A code sign-in's refusal, as RFC 9457 problem details."""
+        response: Response = problem(status, code, detail)
+        return response
+
+    async def code_login(request: Request, code: Any) -> Response:
+        """``POST /admin/session {code}``: a Twitch sign-in from a code the site minted with vexoulz-auth's
+        ``POST /v1/codes``, without a redirect. An admin gets the dashboard session the callback would
+        make; anyone else ``{"admin": false}`` and no cookie. Refusals are problem details."""
+        origin = request.headers.get("origin")
+        if origin is not None and not site_origin(origin):
+            log.warning("admin code sign-in refused from origin %s (not in ARCHIVE_ADMIN_SITE_ORIGINS)", origin)
+            return refused(403, "origin_not_allowed", "This origin is not one of ARCHIVE_ADMIN_SITE_ORIGINS")
+        if signin is None:
+            return refused(404, "signin_off", "Twitch sign-in is off (see ARCHIVE_ADMIN_AUTH_* in the README)")
+        if not isinstance(code, str) or not code:
+            return refused(400, "invalid_code", "Missing parameter: code")
+        try:
+            signed_in = await signin.redeem(code, fetched=True)
+        except SignInError as exc:
+            log.warning("admin code sign-in failed (%s): %s", exc.reason, exc)
+            if exc.reason == "expired":
+                return refused(400, "invalid_code", "The code is unknown, expired or already used")
+            if exc.reason == "misconfigured":
+                return refused(502, "misconfigured", "vexoulz-auth refused this worker's client credentials")
+            return refused(503, "unavailable", "vexoulz-auth could not be reached; try again")
+        user_id = str(signed_in.user.get("id", ""))
+        if user_id not in twitch_ids:
+            # Every signed-in viewer's check: not worth a warning.
+            log.info("admin code sign-in: twitch:%s (%s) is not an admin", user_id, signed_in.user.get("login"))
+            return JSONResponse({"admin": False})
+        await passwords.logout(request.cookies.get(SESSION_COOKIE))
+        session = await passwords.login(f"twitch:{user_id}", signed_in.user, signed_in.sid)
+        request.state.actor = session.actor  # audited as session.login, without the code
+        request.state.actor_login = login_of(session)
+        request.state.audit_detail = {"via": "code"}
+        response = JSONResponse({"admin": True, **session_json(request, session)})
+        cookie: dict[str, Any] = SESSION_COOKIE_ARGS  # the callback's: always Secure
+        response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **cookie)
         return response
 
     # ── Twitch sign-in (through vexoulz-auth) ─────────────────────────────
@@ -604,7 +676,9 @@ def create_admin_app(
                 log.exception("health: database query failed")
                 return None
 
-        db, api, yt = await asyncio.gather(db_state(), api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE))
+        db, api, yt, viewer = await asyncio.gather(
+            db_state(), api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE), viewer_check()
+        )
         db_ok = db is not None
         counts, failures, live = db or ({st: 0 for st in jobs.STATES}, [], None)
         return {
@@ -619,6 +693,7 @@ def create_admin_app(
                 "refreshTokenExpiresAt": yt.get("refreshTokenExpiresAt"),
                 "checkedAt": iso_utc(yt["checkedAt"]),
             },
+            "twitchViewer": viewer,
             "live": {
                 "live": live is not None,
                 "streamId": str(live.id) if live else None,
@@ -1291,6 +1366,11 @@ def create_admin_app(
         """Current global sets onto every emotes row that has none (optionally only ``vodIds``)."""
         return await backfill("global_emotes_backfill", "global emotes", body)
 
+    @app.post("/admin/live-gaps/backfill", dependencies=auth)
+    async def live_gaps_backfill(body: dict[str, Any] | None = Body(None)) -> dict[str, Any]:
+        """``gaps`` on the live uploads saved without them, from their live jobs (optionally only ``vodIds``)."""
+        return await backfill("live_gaps_backfill", "live gaps", body)
+
     @app.post("/admin/bot-chat", dependencies=auth)
     async def bot_chat(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         """Read the VOD's chat from doomtp-bot into bot_logs (adds or updates rows only)."""
@@ -1408,6 +1488,99 @@ def create_admin_app(
         if not status["valid"]:
             raise AdminError(500, f"Token stored but not usable: {status['error']}")
         return _ok("YouTube authorized. You can close this tab.")
+
+    # ── Twitch viewer account (live playback tokens without stitched ads) ─
+
+    async def viewer_check(fresh: bool = False) -> dict[str, Any] | None:
+        """The linked account for the dashboard (``twitchViewer`` in /admin/health), or None if the
+        check itself failed."""
+        try:
+            st = await (deps.viewer.check() if fresh else deps.viewer.cached_check(YOUTUBE_CHECK_MAX_AGE))
+        except Exception:
+            log.exception("could not check the Twitch viewer token")
+            return None
+        return {**st, "checkedAt": iso_utc(st["checkedAt"])}
+
+    # Device flows in progress, by an id the dashboard polls with; the device code never leaves the worker.
+    linking: dict[str, tuple[float, str, Actor]] = {}  # id -> (monotonic expiry, device code, who started it)
+
+    @app.get("/admin/twitch/viewer", dependencies=auth)
+    async def twitch_viewer_status() -> dict[str, Any] | None:
+        """The linked account and whether Twitch still accepts its token (checked now)."""
+        return await viewer_check(fresh=True)
+
+    @app.post("/admin/twitch/viewer/device", dependencies=auth)
+    async def twitch_viewer_device(request: Request) -> dict[str, Any]:
+        """Start linking: the code to enter at ``verificationUri`` (twitch.tv/activate), signed in as the
+        account to link. Poll ``GET /admin/twitch/viewer/device/{flowId}`` every ``interval`` seconds."""
+        try:
+            flow = await twitch_viewer.start_device(settings)
+        except twitch_viewer.ViewerTokenError as exc:
+            raise AdminError(502, str(exc)) from exc
+        now = time.monotonic()
+        for key in [k for k, (until, _, _) in linking.items() if until < now]:
+            del linking[key]
+        flow_id = secrets.token_urlsafe(16)
+        linking[flow_id] = (now + int(flow["expires_in"]), flow["device_code"], _actor.get())
+        request.state.audit_target = twitch_viewer.AUDIT_TARGET
+        return {
+            "flowId": flow_id,
+            "userCode": flow["user_code"],
+            "verificationUri": flow["verification_uri"],
+            "expiresIn": int(flow["expires_in"]),
+            "interval": int(flow.get("interval") or 5),
+        }
+
+    @app.get("/admin/twitch/viewer/device/{flow_id}", dependencies=auth)
+    async def twitch_viewer_device_poll(flow_id: str) -> dict[str, Any]:
+        """``state``: ``pending`` until the code is entered, then ``linked`` (with ``status``), or ``failed``
+        (with ``error``: expired, refused, or a token Twitch won't validate)."""
+        found = linking.get(flow_id)
+        if found is None or found[0] < time.monotonic():
+            linking.pop(flow_id, None)
+            return {"state": "failed", "error": "This link expired; start again"}
+        _, device_code, actor = found
+        before = twitch_viewer.token_summary(await twitch_viewer.load_token())
+        try:
+            token = await twitch_viewer.poll_device(settings, device_code)
+        except twitch_viewer.ViewerTokenError as exc:
+            linking.pop(flow_id, None)
+            await twitch_viewer.audit_link(actor, before, None, error=str(exc))
+            return {"state": "failed", "error": str(exc)}
+        if token is None:
+            return {"state": "pending"}
+        linking.pop(flow_id, None)
+        deps.viewer.forget()
+        await twitch_viewer.audit_link(actor, before, twitch_viewer.token_summary(token))
+        return {"state": "linked", "status": await viewer_check(fresh=True)}
+
+    @app.put("/admin/twitch/viewer", dependencies=auth)
+    async def twitch_viewer_paste(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any] | None:
+        """Link by pasting a token (``{"token": ...}``): the ``auth-token`` cookie of twitch.tv signed in as
+        the account, when the device flow's token doesn't get an ad-free stream. Audited without it."""
+        raw = str(body.get("token") or "").strip().removeprefix("OAuth ").strip()
+        if not raw:
+            raise AdminError(400, "token is required")
+        before = twitch_viewer.token_summary(await twitch_viewer.load_token())
+        try:
+            token = await twitch_viewer.store(raw, method="paste")
+        except twitch_viewer.ViewerTokenError as exc:
+            raise AdminError(400, str(exc)) from exc
+        deps.viewer.forget()
+        request.state.audit_target = twitch_viewer.AUDIT_TARGET
+        request.state.audit_detail = {"before": before, "after": twitch_viewer.token_summary(token)}
+        return await viewer_check(fresh=True)
+
+    @app.delete("/admin/twitch/viewer", dependencies=auth)
+    async def twitch_viewer_unlink(request: Request) -> dict[str, Any]:
+        """Forget the linked account: live playback tokens are asked for anonymously again. The token is
+        not revoked (a pasted one is the account's website sign-in); sign out on Twitch to end it."""
+        before = twitch_viewer.token_summary(await twitch_viewer.load_token())
+        await twitch_viewer.clear_token()
+        deps.viewer.forget()
+        request.state.audit_target = twitch_viewer.AUDIT_TARGET
+        request.state.audit_detail = {"before": before, "after": None}
+        return _ok("Twitch account unlinked")
 
     # ── /api/v2 ───────────────────────────────────────────────────────────
 

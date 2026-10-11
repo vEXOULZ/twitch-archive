@@ -8,7 +8,7 @@ from ..context import JobContext
 from . import bot_chat, capture, previews
 from .media import cleanup, dmca_edit, ensure_source, fetch_vod, finalize, resolve_vod, split
 from .metadata import chapters, chat, emotes, global_emotes_backfill, logs_manual, seventv_flags_backfill
-from .publish import describe, upload
+from .publish import describe, live_gaps_backfill, upload
 
 Step = Callable[[JobContext], Awaitable[None]]
 
@@ -26,6 +26,7 @@ STEPS: dict[str, Step] = {
     "bot_chat_backfill": bot_chat.bot_chat_backfill,
     "global_emotes_backfill": global_emotes_backfill,
     "seventv_flags_backfill": seventv_flags_backfill,
+    "live_gaps_backfill": live_gaps_backfill,
     "logs_manual": logs_manual,
     "split": split,
     "dmca_edit": dmca_edit,

@@ -173,3 +173,16 @@ def test_restricted_chapters_are_cut_where_they_are_in_the_recording():
     assert moved[1]["duration"] == "00:13:40"
     parts = planning.plan_parts(3600, moved, ["Artifact"], 10800)
     assert [(p.start, p.end) for p in parts] == [(0, 820), (1420, 3600)]
+
+
+def test_recording_gaps_puts_ad_breaks_where_they_happened() -> None:
+    # VOD starts at 1000; recording starts 47 s late, misses 150 s at VOD 1847, ends 30 s early.
+    timeline: list[list[float]] = [[0, 1047, 1800], [1800, 2997, 1000]]
+    gaps = planning.recording_gaps(3027, 1000, timeline, [], [2000, 800])
+    assert gaps == [[[1800, 150]], [[800, 30]]]
+
+
+def test_recording_gaps_leave_out_what_a_cut_already_removes() -> None:
+    timeline: list[list[float]] = [[0, 1000, 100], [100, 1200, 100]]  # hole at VOD [100, 200)
+    gaps = planning.recording_gaps(300, 1000, timeline, [(150, 250)], [150])
+    assert gaps == [[[100, 50]]]
