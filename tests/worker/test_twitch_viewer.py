@@ -171,6 +171,16 @@ async def test_link_with_the_device_flow_then_unlink(clean, deps, make_service, 
     assert DEVICE_TOKEN not in json.dumps([r["before"] for r in rows] + [r["after"] for r in rows], default=str)
 
 
+async def test_a_refused_device_flow_says_why(clean, deps, make_service, respx_mock):
+    deps.settings.admin_api_key = SecretStr("k")
+    app = create_admin_app(deps, await make_service(start=False))
+    respx_mock.post(twitch_viewer.DEVICE_URL).respond(400, json={"status": 400, "message": "invalid client"})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://admin") as c:
+        resp = await c.post("/admin/twitch/viewer/device", headers={"Authorization": "Bearer k"})
+    # A 4xx, not a 502 Cloudflare would swap for its own page.
+    assert resp.status_code == 400 and "invalid client" in resp.text
+
+
 async def test_link_by_pasting_a_token(clean, deps, make_service, respx_mock):
     deps.settings.admin_api_key = SecretStr("k")
     app = create_admin_app(deps, await make_service(start=False))
