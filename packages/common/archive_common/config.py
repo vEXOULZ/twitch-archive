@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # failing with "PersistedQueryNotFound", update the hash here.
     gql_client_id: str = "kimne78kx3ncx6brgo4mv6wki5h1ko"
     gql_backup_client_id: str = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"
+    # The client id the Manage screen's "Link Twitch account" device flow asks for a token as (Twitch's
+    # Android app, which allows the device flow): the token GQL gets for the live playback token.
+    twitch_viewer_client_id: str = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"
     gql_hash_playback_token: str = "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9"
     gql_hash_comments: str = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a"
     gql_hash_moments: str = "7399051b2d46f528d5f0eedf8b0db8d485bb1bb4c0a2c6707be6f1290cdcb31a"
@@ -131,6 +134,12 @@ class Settings(BaseSettings):
     admin_auth_client_secret: SecretStr = SecretStr("")
     # This worker's /admin/signin/callback as browsers reach it; registered with vexoulz-auth.
     admin_auth_redirect_url: str = ""
+    # The redirect URI a code from vexoulz-auth's POST /v1/codes carries: the client's first registered
+    # one. Empty = admin_auth_redirect_url.
+    admin_auth_code_redirect_url: str = ""
+    # Site origins (e.g. https://vods.example.net) that may call /admin/session from the browser, with
+    # cookies: CORS answers only them, and a sign-in with a code from any other origin is refused.
+    admin_site_origins: list[str] = []
     # Where /admin/health looks for archive-api; empty = http://127.0.0.1:<api_port>.
     api_internal_url: str = ""
     # GET /admin/vods/{id}/merge-candidates: VODs that started up to this long after one ended.

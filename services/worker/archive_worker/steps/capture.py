@@ -189,7 +189,8 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
 # ── Live stream recording ─────────────────────────────────────────────────
 
 
-async def _live_variant(ctx: JobContext, login: str) -> str | None:
+async def _live_variant(ctx: JobContext, login: str) -> tuple[str, str | None] | None:
+    """The variant playlist to record, and the linked viewer account its token was asked for as."""
     tok = await ctx.deps.gql.live_access_token(login)
     try:
         master = await http.request("GET", hls.live_master_url(login, tok.value, tok.signature), attempts=2)
@@ -201,7 +202,7 @@ async def _live_variant(ctx: JobContext, login: str) -> str | None:
     if not variants:
         return None
     source = next((v for v in variants if v.video == "chunked"), None)
-    return (source or max(variants, key=lambda v: v.bandwidth)).uri
+    return (source or max(variants, key=lambda v: v.bandwidth)).uri, tok.viewer
 
 
 def _load_times(path: Path) -> list[tuple[float, float | None]]:
@@ -231,6 +232,8 @@ async def live_record(ctx: JobContext) -> None:
     last_seq: int = ctx.payload.get("last_seq", -1)
     pending_disc = last_seq >= 0  # resuming after a restart => there is a gap
     variant_url: str | None = None
+    viewer: str | None = None  # the linked account the playback token is for, if any
+    in_ad = False
     idle = 0
     failures = 0
     init_name: str | None = ctx.payload.get("init_name")
@@ -240,7 +243,7 @@ async def live_record(ctx: JobContext) -> None:
         while True:
             if variant_url is None:
                 try:
-                    variant_url = await _live_variant(ctx, login)
+                    variant_url, viewer = await _live_variant(ctx, login) or (None, None)
                 except Exception as exc:
                     ctx.log.warning("live token/master failed: %s", exc)
                 if variant_url is None:
@@ -288,6 +291,13 @@ async def live_record(ctx: JobContext) -> None:
             failed = {dest.name: exc for dest, exc in lost}
             for seg in new:
                 last_seq = seg.sequence
+                if seg.ad and not in_ad and viewer:
+                    ctx.log.warning(
+                        "stitched ads in the stream although the playback token is %s's: that account isn't "
+                        "ad-free on this channel (no Turbo, or a sub without ad-free viewing)",
+                        viewer,
+                    )
+                in_ad = seg.ad
                 if seg.ad:
                     pending_disc = True
                     continue

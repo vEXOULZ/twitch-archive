@@ -92,6 +92,9 @@ ROUTE_ACTIONS: dict[str, str] = {
     "POST /admin/live-gaps/backfill": "live_gaps.backfill",
     "POST /admin/youtube/parts": "vod.youtube.describe",
     "POST /admin/youtube/chapters": "vod.youtube.describe",
+    "POST /admin/twitch/viewer/device": "twitch_viewer.link.start",
+    "PUT /admin/twitch/viewer": "twitch_viewer.paste",
+    "DELETE /admin/twitch/viewer": "twitch_viewer.unlink",
     "POST /v2/live": "vod.live_file",
 }
 # A route not in ROUTE_ACTIONS (one since removed, in an old row): the route goes in ``detail``.
