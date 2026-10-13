@@ -392,3 +392,59 @@ def _merge(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
         else:
             out.append((a, b))
     return out
+
+
+# ── Censor (vods.censor) ──────────────────────────────────────────────────
+
+COVER_RANK = {"blur": 1, "black": 2}  # where ranges overlap, black wins
+
+
+@dataclass(frozen=True)
+class CensorPlan:
+    cover: list[tuple[float, float, str]]  # (start, end, "blur" | "black"), sorted, not overlapping
+    mute: list[tuple[float, float]]
+
+    @property
+    def empty(self) -> bool:
+        return not self.cover and not self.mute
+
+
+def plan_censor(ranges: list[dict[str, Any]] | None) -> CensorPlan:
+    """``vods.censor`` ranges (on the file's timeline) -> what to cover and what to mute."""
+    marks: set[float] = set()
+    covers: list[tuple[float, float, int]] = []
+    mute: list[tuple[float, float]] = []
+    for r in ranges or []:
+        a, b = float(r["start"]), float(r["end"])
+        if b <= a:
+            continue
+        if r.get("video") in COVER_RANK:
+            covers.append((a, b, COVER_RANK[r["video"]]))
+            marks |= {a, b}
+        if r.get("mute"):
+            mute.append((a, b))
+    names = {v: k for k, v in COVER_RANK.items()}
+    cover: list[tuple[float, float, str]] = []
+    points = sorted(marks)
+    for a, b in zip(points, points[1:], strict=False):
+        rank = max((c[2] for c in covers if c[0] <= a and b <= c[1]), default=0)
+        if not rank:
+            continue
+        if cover and cover[-1][1] == a and cover[-1][2] == names[rank]:
+            cover[-1] = (cover[-1][0], b, names[rank])
+        else:
+            cover.append((a, b, names[rank]))
+    return CensorPlan(cover, _merge(mute))
+
+
+def censor_on_recording(
+    ranges: list[dict[str, Any]] | None, vod_start: float, timeline: list[list[float]]
+) -> list[dict[str, Any]]:
+    """The VOD's censor ranges moved onto a live recording; one that was not recorded at all is left out."""
+    out = []
+    for r in ranges or []:
+        a = recording_time(float(r["start"]), vod_start, timeline)
+        b = recording_time(float(r["end"]), vod_start, timeline)
+        if b > a:
+            out.append(r | {"start": num_seconds(a), "end": num_seconds(b)})
+    return out

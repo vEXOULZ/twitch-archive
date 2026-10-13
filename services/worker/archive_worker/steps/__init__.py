@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from ..context import JobContext
 from . import bot_chat, capture, previews
-from .media import cleanup, dmca_edit, ensure_source, fetch_vod, finalize, resolve_vod, split
+from .media import censor, cleanup, dmca_edit, ensure_source, fetch_vod, finalize, resolve_vod, split
 from .metadata import chapters, chat, emotes, global_emotes_backfill, logs_manual, seventv_flags_backfill
 from .publish import describe, live_gaps_backfill, upload
 
@@ -30,6 +30,7 @@ STEPS: dict[str, Step] = {
     "logs_manual": logs_manual,
     "split": split,
     "dmca_edit": dmca_edit,
+    "censor": censor,
     "upload": upload,
     "describe": describe,
     "previews": previews.previews,

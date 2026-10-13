@@ -120,3 +120,17 @@ async def notify_rows_moved(s: AsyncSession, *vod_ids: str) -> None:
     """
     for vod_id in vod_ids:
         await s.execute(select(func.pg_notify(VOD_CHANGED, ROWS_MOVED + vod_id)))
+
+
+async def drop_youtube_entries(vod_id: str, video_ids: set[str]) -> list[dict[str, Any]]:
+    """Take uploads off the VOD's ``youtube`` list (row-locked, as a finishing upload writes it); the
+    entries taken off."""
+    async with get_sessionmaker()() as s:
+        vod = (await s.execute(select(Vod).where(Vod.id == vod_id).with_for_update())).scalar_one_or_none()
+        if vod is None:
+            return []
+        dropped = [e for e in vod.youtube or [] if str(e.get("id")) in video_ids]
+        if dropped:
+            vod.youtube = [e for e in vod.youtube or [] if str(e.get("id")) not in video_ids]
+            await s.commit()
+        return dropped
