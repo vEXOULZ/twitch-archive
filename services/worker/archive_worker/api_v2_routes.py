@@ -9,7 +9,8 @@ one (settings, VODs), right after it otherwise (a storage delete is files, not r
     DELETE /api/v2/settings/{key}      back to the env value
     GET    /api/v2/storage             the disk and each job folder
     DELETE /api/v2/storage/{area}/{name}
-    GET    /api/v2/vods                every VOD, hidden, merged and synthetic ones too, newest first
+    GET    /api/v2/vods                every VOD, hidden, merged and synthetic ones too, newest first, each
+                                       with whether it is uploaded and its queued, running or paused jobs
     GET    /api/v2/vods/{vod_id}
     PATCH  /api/v2/vods/{vod_id}       title, hidden, thumbnail_url, duration, created_at, tags
     POST   /api/v2/synthetic           a synthetic VOD: segments of real ones (see compose, synthetic)
@@ -42,7 +43,7 @@ from vex_platform.api import ApiError, ApiModel, Page, UtcDatetime, decode_curso
 from vex_platform.audit import AuditEntry
 from vex_platform.audit.sqlalchemy import record
 
-from . import compose, site_tags, splices, synthetic, vod_edits
+from . import compose, jobs, site_tags, splices, synthetic, vod_edits
 from .runtime_settings import RuntimeSettings
 from .storage import Storage, StorageError
 from .vods import notify_rows_moved
@@ -228,6 +229,13 @@ def storage_router(storage: Storage, auth: Auth) -> APIRouter:
 # ── VODs ───────────────────────────────────────────────────────────────────
 
 
+class ActiveJob(ApiModel):
+    id: int
+    kind: str
+    state: str  # queued, running or paused
+    step: str | None = None
+
+
 class VodRow(ApiModel):
     id: str
     title: str | None = None
@@ -240,6 +248,8 @@ class VodRow(ApiModel):
     merged_into: dict[str, Any] | None = None  # {id, offset} once merged into that VOD
     tags: list[str]  # [] = a regular VOD
     synthetic: dict[str, Any] | None = None  # {supersedes} on a synthetic VOD
+    uploaded: bool = False  # it has YouTube parts
+    active_jobs: list[ActiveJob] = []  # queued, running or paused, oldest first
 
 
 class VodDetail(VodRow):
@@ -284,7 +294,12 @@ def _row(vod: Vod) -> dict[str, Any]:
         "merged_into": vod.merged_into,
         "tags": list(vod.tags or []),
         "synthetic": vod.synthetic,
+        "uploaded": bool(vod.youtube),
     }
+
+
+def _active(rows: list[Any]) -> list[ActiveJob]:
+    return [ActiveJob(id=j.id, kind=j.kind, state=j.state, step=j.step) for j in rows]
 
 
 async def _detail(vod: Vod) -> VodDetail:
@@ -299,6 +314,7 @@ async def _detail(vod: Vod) -> VodDetail:
         bot_chat=vod.bot_chat,
         updated_at=vod.updated_at,
         splices=await splices.active_splices(vod.id),
+        active_jobs=_active((await jobs.active_by_vod([vod.id])).get(vod.id, [])),
         segments=_snake(segments) if segments is not None else None,
         in_synthetic=_snake(await synthetic.containing(vod.id)),
     )
@@ -341,7 +357,9 @@ def vods_router(auth: Auth) -> APIRouter:
             stmt = stmt.where(tuple_(Vod.created_at, Vod.id) < tuple_(at, str(key[1])))  # type: ignore[arg-type]
         async with get_sessionmaker()() as s:
             vods = (await s.execute(stmt)).scalars().all()
-        page = page_of([VodRow(**_row(v)) for v in vods], limit, lambda v: [v.created_at.isoformat(), v.id])
+        active = await jobs.active_by_vod([v.id for v in vods[:limit]])
+        rows = [VodRow(**_row(v), active_jobs=_active(active.get(v.id, []))) for v in vods]
+        page = page_of(rows, limit, lambda v: [v.created_at.isoformat(), v.id])
         return Page[VodRow](items=page.items, next_cursor=page.next_cursor)
 
     @router.get("/vods/{vod_id}")

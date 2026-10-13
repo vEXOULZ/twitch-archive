@@ -234,6 +234,18 @@ async def find_active(kind: str, *, vod_id: str | None = None, stream_id: str | 
         return (await s.execute(stmt)).first()  # type: ignore[no-any-return]
 
 
+async def active_by_vod(vod_ids: list[str]) -> dict[str, list[Row]]:  # type: ignore[type-arg]
+    """The queued, running and paused jobs of each of ``vod_ids`` that has any, oldest first."""
+    if not vod_ids:
+        return {}
+    stmt = select(ALL_JOBS).where(ALL_JOBS.c.state.in_(ACTIVE), ALL_JOBS.c.vod_id.in_(vod_ids)).order_by(ALL_JOBS.c.id)
+    out: dict[str, list[Row]] = {}  # type: ignore[type-arg]
+    async with get_sessionmaker()() as s:
+        for row in (await s.execute(stmt)).all():
+            out.setdefault(row.vod_id, []).append(row)
+    return out
+
+
 async def exists_any(kind: str, *, vod_id: str | None = None, stream_id: str | None = None) -> bool:
     """Any job (including finished/failed) — used so the monitor enqueues once per stream."""
     async with get_sessionmaker()() as s:
