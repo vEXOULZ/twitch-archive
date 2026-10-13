@@ -30,7 +30,7 @@ def test_add_counts_units_and_calls_and_starts_again_each_day():
 
 
 @pytest.fixture
-async def clean():
+async def clean(db):
     async def wipe():
         async with get_sessionmaker()() as s:
             await s.execute(delete(AppState).where(AppState.key == youtube_quota.STATE_KEY))
