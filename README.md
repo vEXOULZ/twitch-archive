@@ -623,12 +623,15 @@ curl -s "${H[@]}" "$A/admin/vods/123/games"             # the games rows, as GET
 curl -s "${H[@]}" -X PUT "$A/admin/vods/123/games" \
   -d '{"games":[{"start_time":0,"end_time":3600,"game_id":"512953","game_name":"Elden Ring","video_provider":"youtube","video_id":"abc"}]}'
 curl -s "${H[@]}" "$A/admin/twitch/games?query=chat"    # Twitch categories: gameId, name, imageTemplate
+curl -s "${H[@]}" "$A/admin/twitch/videos"              # the channel's VODs still on Twitch, with what the archive has of each
+curl -s "${H[@]}" -X POST "$A/admin/twitch/import" -d '{"vodIds":["123","456"]}'   # archive them, paused before capture
 curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 ```
 
 - **Health** refreshes the YouTube token at most every 10 minutes; `/admin/youtube/status` always does.
 - **Job events** keep about the last 1000 entries per job. `capture`, `split` and `upload` add `progress` (`{"done", "total", "unit"}`, unit `parts`, `bytes` or `percent`).
 - **Chapters** must be sorted, must not overlap, must have `length > 0` and must end inside the VOD. They are stored in the legacy shape, with `image` filled in at 40x53 for older readers. `"locked": true` makes the automatic `chapters` step skip the VOD. `POST /admin/chapters` with `{"force": true}` (or a job payload with `"force": true`) overrides the lock.
+- **VODs on Twitch** (`GET /admin/twitch/videos`): every past broadcast Twitch still keeps for the channel (7 to 60 days, depending on the channel), newest first, as `{data}`, each `{id, title, createdAt, duration, thumbnailUrl, inArchive, uploaded, archiveJob}`. `inArchive` means the VOD has a row, `uploaded` means it has YouTube parts, and `archiveJob` is `{id, state, step}` for a queued, running or paused archive job, otherwise `null`. `POST /admin/twitch/import` with `{"vodIds": [...]}` queues an archive job for each one (creating its row from Twitch when it has none), paused before `capture`; send `"paused": false` to let them run. It answers `{added: [{vodId, jobId}], skipped: [{vodId, reason}]}`: a VOD no longer on Twitch, or with an archive job already queued, running or paused, is skipped.
 - **YouTube entries** keep their stored thumbnail, and keep their duration unless you send a new one.
 - **The VOD list** (`GET /admin/vods`) has every VOD, hidden and merged ones included, newest first: `{data, next}`, each row `{id, title, createdAt, duration, duration_seconds, thumbnail_url, stream_id, hidden, merged_into}`. `q` matches the id exactly or the title (case-insensitive substring), `hidden=true|false` filters, `limit` is at most 200, and `before=<next>` pages back.
 - **VOD fields** (`PATCH /admin/vods/{id}`): any of `title`, `hidden`, `thumbnailUrl` (an http(s) URL, or `null` for the site's default), `duration` (`HH:MM:SS`; it must still hold the chapters and games rows) and `createdAt` (ISO with an offset). A merged VOD takes only `hidden`. **Hidden** takes the VOD off the public API as if it were missing (see [§6](#6-public-api-reference)); the dashboard still has it, and unhiding brings it back.
