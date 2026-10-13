@@ -174,13 +174,49 @@ async def dmca_edit(ctx: JobContext) -> None:
         ctx.payload.pop("parts", None)
 
 
+async def censor(ctx: JobContext) -> None:
+    """Blur or black out the video and mute the audio of the VOD's censor ranges (``vods.censor``, set
+    from the dashboard) in the full source, before ``split`` cuts it. A live recording's ranges are
+    moved onto its own timeline. Nothing to do without ranges.
+
+    Safe to re-run part-way: it always starts from the source it found the first time (``censor_from``)."""
+    vod = await ctx.get_vod()
+    ranges = vod.censor or []
+    timeline = ctx.payload.get("timeline")
+    if ranges and ctx.video_type == "live" and timeline:
+        ranges = planning.censor_on_recording(ranges, vod.created_at.timestamp(), timeline)
+    plan = planning.plan_censor(ranges)
+    if plan.empty:
+        ctx.log.info("no censor ranges for %s", ctx.vod_id)
+        return
+    src = Path(ctx.payload.setdefault("censor_from", str(ctx.source_mp4)))
+    await ctx.save()
+    work = ctx.work_dir / "censor"
+    cur = src
+    if plan.cover:
+        nxt = work / f"{src.stem}-covered.mp4"
+        spans = ", ".join(f"{mode} {format_hhmmss(a)}-{format_hhmmss(b)}" for a, b, mode in plan.cover)
+        ctx.log.info("covering %s: %s", src.name, spans)
+        await ffmpeg.cover(cur, nxt, plan.cover, work)
+        cur = nxt
+    if plan.mute:
+        nxt = work / f"{src.stem}-censored.mp4"
+        ctx.log.info("muting %d range(s) in %s", len(plan.mute), src.name)
+        await ffmpeg.mute(cur, nxt, plan.mute)
+        if cur != src:
+            cur.unlink(missing_ok=True)
+        cur = nxt
+    ctx.payload["mp4"] = str(cur)
+    ctx.payload.pop("parts", None)  # cut from the uncensored file
+
+
 async def cleanup(ctx: JobContext) -> None:
     s = ctx.settings
     if s.dry_run:
         ctx.log.info("dry run: keeping files in %s", ctx.work_dir)
         return
     removed: list[Path] = []
-    for d in (ctx.parts_dir, ctx.work_dir / "dmca"):
+    for d in (ctx.parts_dir, ctx.work_dir / "dmca", ctx.work_dir / "censor"):
         if d.exists():
             await asyncio.to_thread(shutil.rmtree, d, True)
             removed.append(d)

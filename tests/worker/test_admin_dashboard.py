@@ -763,3 +763,76 @@ async def test_youtube_check_reports_removed_uploads_and_keeps_the_last(vod, app
             if kept is not None:
                 s.add(AppState(key=youtube_check.STATE_KEY, value=kept))
             await s.commit()
+
+
+# ── Censor ranges, deleting uploads, re-archiving ─────────────────────────
+
+
+async def test_censor_ranges_are_saved_checked_and_audited(vod, app):
+    ranges = [{"start": 60, "end": 90, "video": "blur", "mute": True, "note": "nudity"}]
+    async with client(app) as c:
+        r = await c.put(f"/admin/vods/{vod}/censor", json={"censor": ranges}, headers=KEY)
+        assert r.status_code == 200, r.text
+        assert r.json()["censor"] == ranges
+        bad = await c.put(
+            f"/admin/vods/{vod}/censor", json={"censor": [{"start": 0, "end": 9000, "mute": True}]}, headers=KEY
+        )
+        assert bad.status_code == 400 and "after the end of the VOD" in bad.text
+        assert (await c.get(f"/admin/vods/{vod}", headers=KEY)).json()["censor"] == ranges
+    async with get_sessionmaker()() as s:
+        [row] = (await s.execute(select(AUDIT_LOG).where(AUDIT_LOG.c.target == f"vod:{vod}"))).all()
+    assert (row.action, row.before, row.after) == ("vod.censor.replace", [], ranges)
+
+
+async def test_deleting_uploads_takes_them_off_and_rewrites_the_rest(vod, app, deps, monkeypatch):
+    async with get_sessionmaker()() as s:
+        await s.execute(
+            update(Vod)
+            .where(Vod.id == vod)
+            .values(
+                youtube=[
+                    {"id": "yt1", "type": "vod", "duration": 3600, "part": 1},
+                    {"id": "yt2", "type": "vod", "duration": 3600, "part": 2},
+                    {"id": "yt3", "type": "vod", "duration": 3600, "part": 3},
+                ]
+            )
+        )
+        await s.commit()
+    asked: list[str] = []
+
+    async def delete_video(video_id: str) -> bool:
+        asked.append(video_id)
+        if video_id == "yt3":
+            raise RuntimeError("quota exceeded")
+        return video_id == "yt1"  # yt2 was already gone: just taken off
+
+    monkeypatch.setattr(deps.youtube, "delete", delete_video)
+    async with client(app) as c:
+        unknown = await c.post(f"/admin/vods/{vod}/youtube/delete", json={"videos": ["nope"]}, headers=KEY)
+        assert unknown.status_code == 400
+        assert (await c.post(f"/admin/vods/{vod}/youtube/delete", json={"videos": []}, headers=KEY)).status_code == 400
+        r = await c.post(
+            f"/admin/vods/{vod}/youtube/delete", json={"videos": ["yt1", "yt2", "yt3", "yt1"]}, headers=KEY
+        )
+        assert r.status_code == 200, r.text
+        got = r.json()
+    assert asked == ["yt1", "yt2", "yt3"]
+    assert got["deleted"] == ["yt1", "yt2"]
+    assert [f["id"] for f in got["failed"]] == ["yt3"]
+    assert [e["id"] for e in got["vod"]["youtube"]] == ["yt3"]
+    [job] = got["describeJobs"]
+    async with get_sessionmaker()() as s:
+        row = (await s.execute(select(RUNS).where(RUNS.c.id == job))).one()
+    assert (row.kind, row.payload["type"]) == ("describe", "vod")
+
+
+async def test_rearchive_queues_a_replacing_upload(vod, app):
+    async with client(app) as c:
+        whole = (await c.post(f"/admin/vods/{vod}/rearchive", json={"type": "vod"}, headers=KEY)).json()
+        part = (await c.post(f"/admin/vods/{vod}/rearchive", json={"type": "vod", "part": 2}, headers=KEY)).json()
+    async with get_sessionmaker()() as s:
+        rows = (await s.execute(select(RUNS).where(RUNS.c.id.in_([whole["jobId"], part["jobId"]])))).all()
+    a, b = sorted(rows, key=lambda r: r.id)
+    assert (a.kind, a.payload) == ("download", {"type": "vod", "replace": True})
+    assert b.kind == "reupload"
+    assert b.payload == {"type": "vod", "replace": True, "start_part": 2, "end_part": 2}

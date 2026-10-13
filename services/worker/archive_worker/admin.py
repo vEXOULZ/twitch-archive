@@ -84,7 +84,7 @@ from .events import iso_utc
 from .job_rows import ALL_JOBS
 from .runtime_settings import RuntimeSettings
 from .storage import Storage, StorageError
-from .vods import notify_rows_moved, splice_reason, upsert_vod
+from .vods import drop_youtube_entries, notify_rows_moved, splice_reason, upsert_vod
 
 log = logging.getLogger(__name__)
 READY_TIMEOUT_S = 5  # /readyz: a database slower than this counts as down
@@ -1020,8 +1020,10 @@ def create_admin_app(
             vod = await vod_json(await s.connection(), vod_id)
             if vod is None:
                 raise AdminError(404, "No Vod Data")
-            locked, bot_chat, hidden = (
-                await s.execute(select(Vod.chapters_locked, Vod.bot_chat, Vod.hidden).where(Vod.id == vod_id))
+            locked, bot_chat, hidden, censor = (
+                await s.execute(
+                    select(Vod.chapters_locked, Vod.bot_chat, Vod.hidden, Vod.censor).where(Vod.id == vod_id)
+                )
             ).one()
             recent = (
                 await s.execute(
@@ -1037,6 +1039,7 @@ def create_admin_app(
             "hidden": hidden,
             "chaptersLocked": locked,
             "botChat": bot_chat,
+            "censor": censor,
             "jobs": recent,
             "splices": await splices.active_splices(vod_id),
         }
@@ -1188,6 +1191,73 @@ def create_admin_app(
         vod = await require_vod(vod_id)
         await save_vod(vod.id, drive=edited(vod_edits.drive, body.get("drive")))
         return await admin_vod(vod.id)
+
+    @app.put("/admin/vods/{vod_id}/censor", dependencies=auth)
+    async def put_censor(vod_id: str, request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """Replace the ranges blurred, blacked out or muted in the uploads (vod_edits.censor). Uploads made from
+        now on carry them; re-archive the VOD to replace the ones already on YouTube."""
+        vod = await require_vod(vod_id)
+        refuse_merged(vod, "uploads")
+        if vod.synthetic is not None:
+            raise AdminError(409, f"{vod.id} is synthetic: it has no uploads of its own to edit")
+        ranges = edited(vod_edits.censor, body.get("censor"), hhmmss_to_seconds(vod.duration))
+        before = list(vod.censor or [])
+        await save_vod(vod.id, censor=ranges)
+        request.state.audit_detail = {"before": before, "after": ranges}
+        return await admin_vod(vod.id)
+
+    @app.post("/admin/vods/{vod_id}/youtube/delete", dependencies=auth)
+    async def delete_uploads(vod_id: str, request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """Delete ``videos`` (ids from the VOD's ``youtube`` list) from YouTube, 50 quota units each, and take
+        them off the list; one already gone from YouTube is just taken off. The remaining parts' descriptions
+        are rewritten (a describe job per type) so they stop linking to the deleted ones."""
+        vod = await require_vod(vod_id)
+        ids = body.get("videos")
+        if not isinstance(ids, list) or not ids or not all(isinstance(v, str) and v for v in ids):
+            raise AdminError(400, "videos must be a list of YouTube video ids")
+        listed = {str(e.get("id")): e for e in vod.youtube or []}
+        unknown = [v for v in ids if v not in listed]
+        if unknown:
+            raise AdminError(400, f"Not uploads of {vod.id}: {', '.join(unknown)}")
+        deleted: list[str] = []
+        failed: list[dict[str, str]] = []
+        for video_id in dict.fromkeys(ids):
+            try:
+                await deps.youtube.delete(video_id)
+            except youtube.YouTubeNotAuthorized as exc:
+                raise AdminError(409, str(exc)) from exc
+            except Exception as exc:
+                log.warning("could not delete %s from YouTube: %s", video_id, exc)
+                failed.append({"id": video_id, "error": f"{type(exc).__name__}: {exc}"})
+                continue
+            deleted.append(video_id)
+        dropped = await drop_youtube_entries(vod.id, set(deleted))
+        after = await require_vod(vod.id)
+        described = []
+        for typ in sorted({e.get("type") or "vod" for e in dropped}):
+            if any((e.get("type") or "vod") == typ for e in after.youtube or []):
+                described.append((await enqueue("describe", vod.id, type_payload(after, {"type": typ}))).id)
+        request.state.audit_detail = {"deleted": dropped, "failed": failed}
+        msg = f"Deleted {len(deleted)} upload(s) from YouTube" + (f", {len(failed)} failed" if failed else "")
+        return {**_ok(msg, deleted=deleted, failed=failed, describeJobs=described), "vod": await admin_vod(vod.id)}
+
+    @app.post("/admin/vods/{vod_id}/rearchive", dependencies=auth)
+    async def rearchive(vod_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """Upload the VOD (``type`` vod or live; one ``part``, or all) again with today's settings and censor
+        ranges, deleting each upload it replaces from YouTube once the new one is in place: a ``download``
+        job (``reupload`` for one part) with ``replace``. The source is a local copy if there is one
+        (or ``path``), else the VOD is downloaded from Twitch again."""
+        vod = await require_vod(vod_id)
+        refuse_merged(vod, "uploads")
+        if vod.synthetic is not None:
+            raise AdminError(409, f"{vod.id} is synthetic: it has no uploads of its own")
+        payload = {**source_payload(vod, body), "replace": True}
+        if body.get("part") not in (None, ""):
+            part = single_part(payload, body)
+            job = await enqueue("reupload", vod.id, payload)
+            return _ok(f"Re-archiving {vod.id} part {part}; the old upload goes once the new one is up", job)
+        job = await enqueue("download", vod.id, payload)
+        return _ok(f"Re-archiving {vod.id}; the old uploads go once the new ones are up", job)
 
     @app.get("/admin/vods/{vod_id}/emotes", dependencies=auth)
     async def get_vod_emotes(vod_id: str) -> dict[str, Any] | None:
