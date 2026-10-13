@@ -34,6 +34,8 @@ from sqlalchemy.dialects.postgresql import insert
 from vex_platform.actor import SYSTEM, Actor
 from vex_platform.audit import AuditEntry
 
+from . import youtube_quota
+
 log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/youtube"]
@@ -346,6 +348,7 @@ class YouTube:
         """The channel uploads go to (the connected account's own), or None if the account has none.
         One quota unit."""
         service = await self._service()  # type: ignore[no-untyped-call]
+        await youtube_quota.spend("channels.list")
         try:
             resp = await asyncio.to_thread(service.channels().list(part="snippet", mine=True).execute)
         except HttpError as exc:
@@ -398,6 +401,7 @@ class YouTube:
         }
         media = MediaFileUpload(str(path), chunksize=CHUNK, resumable=True, mimetype="video/mp4")
         request = service.videos().insert(part="id,snippet,status", body=body, media_body=media, notifySubscribers=True)
+        await youtube_quota.spend("videos.insert")
         return await asyncio.to_thread(self._resumable, request, path, on_progress)
 
     def _resumable(self, request, path: Path, on_progress: Callable[[int], None] | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
@@ -435,6 +439,7 @@ class YouTube:
 
     async def get_snippet(self, video_id: str, service=None) -> dict[str, Any] | None:  # type: ignore[no-untyped-def]
         service = service or await self._service()  # type: ignore[no-untyped-call]
+        await youtube_quota.spend("videos.list")
         resp = await asyncio.to_thread(service.videos().list(part="snippet", id=video_id).execute)
         items = resp.get("items") or []
         return items[0]["snippet"] if items else None
@@ -453,6 +458,7 @@ class YouTube:
                 "categoryId": snippet.get("categoryId", "20"),
             },
         }
+        await youtube_quota.spend("videos.update")
         await asyncio.to_thread(service.videos().update(part="snippet", body=body).execute)
 
 

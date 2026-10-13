@@ -260,6 +260,23 @@ async def test_vods_list_says_what_is_uploaded_and_running(admin):
     assert (await admin.get(f"/api/v2/vods/{VOD}", headers=KEY)).json()["active_jobs"] == row["active_jobs"]
 
 
+async def test_vods_list_filters_on_upload_and_active_jobs(admin):
+    async def ids(query):
+        return [v["id"] for v in (await admin.get(f"/api/v2/vods?q={VOD}&{query}", headers=KEY)).json()["items"]]
+
+    assert (await ids("uploaded=false&busy=false"), await ids("uploaded=true"), await ids("busy=true")) == (
+        [VOD],
+        [],
+        [],
+    )
+    await admin.post("/api/v2/jobs", headers=KEY, json={"subject": f"vod:{VOD}", "kind": "test", "paused": True})
+    assert (await ids("busy=true"), await ids("busy=false")) == ([VOD], [])
+    async with get_sessionmaker()() as s:
+        (await s.get(Vod, VOD)).youtube = [{"id": "yt1"}]
+        await s.commit()
+    assert (await ids("uploaded=true"), await ids("uploaded=false")) == ([VOD], [])
+
+
 async def test_vods_list_get_and_update_with_their_audit(admin):
     page = (await admin.get(f"/api/v2/vods?q={VOD}", headers=KEY)).json()
     assert ([v["id"] for v in page["items"]], page["next_cursor"]) == ([VOD], None)

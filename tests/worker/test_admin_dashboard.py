@@ -646,7 +646,7 @@ async def test_health(vod, app, monkeypatch, respx_mock):
         await s.commit()
 
     async with client(app) as c:
-        h = (await c.get("/admin/health", headers=KEY)).json()
+        h = (await c.get("/admin/health", headers=KEY)).json()  # quota counts only what spend() saw today
     assert h["worker"]["ok"] is True and h["worker"]["runningJobs"] == 0 and h["worker"]["startedAt"]
     assert h["api"] == {"ok": True}
     assert h["youtube"] == {
@@ -657,6 +657,7 @@ async def test_health(vod, app, monkeypatch, respx_mock):
         "connectedAt": None,
         "refreshTokenExpiresAt": None,
         "checkedAt": "2026-09-25T12:00:00+00:00",
+        "quota": {"used": 0, "limit": 10_000, "resetsAt": h["youtube"]["quota"]["resetsAt"], "calls": {}},
     }
     assert h["live"]["live"] is True and h["live"]["streamId"] == str(STREAM) and h["live"]["startedAt"]
     assert set(h["jobs"]["counts"]) == set(jobs.STATES) and h["jobs"]["counts"]["failed"] >= 1

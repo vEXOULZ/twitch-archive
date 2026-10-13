@@ -87,6 +87,15 @@ ENTRIES = (
         720,
     ),
     Entry(
+        "youtube_daily_quota",
+        "int",
+        "YouTube",
+        "now",
+        "API units the Google project gets a day (10,000 unless Google granted more); the dashboard counts against it",
+        1,
+        100_000_000,
+    ),
+    Entry(
         "restricted_games",
         "list",
         "Pipeline",
