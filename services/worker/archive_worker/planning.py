@@ -20,6 +20,10 @@ from archive_common.timeutil import format_hhmmss
 # where ``duration`` is the chapter *start* as "HH:MM:SS" and ``end`` is the
 # chapter *length* in seconds.
 
+# What ``restricted_games`` (and the API's /v1/games-played) calls a chapter with no Twitch category:
+# its ``name`` is null, so listing this name is how those chapters get cut.
+NO_CATEGORY = "No category"
+
 
 def chapters_from_moments(
     edges: list[dict[str, Any]], vod_duration: float, restricted_games: list[str]
@@ -39,7 +43,7 @@ def chapters_from_moments(
                 game.get("boxArtURL") if game else None,
                 start,
                 dur_ms / 1000 if dur_ms else vod_duration - start,
-                bool(name and name in restricted_games),
+                restricted_game(name, restricted_games),
             )
         )
     return out
@@ -55,7 +59,7 @@ def single_chapter(
         box_art_image(box_art),
         0,
         vod_duration,
-        bool(name and name in restricted_games),
+        restricted_game(name, restricted_games),
     )
 
 
@@ -79,8 +83,13 @@ def num_seconds(v: float) -> int | float:
     return int(v) if v.is_integer() else v
 
 
+def restricted_game(name: str | None, restricted_games: list[str]) -> bool:
+    """Whether chapters of this game are left out of uploads; ``None`` is a chapter with no category."""
+    return (name or NO_CATEGORY) in restricted_games
+
+
 def is_restricted(chapter: dict[str, Any], restricted_games: list[str]) -> bool:
-    return bool(chapter.get("restricted")) or (chapter.get("name") in restricted_games)
+    return bool(chapter.get("restricted")) or restricted_game(chapter.get("name"), restricted_games)
 
 
 # ── Live recordings ───────────────────────────────────────────────────────
