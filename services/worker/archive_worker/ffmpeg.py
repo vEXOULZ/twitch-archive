@@ -2,6 +2,10 @@
 
 Every command writes to ``<out>.part`` and renames on success, so a killed
 worker never leaves a truncated file that looks finished.
+
+The heavy operations (remux, cut, mute, cover/blackout, preview sheets) run one of a
+type at a time across the worker's jobs (``_one_at_a_time``); a job that wants one
+while another job has it waits its turn. ``probe_duration`` is cheap and never waits.
 """
 
 from __future__ import annotations
@@ -11,7 +15,11 @@ import json
 import logging
 import os
 import shutil
+import weakref
+from collections.abc import Callable, Coroutine
+from functools import wraps
 from pathlib import Path
+from typing import Any
 
 from archive_common import previews as pv
 
@@ -23,6 +31,31 @@ FFPROBE = os.environ.get("FFPROBE_BIN", "ffprobe")
 
 class FfmpegError(RuntimeError):
     pass
+
+
+# One lock per (event loop, operation): an asyncio.Lock belongs to the loop it first waits on.
+_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+
+
+type _Op[**P, T] = Callable[P, Coroutine[Any, Any, T]]
+
+
+def _one_at_a_time[**P, T](op: str) -> Callable[[_Op[P, T]], _Op[P, T]]:
+    """Run the decorated operation under the ``op`` lock: one ``op`` at a time in this worker, while
+    different ops still overlap. Waiting can be cancelled like the run itself."""
+
+    def wrap(fn: _Op[P, T]) -> _Op[P, T]:
+        @wraps(fn)
+        async def run(*args: P.args, **kwargs: P.kwargs) -> T:
+            lock = _locks.setdefault(asyncio.get_running_loop(), {}).setdefault(op, asyncio.Lock())
+            if lock.locked():
+                log.info("ffmpeg %s: waiting for the one already running", op)
+            async with lock:
+                return await fn(*args, **kwargs)
+
+        return run
+
+    return wrap
 
 
 async def _run(args: list[str]) -> str:
@@ -54,6 +87,7 @@ async def probe_duration(path: Path) -> float:
     return float(json.loads(out)["format"]["duration"])
 
 
+@_one_at_a_time("remux")
 async def hls_to_mp4(playlist: Path, out: Path, *, fmp4: bool = False) -> Path:
     extra = ["-avoid_negative_ts", "make_zero", "-fflags", "+genpts"] if fmp4 else []
     return await _ffmpeg_to(
@@ -92,6 +126,7 @@ def _seek_args(src: Path, start: float) -> list[str]:
     return ["-ss", f"{start - margin:.3f}", "-i", str(src), "-ss", f"{margin:.3f}"]
 
 
+@_one_at_a_time("cut")
 async def cut(src: Path, out: Path, start: float, duration: float | None = None, *, faststart: bool = True) -> Path:
     """Stream-copy ``duration`` seconds (default: to the end) starting at ``start``.
 
@@ -115,6 +150,7 @@ async def cut(src: Path, out: Path, start: float, duration: float | None = None,
     )
 
 
+@_one_at_a_time("previews")
 async def preview_sheets(src: Path, out_dir: Path) -> int:
     """Seek-bar sprite sheets of ``src`` into ``out_dir`` (``archive_common.previews`` has the layout); the
     number of frames. Only keyframes are decoded (Twitch has one every 2 s), so a 1080p part takes a minute or
@@ -162,6 +198,7 @@ async def preview_sheets(src: Path, out_dir: Path) -> int:
     return frames
 
 
+@_one_at_a_time("mute")
 async def mute(src: Path, out: Path, ranges: list[tuple[float, float]]) -> Path:
     """Silence audio in [start, end) ranges; video is stream-copied."""
     filters = ",".join(f"volume=0:enable='between(t,{a:g},{b:g})'" for a, b in ranges)
@@ -197,6 +234,7 @@ async def blackout(src: Path, out: Path, ranges: list[tuple[float, float]], work
     return await cover(src, out, [(a, b, "black") for a, b in ranges], work)
 
 
+@_one_at_a_time("cover")
 async def cover(src: Path, out: Path, ranges: list[tuple[float, float, str]], work: Path) -> Path:
     """Black out or blur (``COVER_FILTERS``) the video in each [start, end) range, keeping audio, in one pass.
 

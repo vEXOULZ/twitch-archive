@@ -149,7 +149,7 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_PREVIEWS_FETCH_PAUSE_SECONDS` † | `60` | Pause between two YouTube downloads of the previews backfill |
 | `ARCHIVE_PREVIEWS_YTDLP_ARGS` | `[]` | Extra yt-dlp arguments for those downloads, e.g. `["--cookies","/secrets/yt.txt"]` |
 | `ARCHIVE_DRY_RUN` | `false` | Same as `run --dry-run` |
-| `ARCHIVE_RUNNER_CONCURRENCY` † | `3` | Jobs run at once |
+| `ARCHIVE_RUNNER_CONCURRENCY` † | `3` | Jobs run at once. Whatever this is, the heavy ffmpeg operations (remux, cut, mute, blackout or blur, preview sheets) run one of a kind at a time: a job that needs one another job is running waits for it |
 | `ARCHIVE_MAX_ATTEMPTS` † | `3` | Tries of a failing step before its job is marked `failed` |
 | `ARCHIVE_MONITOR_INTERVAL_SECONDS` † | `30` | How often Helix is checked for a live stream |
 | `ARCHIVE_HLS_POLL_INTERVAL_SECONDS` | `60` | VOD playlist polling while the stream is live |
