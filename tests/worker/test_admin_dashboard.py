@@ -546,6 +546,84 @@ async def test_twitch_game_search(app, respx_mock):
         assert (await c.get("/admin/twitch/games?query=", headers=KEY)).status_code == 400
 
 
+NEW_VOD = "test-admin-dashboard-new-vod"
+
+
+def _video(vod_id: str, user_id: str) -> dict[str, Any]:
+    return {
+        "id": vod_id,
+        "user_id": user_id,
+        "title": f"title {vod_id}",
+        "created_at": "2026-10-01T18:00:00Z",
+        "duration": "1h2m3s",
+        "thumbnail_url": "",
+        "stream_id": None,
+    }
+
+
+@respx.mock
+async def test_twitch_videos_pages_and_marks_the_archive(vod, app, respx_mock):
+    settings = app[1].deps.settings
+    settings.twitch_client_id, settings.twitch_client_secret = "cid", SecretStr("secret")
+    respx_mock.post(TOKEN_URL).respond(json={"access_token": "t", "expires_in": 3600})
+    videos = respx_mock.get(f"{HELIX}/videos").mock(
+        side_effect=[
+            httpx.Response(200, json={"data": [_video(vod, settings.twitch_id)], "pagination": {"cursor": "c1"}}),
+            httpx.Response(200, json={"data": [_video(NEW_VOD, settings.twitch_id)], "pagination": {}}),
+        ]
+    )
+    async with client(app) as c:
+        r = await c.get("/admin/twitch/videos", headers=KEY)
+    assert r.status_code == 200
+    assert videos.calls[0].request.url.params["first"] == "100"
+    assert videos.calls[1].request.url.params["after"] == "c1"
+    got = {v["id"]: v for v in r.json()["data"]}
+    assert got[vod]["inArchive"] and got[vod]["uploaded"] and got[vod]["archiveJob"] is None
+    assert got[NEW_VOD] == {
+        "id": NEW_VOD,
+        "title": f"title {NEW_VOD}",
+        "createdAt": "2026-10-01T18:00:00Z",
+        "duration": "01:02:03",
+        "thumbnailUrl": None,
+        "inArchive": False,
+        "uploaded": False,
+        "archiveJob": None,
+    }
+
+
+async def test_twitch_import_queues_paused_archive_jobs(vod, app, monkeypatch):
+    deps = app[1].deps
+    deps.settings.twitch_client_id, deps.settings.twitch_client_secret = "cid", SecretStr("secret")
+
+    async def all_videos(user_id, video_type="archive"):
+        return [_video(vod, user_id), _video(NEW_VOD, user_id)]
+
+    monkeypatch.setattr(deps.helix, "all_videos", all_videos)
+    try:
+        async with client(app) as c:
+            assert (await c.post("/admin/twitch/import", headers=KEY, json={"vodIds": []})).status_code == 400
+            r = await c.post("/admin/twitch/import", headers=KEY, json={"vodIds": [NEW_VOD, vod, "gone", vod]})
+            assert r.status_code == 200
+            body = r.json()
+            assert [a["vodId"] for a in body["added"]] == [NEW_VOD, vod]
+            assert body["skipped"] == [{"vodId": "gone", "reason": "Not on Twitch"}]
+            for added in body["added"]:
+                job = await jobs.get(added["jobId"])
+                assert (job.kind, job.state, job.step) == ("archive", "paused", "capture")
+            async with get_sessionmaker()() as s:
+                assert (await s.get(Vod, NEW_VOD)).title == f"title {NEW_VOD}"
+            again = (await c.post("/admin/twitch/import", headers=KEY, json={"vodIds": [vod]})).json()
+            assert again["added"] == [] and again["skipped"][0]["reason"].endswith("is already paused")
+    finally:
+        async with get_sessionmaker()() as s:
+            await s.execute(delete(Job).where(Job.vod_id == NEW_VOD))
+            await s.execute(delete(RUNS).where(RUNS.c.subject == subject_of(NEW_VOD)))
+            await s.execute(text("SET LOCAL search_path TO jobs, public"))
+            await s.execute(text("DELETE FROM procrastinate_jobs WHERE lock LIKE :vod"), {"vod": f"vod:{NEW_VOD}:%"})
+            await s.execute(delete(Vod).where(Vod.id == NEW_VOD))
+            await s.commit()
+
+
 # ── Health ────────────────────────────────────────────────────────────────
 
 

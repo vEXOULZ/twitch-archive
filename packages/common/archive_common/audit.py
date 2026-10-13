@@ -79,6 +79,7 @@ ROUTE_ACTIONS: dict[str, str] = {
     "POST /admin/vods/{vod_id}/unsplit": "vod.unsplit",
     "POST /admin/download": "vod.download",
     "POST /admin/hls/download": "vod.hls_download",
+    "POST /admin/twitch/import": "vod.twitch_import",
     "POST /admin/reupload": "vod.reupload",
     "POST /admin/dmca": "vod.dmca",
     "POST /admin/part/dmca": "vod.part_dmca",
