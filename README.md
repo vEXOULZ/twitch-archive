@@ -267,7 +267,7 @@ curl -s "${H[@]}" "$A/api/v2/audit?action=vod.&target=vod:123"     # every actor
 curl -s "${H[@]}" "$A/api/v2/settings"
 curl -s "${H[@]}" -X PATCH "$A/api/v2/settings" -d '{"keep_hls":true}'   # DELETE /api/v2/settings/keep_hls resets it
 curl -s "${H[@]}" "$A/api/v2/storage?refresh=true"                 # DELETE /api/v2/storage/vods/123 frees one
-curl -s "${H[@]}" "$A/api/v2/vods?q=title&hidden=false"            # also cursor=, limit= (at most 200)
+curl -s "${H[@]}" "$A/api/v2/vods?q=title&hidden=false"            # also cursor=, limit= (at most 200); rows say uploaded, active_jobs
 curl -s "${H[@]}" -X PATCH "$A/api/v2/vods/123" -d '{"title":"…","thumbnail_url":null}'
 ```
 

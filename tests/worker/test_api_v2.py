@@ -242,6 +242,24 @@ async def test_storage_delete_is_audited(admin, settings):
     _problem(await admin.delete(f"/api/v2/storage/vods/{VOD}", headers=KEY), 404, "folder_not_found")
 
 
+async def test_vods_list_says_what_is_uploaded_and_running(admin):
+    row = (await admin.get(f"/api/v2/vods?q={VOD}", headers=KEY)).json()["items"][0]
+    assert (row["uploaded"], row["active_jobs"]) == (False, [])
+
+    body = {"subject": f"vod:{VOD}", "paused": True}
+    run = (await admin.post("/api/v2/jobs", headers=KEY, json={**body, "kind": "test"})).json()
+    done = (await admin.post("/api/v2/jobs", headers=KEY, json={**body, "kind": "refetch"})).json()
+    await admin.post(f"/api/v2/jobs/{done['id']}/cancel", headers=KEY)
+    async with get_sessionmaker()() as s:
+        (await s.get(Vod, VOD)).youtube = [{"id": "yt1"}]
+        await s.commit()
+
+    row = (await admin.get(f"/api/v2/vods?q={VOD}", headers=KEY)).json()["items"][0]
+    assert row["uploaded"] is True
+    assert row["active_jobs"] == [{"id": run["id"], "kind": "test", "state": "paused", "step": "a"}]
+    assert (await admin.get(f"/api/v2/vods/{VOD}", headers=KEY)).json()["active_jobs"] == row["active_jobs"]
+
+
 async def test_vods_list_get_and_update_with_their_audit(admin):
     page = (await admin.get(f"/api/v2/vods?q={VOD}", headers=KEY)).json()
     assert ([v["id"] for v in page["items"]], page["next_cursor"]) == ([VOD], None)
