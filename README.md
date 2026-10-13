@@ -141,7 +141,7 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_YOUTUBE_PUBLIC` † | `false` | Public instead of unlisted, for the main copy: the live copy when `LIVE_RECORD` is on, the VOD copy otherwise (§5) |
 | `ARCHIVE_YOUTUBE_DESCRIPTION` † | `VOD` | Last line of every description |
 | `ARCHIVE_YOUTUBE_KEEPALIVE_HOURS` † | `24` | How often the worker refreshes the YouTube token; see [§3](#3-youtube-oauth-setup) |
-| `ARCHIVE_RESTRICTED_GAMES` † | `[]` | Chapters of these games are left out of uploads |
+| `ARCHIVE_RESTRICTED_GAMES` † | `[]` | Chapters of these games are left out of uploads ("No category": chapters without one) |
 | `ARCHIVE_MANUAL_STEPS` † | `{}` | Steps a job pauses before until you resume it, per job kind, e.g. `{"archive":["upload"]}`; see [Manual steps](#manual-steps) |
 | `ARCHIVE_SPLIT_DURATION` † | `10800` | Maximum YouTube part length in seconds |
 | `ARCHIVE_KEEP_HLS` / `ARCHIVE_KEEP_MP4` † | `false` | Keep files after upload |

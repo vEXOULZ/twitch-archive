@@ -1,4 +1,5 @@
 import datetime as dt
+from typing import Any
 
 from archive_worker import planning
 from archive_worker.planning import Part
@@ -33,6 +34,14 @@ def test_chapters_keep_legacy_shape():
     assert chapters[1]["restricted"] is True
 
 
+def test_no_category_restricts_chapters_without_a_game():
+    no_game = {"node": {"positionMilliseconds": 0, "durationMilliseconds": 0, "details": {"game": None}}}
+    assert planning.chapters_from_moments([no_game], 100, [planning.NO_CATEGORY])[0]["restricted"] is True
+    assert planning.chapters_from_moments([no_game], 100, ["Artifact"])[0]["restricted"] is False
+    assert planning.single_chapter(None, None, 100, [planning.NO_CATEGORY])["restricted"] is True
+    assert planning.single_chapter(None, None, 100, [])["restricted"] is False
+
+
 def test_single_chapter_box_art():
     ch = planning.single_chapter({"id": "9", "displayName": "Chess"}, "https://b/{width}x{height}.jpg", 100, [])
     assert ch["image"] == "https://b/40x53.jpg"
@@ -53,6 +62,20 @@ def test_plan_parts_skip_restricted():
     ]
     parts = planning.plan_parts(13_500, chapters, ["Artifact"], 10_800)
     assert parts == [Part(1, 0, 1000), Part(2, 1500, 12_300), Part(3, 12_300, 13_500)]
+
+
+def test_plan_parts_skip_no_category():
+    # Chapters stored before "No category" was listed still say restricted: false; planning reads the list too.
+    chapters: list[dict[str, Any]] = [
+        {"name": "A", "start": 0, "end": 1000, "restricted": False},
+        {"name": None, "start": 1000, "end": 500, "restricted": False},
+        {"name": "B", "start": 1500, "end": 500, "restricted": False},
+    ]
+    assert planning.plan_parts(2000, chapters, [planning.NO_CATEGORY], 10_800) == [
+        Part(1, 0, 1000),
+        Part(2, 1500, 2000),
+    ]
+    assert planning.plan_parts(2000, chapters, [], 10_800) == [Part(1, 0, 2000)]
 
 
 def test_plan_parts_flag_and_whole_vod_restricted():
