@@ -41,7 +41,19 @@ from starlette.middleware.base import RequestResponseEndpoint
 from vex_platform.actor import SYSTEM, Actor
 from vex_platform.api import ApiError, problem
 
-from . import api_v2, api_v2_routes, jobs, site_tags, splices, svg_clean, twitch_viewer, vod_edits, youtube
+from . import (
+    api_v2,
+    api_v2_routes,
+    jobs,
+    site_tags,
+    splices,
+    svg_clean,
+    twitch_viewer,
+    vod_edits,
+    youtube,
+    youtube_check,
+    youtube_quota,
+)
 from .admin_auth import (
     CSRF_HEADER,
     SESSION_COOKIE,
@@ -676,8 +688,15 @@ def create_admin_app(
                 log.exception("health: database query failed")
                 return None
 
-        db, api, yt, viewer = await asyncio.gather(
-            db_state(), api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE), viewer_check()
+        async def quota() -> dict[str, Any] | None:
+            try:
+                return await youtube_quota.today(settings.youtube_daily_quota)
+            except Exception:
+                log.exception("health: YouTube quota lookup failed")
+                return None
+
+        db, api, yt, viewer, used = await asyncio.gather(
+            db_state(), api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE), viewer_check(), quota()
         )
         db_ok = db is not None
         counts, failures, live = db or ({st: 0 for st in jobs.STATES}, [], None)
@@ -692,6 +711,7 @@ def create_admin_app(
                 "connectedAt": yt.get("connectedAt"),
                 "refreshTokenExpiresAt": yt.get("refreshTokenExpiresAt"),
                 "checkedAt": iso_utc(yt["checkedAt"]),
+                "quota": used,
             },
             "twitchViewer": viewer,
             "live": {
@@ -1523,6 +1543,18 @@ def create_admin_app(
     async def youtube_status() -> dict[str, Any]:
         # A real refresh against Google, not just "is a token stored".
         return await deps.youtube.check()
+
+    # Whether every upload is still on YouTube and whole (youtube_check.py); the timer runs it every
+    # youtube_check_hours, and the dashboard can run it now.
+    @app.get("/admin/youtube/videos", dependencies=auth)
+    async def youtube_videos() -> dict[str, Any]:
+        return {"running": deps.youtube_check.running, "last": await youtube_check.last()}
+
+    @app.post("/admin/youtube/videos/check", dependencies=auth)
+    async def youtube_videos_check() -> dict[str, Any]:
+        if deps.youtube_check.running:
+            raise AdminError(409, "A YouTube check is already running")
+        return {"running": False, "last": await deps.youtube_check.run()}
 
     # With the slash too (the old app's redirect URI): FastAPI would answer it with a redirect built from
     # the Host header, which behind the site's proxy loses the /backend-admin prefix and lands on the site.
