@@ -91,6 +91,19 @@ class Helix:
         data = await self.get("/videos", {"user_id": user_id, "type": video_type, "first": first})
         return data.get("data") or []
 
+    async def all_videos(self, user_id: str, video_type: str = "archive") -> list[dict[str, Any]]:
+        """Every video of ``user_id`` still on Twitch, newest first (100 a page, following the cursor)."""
+        videos: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"user_id": user_id, "type": video_type, "first": 100}
+        while True:
+            data = await self.get("/videos", params)
+            page = data.get("data") or []
+            videos += page
+            cursor = (data.get("pagination") or {}).get("cursor")
+            if not page or not cursor:
+                return videos
+            params = {**params, "after": cursor}
+
     async def video_for_stream(self, user_id: str, stream_id: str) -> dict[str, Any] | None:
         """The archive video recorded from ``stream_id``, if Twitch has made one yet."""
         return next((v for v in await self.list_videos(user_id) if str(v.get("stream_id")) == stream_id), None)

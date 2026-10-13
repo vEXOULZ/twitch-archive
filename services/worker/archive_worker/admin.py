@@ -1238,6 +1238,66 @@ def create_admin_app(
             for c in await helix.search_categories(query.strip())
         ]
 
+    async def channel_videos() -> list[dict[str, Any]]:
+        """The channel's past broadcasts still on Twitch, newest first."""
+        require_helix()
+        return await helix.all_videos(str(settings.twitch_id))
+
+    @app.get("/admin/twitch/videos", dependencies=auth)
+    async def twitch_videos() -> dict[str, Any]:
+        """The channel's past broadcasts still on Twitch, each with what the archive has of it: a row
+        (``inArchive``), uploads (``uploaded``) and a queued, running or paused archive job (``archiveJob``)."""
+        videos = await channel_videos()
+        ids = [str(v["id"]) for v in videos]
+        async with get_sessionmaker()() as s:
+            rows = {v.id: v for v in (await s.execute(select(Vod).where(Vod.id.in_(ids)))).scalars()}
+        out = []
+        for video in videos:
+            row = rows.get(str(video["id"]))
+            job = await jobs.find_active("archive", vod_id=str(video["id"]))
+            out.append(
+                {
+                    "id": str(video["id"]),
+                    "title": video.get("title"),
+                    "createdAt": video.get("created_at"),
+                    "duration": format_hhmmss(parse_helix_duration(video.get("duration", ""))),
+                    "thumbnailUrl": video.get("thumbnail_url") or None,
+                    "inArchive": row is not None,
+                    "uploaded": bool(row is not None and row.youtube),
+                    "archiveJob": None if job is None else {"id": job.id, "state": job.state, "step": job.step},
+                }
+            )
+        return {"data": out}
+
+    @app.post("/admin/twitch/import", dependencies=auth)
+    async def twitch_import(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """Queue an archive job for each of ``vodIds`` (creating its row from Twitch when missing), paused
+        before its first step unless ``paused`` is false. A VOD no longer on Twitch, or with an archive
+        job already queued, running or paused, is skipped."""
+        vod_ids = body.get("vodIds")
+        if not (isinstance(vod_ids, list) and vod_ids and all(isinstance(v, str) and v for v in vod_ids)):
+            raise AdminError(400, "vodIds must be a list of VOD ids")
+        paused = body.get("paused", True) is not False
+        videos = {str(v["id"]): v for v in await channel_videos()}
+        added: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for vod_id in dict.fromkeys(vod_ids):
+            video = videos.get(vod_id)
+            if video is None:
+                skipped.append({"vodId": vod_id, "reason": "Not on Twitch"})
+                continue
+            active = await jobs.find_active("archive", vod_id=vod_id)
+            if active is not None:
+                skipped.append({"vodId": vod_id, "reason": f"Archive job {active.id} is already {active.state}"})
+                continue
+            if await vod_exists(vod_id) is None:
+                await upsert_vod(video)
+            vod = await require_vod(vod_id)
+            job = await enqueue("archive", vod.id, {"type": "vod", "stream_id": vod.stream_id}, paused=paused)
+            added.append({"vodId": vod_id, "jobId": job.id})
+        state = "paused" if paused else "queued"
+        return _ok(f"{len(added)} archive job(s) {state}, {len(skipped)} skipped", added=added, skipped=skipped)
+
     # ── Audit log ─────────────────────────────────────────────────────────
 
     @app.get("/admin/audit", dependencies=auth)
