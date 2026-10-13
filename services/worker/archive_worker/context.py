@@ -21,6 +21,7 @@ from .job_rows import subject_of, vod_of
 from .twitch_viewer import TwitchViewer
 from .vods import splice_reason
 from .youtube import YouTube
+from .youtube_check import Checker
 
 
 @dataclass
@@ -32,11 +33,13 @@ class Deps:
     events: JobEvents = field(default_factory=JobEvents)  # the job event log (GET /admin/jobs/{id}/events)
     doomtp: Doomtp = field(init=False)  # doomtp-bot's chat log
     viewer: TwitchViewer = field(init=False)  # the linked ad-free Twitch account, for live playback tokens
+    youtube_check: Checker = field(init=False)  # whether the uploads are still on YouTube, and whole
 
     def __post_init__(self) -> None:
         self.doomtp = Doomtp(self.settings)
         self.viewer = TwitchViewer(self.settings)
         self.gql.viewer = self.viewer.auth
+        self.youtube_check = Checker(self.youtube.videos, self.settings)
 
 
 # StepError: an expected failure with a readable message (no traceback in last_error).

@@ -444,6 +444,14 @@ class YouTube:
         items = resp.get("items") or []
         return items[0]["snippet"] if items else None
 
+    async def videos(self, ids: list[str]) -> dict[str, dict[str, Any]]:
+        """The status and contentDetails of up to 50 videos, by id; the ones YouTube doesn't return are left out."""
+        service = await self._service()  # type: ignore[no-untyped-call]
+        await youtube_quota.spend("videos.list")
+        request = service.videos().list(part="status,contentDetails", id=",".join(ids), maxResults=len(ids))
+        resp = await asyncio.to_thread(request.execute)
+        return {str(v["id"]): v for v in resp.get("items") or []}
+
     async def update_description(self, video_id: str, description: str) -> None:
         service = await self._service()  # type: ignore[no-untyped-call]
         snippet = await self.get_snippet(video_id, service)

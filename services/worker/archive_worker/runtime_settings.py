@@ -96,6 +96,15 @@ ENTRIES = (
         100_000_000,
     ),
     Entry(
+        "youtube_check_hours",
+        "float",
+        "YouTube",
+        "now",
+        "How often every upload is checked on YouTube (still there, whole); 0 = only from the dashboard",
+        0,
+        720,
+    ),
+    Entry(
         "restricted_games",
         "list",
         "Pipeline",

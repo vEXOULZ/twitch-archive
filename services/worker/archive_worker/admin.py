@@ -51,6 +51,7 @@ from . import (
     twitch_viewer,
     vod_edits,
     youtube,
+    youtube_check,
     youtube_quota,
 )
 from .admin_auth import (
@@ -1542,6 +1543,18 @@ def create_admin_app(
     async def youtube_status() -> dict[str, Any]:
         # A real refresh against Google, not just "is a token stored".
         return await deps.youtube.check()
+
+    # Whether every upload is still on YouTube and whole (youtube_check.py); the timer runs it every
+    # youtube_check_hours, and the dashboard can run it now.
+    @app.get("/admin/youtube/videos", dependencies=auth)
+    async def youtube_videos() -> dict[str, Any]:
+        return {"running": deps.youtube_check.running, "last": await youtube_check.last()}
+
+    @app.post("/admin/youtube/videos/check", dependencies=auth)
+    async def youtube_videos_check() -> dict[str, Any]:
+        if deps.youtube_check.running:
+            raise AdminError(409, "A YouTube check is already running")
+        return {"running": False, "last": await deps.youtube_check.run()}
 
     # With the slash too (the old app's redirect URI): FastAPI would answer it with a redirect built from
     # the Host header, which behind the site's proxy loses the /backend-admin prefix and lands on the site.

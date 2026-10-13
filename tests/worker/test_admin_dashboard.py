@@ -718,3 +718,48 @@ async def test_audit_log_records_state_changes_with_actor(vod, app):
         ).first()
     assert login is not None and (login.actor_kind, login.actor_id, login.via) == ("user", "password", "web")
     assert login.detail == {}  # the password is never stored
+
+
+# ── YouTube check ─────────────────────────────────────────────────────────
+
+
+async def test_youtube_check_reports_removed_uploads_and_keeps_the_last(vod, app, deps, monkeypatch):
+    from archive_common.models import AppState
+    from archive_worker import youtube_check
+
+    async with get_sessionmaker()() as s:
+        before = await s.get(AppState, youtube_check.STATE_KEY)
+        kept = before.value if before else None
+    on_youtube: dict[str, dict[str, Any]] = {
+        "yt1": {"status": {"uploadStatus": "processed"}, "contentDetails": {"duration": "PT2H"}}
+    }
+    asked: list[list[str]] = []
+
+    async def videos(ids: list[str]) -> dict[str, dict[str, Any]]:
+        asked.append(ids)
+        return {i: on_youtube[i] for i in ids if i in on_youtube}
+
+    monkeypatch.setattr(deps, "youtube_check", youtube_check.Checker(videos, deps.settings))
+    try:
+        async with client(app) as c:
+            ran = (await c.post("/admin/youtube/videos/check", headers=KEY)).json()
+            assert ran["running"] is False
+            assert "yt1" in [i for ids in asked for i in ids]
+            assert all(len(ids) <= youtube_check.BATCH for ids in asked)
+            assert VOD not in [p["id"] for p in ran["last"]["problems"]]
+
+            on_youtube.clear()
+            await c.post("/admin/youtube/videos/check", headers=KEY)
+            got = (await c.get("/admin/youtube/videos", headers=KEY)).json()
+            [mine] = [p for p in got["last"]["problems"] if p["id"] == VOD]
+            assert [i["kind"] for i in mine["issues"]] == ["removed", "incomplete"]
+            assert mine["share"] == 0 and mine["seconds"] == 7200
+
+            async with deps.youtube_check.lock:
+                assert (await c.post("/admin/youtube/videos/check", headers=KEY)).status_code == 409
+    finally:
+        async with get_sessionmaker()() as s:
+            await s.execute(delete(AppState).where(AppState.key == youtube_check.STATE_KEY))
+            if kept is not None:
+                s.add(AppState(key=youtube_check.STATE_KEY, value=kept))
+            await s.commit()

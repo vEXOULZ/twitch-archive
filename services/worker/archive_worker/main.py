@@ -85,6 +85,11 @@ async def serve(dry_run: bool = False) -> None:
         # Daily refresh (while uploads are on): surfaces a revoked token in the logs before a
         # stream needs it, and keeps Google from revoking it after six months without uploads.
         tasks.append(asyncio.create_task(deps.youtube.keepalive(), name="youtube-keepalive"))
+
+        async def connected() -> bool:
+            return bool((await deps.youtube.cached_check())["valid"])
+
+        tasks.append(asyncio.create_task(deps.youtube_check.run_forever(connected), name="youtube-check"))
     tasks.append(asyncio.create_task(admin.serve(), name="admin"))  # keep last: shutdown awaits it
     stopper = asyncio.create_task(stop.wait())
     pending: set[asyncio.Task] = {*tasks, stopper}  # type: ignore[type-arg]
