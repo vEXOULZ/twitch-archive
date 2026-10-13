@@ -37,13 +37,14 @@ from archive_common.serialize import duration_seconds, not_hidden, not_merged_aw
 from archive_common.timeutil import hhmmss_to_seconds
 from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import Field
-from sqlalchemy import func, or_, select, tuple_, update
+from sqlalchemy import exists, func, or_, select, tuple_, update
 from vex_platform.actor import Actor
 from vex_platform.api import ApiError, ApiModel, Page, UtcDatetime, decode_cursor, page_of, request_id, utc_iso
 from vex_platform.audit import AuditEntry
 from vex_platform.audit.sqlalchemy import record
 
 from . import compose, jobs, site_tags, splices, synthetic, vod_edits
+from .job_rows import ACTIVE, ALL_JOBS
 from .runtime_settings import RuntimeSettings
 from .storage import Storage, StorageError
 from .vods import notify_rows_moved
@@ -334,11 +335,15 @@ def vods_router(auth: Auth) -> APIRouter:
         hidden: bool | None = None,
         tag: str | None = None,
         is_synthetic: Annotated[bool | None, Query(alias="synthetic")] = None,
+        uploaded: bool | None = None,
+        busy: bool | None = None,
         cursor: str | None = None,
         limit: Annotated[int, Query(ge=1, le=VOD_LIST_MAX)] = 50,
     ) -> Page[VodRow]:
         """``q`` matches the id exactly or the title (case-insensitive substring); ``hidden`` and
-        ``synthetic`` filter; ``tag`` keeps the VODs with that tag (``tag=`` empty: untagged ones)."""
+        ``synthetic`` filter; ``tag`` keeps the VODs with that tag (``tag=`` empty: untagged ones);
+        ``uploaded`` is whether any part is on YouTube, ``busy`` whether a job is queued, running or
+        paused for it (``uploaded=false&busy=false``: the VODs nothing is archiving)."""
         stmt = select(Vod).order_by(Vod.created_at.desc(), Vod.id.desc()).limit(limit + 1)
         if term := q.strip():
             like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -349,6 +354,12 @@ def vods_router(auth: Auth) -> APIRouter:
             stmt = stmt.where(tagged(tag or None))
         if is_synthetic is not None:
             stmt = stmt.where(~real() if is_synthetic else real())
+        if uploaded is not None:
+            on_youtube = func.coalesce(func.jsonb_array_length(Vod.youtube), 0) > 0
+            stmt = stmt.where(on_youtube if uploaded else ~on_youtube)
+        if busy is not None:
+            has_job = exists().where(ALL_JOBS.c.vod_id == Vod.id, ALL_JOBS.c.state.in_(ACTIVE))
+            stmt = stmt.where(has_job if busy else ~has_job)
         if key := decode_cursor(cursor, size=2):
             try:
                 at = dt.datetime.fromisoformat(key[0])

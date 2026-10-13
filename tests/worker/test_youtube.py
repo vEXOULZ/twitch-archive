@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 from archive_common import audit, http
-from archive_worker import youtube
+from archive_worker import youtube, youtube_quota
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.errors import HttpError
@@ -33,7 +33,14 @@ def yt(settings, monkeypatch):
     monkeypatch.setattr(youtube, "load_token", load)
     monkeypatch.setattr(youtube, "save_token", save)
     monkeypatch.setattr(audit, "write", write)
+    spent: list[str] = []
+
+    async def spend(call):
+        spent.append(call)
+
+    monkeypatch.setattr(youtube_quota, "spend", spend)
     client = youtube.YouTube(settings)
+    client.spent = spent  # type: ignore[attr-defined]
     client.stored = stored  # type: ignore[attr-defined]
     client.audited = audited  # type: ignore[attr-defined]
     return client

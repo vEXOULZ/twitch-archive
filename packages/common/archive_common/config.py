@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     youtube_public: bool = False
     youtube_description: str = "VOD"
     youtube_keepalive_hours: float = 24.0  # periodic token refresh; see README "YouTube OAuth"
+    youtube_daily_quota: int = 10_000  # the Google project's daily API units, for the dashboard's count
+    youtube_check_hours: float = 24.0  # how often the uploads are checked on YouTube; 0 = only by hand
     restricted_games: list[str] = []
     # Steps a job pauses before until resumed (POST /admin/jobs/{id}/resume), per
     # job kind, e.g. {"archive": ["upload"]}. A job's own pauseBefore overrides it.
