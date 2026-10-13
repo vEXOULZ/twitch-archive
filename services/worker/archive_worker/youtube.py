@@ -452,6 +452,18 @@ class YouTube:
         resp = await asyncio.to_thread(request.execute)
         return {str(v["id"]): v for v in resp.get("items") or []}
 
+    async def delete(self, video_id: str) -> bool:
+        """Delete one of the channel's videos (50 quota units). False when YouTube no longer has it."""
+        service = await self._service()  # type: ignore[no-untyped-call]
+        await youtube_quota.spend("videos.delete")
+        try:
+            await asyncio.to_thread(service.videos().delete(id=video_id).execute)
+        except HttpError as exc:
+            if exc.resp.status == 404:
+                return False
+            raise
+        return True
+
     async def update_description(self, video_id: str, description: str) -> None:
         service = await self._service()  # type: ignore[no-untyped-call]
         snippet = await self.get_snippet(video_id, service)

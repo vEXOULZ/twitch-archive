@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from .. import ffmpeg, planning
 from ..context import JobContext
-from ..vods import splice_reason
+from ..vods import drop_youtube_entries, splice_reason
 from .metadata import file_chapters, part_gaps, vod_duration
 
 
@@ -60,6 +60,15 @@ async def upload(ctx: JobContext) -> None:
     )
     gaps = part_gaps(ctx, vod, all_parts)
 
+    # A re-archive (``replace``) deletes each upload it replaces from YouTube once the new one is saved.
+    replacing: dict[str, str] = {}
+    if ctx.payload.get("replace"):
+        replacing = ctx.payload.setdefault(
+            "replacing",
+            {str(e.get("part") or 1): e["id"] for e in vod.youtube or [] if e.get("type") == ctx.video_type},
+        )
+        await ctx.save()
+
     parts = ctx.payload["parts"]
     for part in parts:
         key = str(part["number"])
@@ -91,6 +100,39 @@ async def upload(ctx: JobContext) -> None:
         ctx.log.info("uploaded part %s -> https://youtu.be/%s", key, res["id"])
         done = sum(1 for p in parts if str(p["number"]) in uploaded)
         ctx.progress(done, len(parts), "parts", f"uploaded {done}/{len(parts)} parts")
+
+    for key, entry in uploaded.items():
+        old = replacing.get(key)
+        if old and old != entry["id"]:
+            await _delete_replaced(ctx, old)
+    # The whole VOD again in fewer parts (a longer split_duration, say): the old parts past the new last one go.
+    whole = ctx.payload.get("start_part") is None and ctx.payload.get("end_part") is None
+    if replacing and whole and len(uploaded) == total:
+        extra = {old for key, old in replacing.items() if int(key) > total}
+        for old in sorted(extra):
+            await _delete_replaced(ctx, old)
+        gone = extra & set(ctx.payload.get("removed") or [])  # one YouTube refused stays listed, to delete later
+        if gone:
+            await drop_youtube_entries(vod.id, gone)
+
+
+async def _delete_replaced(ctx: JobContext, video_id: str) -> None:
+    """Delete an upload a re-archive replaced. A failure is logged and kept in the payload (``not_removed``)
+    rather than failing the job: the new upload is in place, and the old one is left for YouTube Studio (or, for a
+    part past the new last one, still listed, for the dashboard)."""
+    removed: list[str] = ctx.payload.setdefault("removed", [])
+    if video_id in removed:
+        return
+    try:
+        found = await ctx.deps.youtube.delete(video_id)
+    except Exception as exc:
+        ctx.log.warning("could not delete replaced upload %s from YouTube: %s", video_id, exc)
+        ctx.payload.setdefault("not_removed", []).append(video_id)
+        await ctx.save()
+        return
+    ctx.log.info("deleted replaced upload %s%s", video_id, "" if found else " (already gone from YouTube)")
+    removed.append(video_id)
+    await ctx.save()
 
 
 async def describe(ctx: JobContext) -> None:

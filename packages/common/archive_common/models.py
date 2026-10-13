@@ -70,6 +70,8 @@ class Vod(Base):
     tags: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"), default=list
     )
+    # Alembic 0019: ranges blurred, blacked out or muted in the uploads (vod_edits.censor); [] = none.
+    censor: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list)
     created_at: Mapped[dt.datetime] = _created()
     updated_at: Mapped[dt.datetime] = _updated()
 
