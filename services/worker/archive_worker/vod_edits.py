@@ -159,6 +159,43 @@ def drive(items: Any) -> list[dict[str, str]]:
     return out
 
 
+CENSOR_VIDEO = ("blur", "black")
+NOTE_MAX = 200
+
+
+def censor(items: Any, duration: float) -> list[dict[str, Any]]:
+    """Admin censor ranges -> ``vods.censor``: ``{start, end, video, mute, note}`` in VOD seconds, sorted
+    by start, each blurring or blacking out the video (``video``), muting the audio (``mute``) or both,
+    and inside ``duration`` (unchecked when that is 0/unknown). Ranges may overlap: the step merges them."""
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(_list(items, "censor")):
+        where = f"censor[{i}]"
+        r = _object(item, where, {"start", "end"}, {"video", "mute", "note"})
+        start, end = r["start"], r["end"]
+        if not is_number(start) or start < 0:
+            raise ValueError(f"{where}.start must be a number of seconds >= 0")
+        if not is_number(end) or end <= start:
+            raise ValueError(f"{where}.end must be a number of seconds after its start")
+        if duration > 0 and end > duration + DURATION_SLACK:
+            raise ValueError(f"{where} ends at {end:g}s, after the end of the VOD ({duration:g}s)")
+        video = r.get("video")
+        if video not in (None, *CENSOR_VIDEO):
+            raise ValueError(f"{where}.video must be {' or '.join(map(repr, CENSOR_VIDEO))} or null")
+        mute = r.get("mute", False)
+        if not isinstance(mute, bool):
+            raise ValueError(f"{where}.mute must be true or false")
+        if video is None and not mute:
+            raise ValueError(f"{where} neither covers the video nor mutes the audio")
+        note = (_optional_str(r, "note", where) or "").strip() or None
+        if note is not None and len(note) > NOTE_MAX:
+            raise ValueError(f"{where}.note is longer than {NOTE_MAX} characters")
+        out.append(
+            {"start": planning.num_seconds(start), "end": planning.num_seconds(end), "video": video, "mute": mute}
+            | ({"note": note} if note else {})
+        )
+    return sorted(out, key=lambda r: (r["start"], r["end"]))
+
+
 # ── VOD fields (PATCH /admin/vods/{id}) ──────────────────────────────────
 
 # Request key -> vods column. A merged VOD takes only MERGED_EDITABLE (its content is the other VOD's now).

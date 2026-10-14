@@ -186,20 +186,30 @@ async def mute(src: Path, out: Path, ranges: list[tuple[float, float]]) -> Path:
     )
 
 
-async def blackout(src: Path, out: Path, ranges: list[tuple[float, float]], work: Path) -> Path:
-    """Replace video in each [start, end) range with black, keeping audio, in one pass.
+# Video filters for a covered range: black (as DMCA blackouts always were), or a box blur a twentieth of the
+# frame wide, run three times, too strong to make anything out (the comma is escaped for the filter graph).
+COVER_FILTERS = {"black": "geq=0:128:128", "blur": r"boxblur=luma_radius=min(w\,h)/20:luma_power=3"}
 
-    Only the claimed clips are re-encoded; the stretches around them are
-    stream-copied, and all pieces are joined once with the concat demuxer (as the
-    legacy code did per range). ``ranges`` must be sorted and non-overlapping, as
-    ``planning.plan_dmca`` returns them.
+
+async def blackout(src: Path, out: Path, ranges: list[tuple[float, float]], work: Path) -> Path:
+    """Replace video in each [start, end) range with black, keeping audio, in one pass (see ``cover``).
+    ``ranges`` must be sorted and non-overlapping, as ``planning.plan_dmca`` returns them."""
+    return await cover(src, out, [(a, b, "black") for a, b in ranges], work)
+
+
+async def cover(src: Path, out: Path, ranges: list[tuple[float, float, str]], work: Path) -> Path:
+    """Black out or blur (``COVER_FILTERS``) the video in each [start, end) range, keeping audio, in one pass.
+
+    Only those clips are re-encoded; the stretches around them are stream-copied, and all pieces are
+    joined once with the concat demuxer (as the legacy code did per range). ``ranges`` must be sorted
+    and non-overlapping, as ``planning.plan_dmca`` and ``planning.plan_censor`` return them.
     """
     work.mkdir(parents=True, exist_ok=True)
     total = await probe_duration(src)
     pieces: list[Path] = []
     pos = 0.0
     try:
-        for i, (start, end) in enumerate(ranges):
+        for i, (start, end, mode) in enumerate(ranges):
             if start > pos:
                 pieces.append(await cut(src, work / f"bo-{i}-copy.mp4", pos, start - pos, faststart=False))
             pieces.append(
@@ -215,7 +225,7 @@ async def blackout(src: Path, out: Path, ranges: list[tuple[float, float]], work
                         "-map",
                         "0",
                         "-vf",
-                        "geq=0:128:128",
+                        COVER_FILTERS[mode],
                         "-c:v",
                         "libx264",
                         "-preset",

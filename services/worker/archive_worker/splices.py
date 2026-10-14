@@ -139,6 +139,13 @@ def _not_merged_away(*vods: Vod) -> None:
             )
 
 
+def _no_censor(*vods: Vod) -> None:
+    """Censor ranges are on the VOD's own timeline, which a merge or split changes."""
+    for vod in vods:
+        if vod.censor:
+            raise SpliceError(409, f"{vod.id} has censor ranges; remove them first and set them again after")
+
+
 async def _active(s: AsyncSession, *vod_ids: str) -> list[VodSplice]:
     """Splices touching any of ``vod_ids`` that are not undone, oldest first."""
     return list((await s.execute(_active_query(*vod_ids))).scalars())
@@ -273,6 +280,7 @@ async def merge(target_id: str, source_id: str, gap: Any = None) -> dict[str, An
     async with _session() as s, s.begin():
         a, b = await _lock(s, target_id, source_id)
         _not_merged_away(a, b)
+        _no_censor(a, b)
         if b.created_at < a.created_at:
             raise SpliceError(
                 409,
@@ -442,6 +450,7 @@ async def split(vod_id: str, at: Any, force: bool = False) -> dict[str, Any]:
     async with _session() as s, s.begin():
         [a] = await _lock(s, vod_id)
         _not_merged_away(a)
+        _no_censor(a)
         await _no_active_jobs(s, a.id)
         for merge_ in reversed([sp for sp in await _active(s, a.id) if sp.kind == "merge" and sp.vod_id == a.id]):
             lo, hi = _join(merge_)
