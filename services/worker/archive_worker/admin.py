@@ -24,7 +24,7 @@ import secrets
 import time
 from contextvars import ContextVar
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from archive_common import http
 from archive_common import site_tags as site_tags_common
@@ -215,6 +215,12 @@ def _job_json(job: Any) -> dict[str, Any]:
     }
 
 
+def origin_of(url: str) -> str:
+    """``scheme://host[:port]`` of an absolute URL, lowercased; empty for anything else."""
+    parts = urlsplit(url.strip())
+    return f"{parts.scheme}://{parts.netloc}".lower() if parts.scheme and parts.netloc else ""
+
+
 def create_admin_app(
     deps: Deps,
     service: jobs.JobService,
@@ -265,6 +271,10 @@ def create_admin_app(
     twitch_ids = {str(i) for i in settings.admin_twitch_ids}
     pending = PendingStates()
     site_origins = {o.strip().rstrip("/").lower() for o in settings.admin_site_origins if o.strip()}
+    # The site this worker signs in for (its callback's origin) is always one: its own pages reach
+    # /admin/session through the site's proxy, and a browser sends Origin with every POST.
+    if own := origin_of(settings.admin_auth_redirect_url):
+        site_origins.add(own)
 
     def site_origin(origin: str) -> bool:
         return origin.rstrip("/").lower() in site_origins

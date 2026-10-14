@@ -364,6 +364,19 @@ async def test_code_sign_in_refuses_other_origins(admin, fake):
         assert (await c.post("/admin/session", json={"code": code}, headers=SITE)).status_code == 200
 
 
+async def test_code_sign_in_accepts_its_own_site(admin, deps, fake):
+    """The site the worker signs in for calls /admin/session through its own proxy, without being listed."""
+    deps.settings.admin_site_origins = []
+    deps.settings.admin_auth_redirect_url = "https://Vods.test/backend-admin/admin/signin/callback"
+    async with admin() as c:
+        r = await c.post("/admin/session", json={"code": fake.approve(ALICE)}, headers=SITE)
+        assert r.status_code == 200 and r.json()["admin"] is True
+        other = await c.post(
+            "/admin/session", json={"code": fake.approve(ALICE)}, headers={"Origin": "https://evil.test"}
+        )
+        assert problem_code(other, 403) == "origin_not_allowed"
+
+
 async def test_code_session_is_rechecked_with_vexoulz_auth(deps, fake):
     from archive_worker.admin_signin import CHECK_S
 
