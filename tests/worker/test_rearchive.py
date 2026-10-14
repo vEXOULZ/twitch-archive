@@ -1,13 +1,17 @@
 """A re-archive's upload step: new parts first, then the uploads they replace are deleted (needs the dev DB)."""
 
 import datetime as dt
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from archive_common.db import get_sessionmaker
 from archive_common.models import Vod
 from archive_worker import ffmpeg
+from archive_worker.context import StepDeferred, StepRefused
 from archive_worker.steps import publish
+from archive_worker.youtube import YouTubeLimitError
+from googleapiclient.errors import HttpError
 from sqlalchemy import delete
 
 VOD = "test-rearchive-vod"
@@ -103,3 +107,37 @@ async def test_an_upload_without_replace_deletes_nothing(vod, make_ctx, fake_you
     del payload["replace"]
     await publish.upload(make_ctx("reupload", VOD, payload))
     assert fake_youtube["deleted"] == []
+
+
+async def test_a_youtube_limit_reschedules_the_job_then_fails_it(vod, make_ctx, fake_youtube, monkeypatch):
+    limit = HttpError(SimpleNamespace(status=400, reason="x"), b"{}")
+    allowed = {"n": 1}  # uploads YouTube takes before the limit hits
+
+    async def upload(path, **_: Any) -> dict[str, Any]:
+        if allowed["n"] == 0:
+            raise YouTubeLimitError("uploadLimitExceeded", "videos.insert", limit)
+        allowed["n"] -= 1
+        fake_youtube["n"] += 1
+        return {"id": f"new{fake_youtube['n']}"}
+
+    ctx = make_ctx("download", VOD, _payload([1, 2, 3], 3))
+    monkeypatch.setattr(ctx.deps.youtube, "upload", upload)
+    with pytest.raises(StepDeferred) as deferred:
+        await publish.upload(ctx)
+    assert "(1 of 3)" in str(deferred.value)
+    assert deferred.value.until > dt.datetime.now(dt.UTC) + dt.timedelta(hours=23)
+    assert list(ctx.payload["uploaded"]) == ["1"] and ctx.payload["youtube_deferrals"] == 1
+
+    allowed["n"] = 1  # the next day part 2 goes through, which starts the count again
+    with pytest.raises(StepDeferred):
+        await publish.upload(ctx)
+    assert list(ctx.payload["uploaded"]) == ["1", "2"] and ctx.payload["youtube_deferrals"] == 1
+
+    for n in (2, 3):
+        with pytest.raises(StepDeferred) as deferred:
+            await publish.upload(ctx)
+        assert f"({n} of 3)" in str(deferred.value)
+    with pytest.raises(StepRefused, match="already rescheduled 3 times"):
+        await publish.upload(ctx)
+    assert ctx.payload["youtube_deferrals"] == 0  # a manual retry gets three more
+    assert fake_youtube["n"] == 2

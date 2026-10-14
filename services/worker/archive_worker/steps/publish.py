@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from archive_common.db import get_sessionmaker
 from archive_common.models import Job, Vod
@@ -11,9 +11,13 @@ from archive_common.timeutil import hhmmss_to_seconds
 from sqlalchemy import select
 
 from .. import ffmpeg, planning
-from ..context import JobContext
+from ..context import JobContext, StepDeferred, StepRefused
 from ..vods import drop_youtube_entries, splice_reason
+from ..youtube import YouTubeLimitError
 from .metadata import file_chapters, part_gaps, vod_duration
+
+# How many times a job waits for a YouTube daily limit to lift before it fails for good.
+YOUTUBE_MAX_DEFERRALS = 3
 
 
 def _publishing_disabled(ctx: JobContext) -> str | None:
@@ -25,6 +29,21 @@ def _publishing_disabled(ctx: JobContext) -> str | None:
     if ctx.video_type == "vod" and s.live_record and not s.multi_track:
         return "live_record is on without multi_track: only the live copy is uploaded"
     return None
+
+
+def _wait_for_limit(ctx: JobContext, exc: YouTubeLimitError) -> NoReturn:
+    """Reschedule the job for when ``exc``'s limit lifts, or fail it once that happened YOUTUBE_MAX_DEFERRALS times
+    in a row (an upload that goes through starts the count again). The count is cleared when the job fails, so a
+    manual retry gets the full number again."""
+    n = int(ctx.payload.get("youtube_deferrals") or 0)
+    if n >= YOUTUBE_MAX_DEFERRALS:
+        ctx.payload["youtube_deferrals"] = 0
+        raise StepRefused(f"{exc}; already rescheduled {n} times, so the job stops here") from exc
+    ctx.payload["youtube_deferrals"] = n + 1
+    until = exc.retry_at()
+    raise StepDeferred(
+        f"{exc}; trying again at {until:%Y-%m-%d %H:%M} UTC ({n + 1} of {YOUTUBE_MAX_DEFERRALS})", until
+    ) from exc
 
 
 async def _save_entry(vod_id: str, entry: dict[str, Any]) -> None:
@@ -81,9 +100,12 @@ async def upload(ctx: JobContext) -> None:
         def progress(pct: int, number=part["number"]) -> None:  # type: ignore[no-untyped-def]
             ctx.progress(pct, 100, "percent", f"uploading part {number}: {pct}%")
 
-        res = await ctx.deps.youtube.upload(
-            path, title=title, description=description, privacy_status=status, on_progress=progress
-        )
+        try:
+            res = await ctx.deps.youtube.upload(
+                path, title=title, description=description, privacy_status=status, on_progress=progress
+            )
+        except YouTubeLimitError as exc:
+            _wait_for_limit(ctx, exc)
         thumbs = (res.get("snippet") or {}).get("thumbnails") or {}
         entry = {
             "id": res["id"],
@@ -96,6 +118,7 @@ async def upload(ctx: JobContext) -> None:
             entry["gaps"] = gaps[part["number"]]  # VOD time this part's recording missed (ad breaks)
         await _save_entry(vod.id, entry)
         uploaded[key] = entry
+        ctx.payload.pop("youtube_deferrals", None)
         await ctx.save()
         ctx.log.info("uploaded part %s -> https://youtu.be/%s", key, res["id"])
         done = sum(1 for p in parts if str(p["number"]) in uploaded)
@@ -156,7 +179,10 @@ async def describe(ctx: JobContext) -> None:
         window = windows.get(number)
         lines = planning.chapter_lines(chapters, window, s.restricted_games) if window else []
         text = planning.full_description(base, number, entries, lines)
-        await ctx.deps.youtube.update_description(entry["id"], text)
+        try:
+            await ctx.deps.youtube.update_description(entry["id"], text)
+        except YouTubeLimitError as exc:
+            _wait_for_limit(ctx, exc)
         ctx.log.info("described %s part %d", entry["id"], number)
 
 

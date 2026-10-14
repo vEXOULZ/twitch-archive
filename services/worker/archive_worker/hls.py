@@ -208,6 +208,11 @@ def unmuted_name(uri: str) -> str:
     return _MUTED_RE.sub("", uri)
 
 
+def muted_name(uri: str) -> str:
+    """'12-unmuted.ts' -> '12-muted.ts'; any other name is returned as it is."""
+    return re.sub(r"-unmuted(?=\.[a-z0-9]+$)", "-muted", uri)
+
+
 def local_name(uri: str) -> str:
     """File name for a segment URI (drop any query string / path)."""
     path = urlparse(uri).path if "://" in uri else uri.split("?", 1)[0]

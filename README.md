@@ -153,7 +153,7 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_MAX_ATTEMPTS` † | `3` | Tries of a failing step before its job is marked `failed` |
 | `ARCHIVE_MONITOR_INTERVAL_SECONDS` † | `30` | How often Helix is checked for a live stream |
 | `ARCHIVE_HLS_POLL_INTERVAL_SECONDS` | `60` | VOD playlist polling while the stream is live |
-| `ARCHIVE_HLS_NO_CHANGE_THRESHOLD` | `10` | Unchanged polls before the capture is considered complete |
+| `ARCHIVE_HLS_NO_CHANGE_THRESHOLD` | `10` | Unchanged polls before the capture is considered complete; also the polls of an ended VOD with segments that still fail before the capture step fails |
 | `ARCHIVE_LIVE_POLL_INTERVAL_SECONDS` | `2` | Live playlist polling |
 | `ARCHIVE_LIVE_END_THRESHOLD` | `90` | Polls with no new segments before the recorder checks whether the stream ended |
 | `ARCHIVE_SEGMENT_CONCURRENCY` | `4` | Parallel segment downloads |
@@ -291,7 +291,7 @@ curl -s "${H[@]}" -X POST "$A/admin/jobs/42/retry"      # re-queue a failed job 
 curl -s "${H[@]}" -X POST "$A/admin/jobs/42/cancel"     # queued/paused: now; running: stops mid-step
 ```
 
-Job states are `queued`, `running`, `paused`, `done`, `failed` and `cancelled`. The `state` filter also takes groups: `waiting` (`queued`, including jobs waiting out a retry backoff), `stopped` (`paused`, `failed`, `cancelled`: they need you), `active` (`queued`, `running`, `paused`) and `finished` (`done`, `failed`, `cancelled`). A job whose step fails is retried after 2 minutes, then again after 4 minutes, and so on. On its third failure (`ARCHIVE_MAX_ATTEMPTS`) it is marked `failed` and keeps its files, so `retry` picks up from the same step. Cancelling a running job stops it immediately; the step's partial files stay on disk.
+Job states are `queued`, `running`, `paused`, `done`, `failed` and `cancelled`. The `state` filter also takes groups: `waiting` (`queued`, including jobs waiting out a retry backoff or rescheduled past a YouTube limit: their `notBefore` says until when), `stopped` (`paused`, `failed`, `cancelled`: they need you), `active` (`queued`, `running`, `paused`) and `finished` (`done`, `failed`, `cancelled`). A job whose step fails is retried after 2 minutes, then again after 4 minutes, and so on. On its third failure (`ARCHIVE_MAX_ATTEMPTS`) it is marked `failed` and keeps its files, so `retry` picks up from the same step. Cancelling a running job stops it immediately; the step's partial files stay on disk.
 
 `POST /admin/jobs` starts any kind directly. Body fields: `kind` (required), `vodId`, `payload` (the same keys the specific routes put there, e.g. `type`, `stream_id`, `path`, `start_part`), `fromStep` (skip the steps before it), `pauseBefore` (this job's manual steps, see below) and `paused` (create it paused).
 
@@ -835,7 +835,7 @@ Pushes and pull requests run CI (`.github/workflows/ci.yml`): lint (ruff, mypy),
 
 **YouTube `invalid_grant`.** The refresh token is dead: it was revoked, unused for six months, or the OAuth app is in "Testing" mode (7-day tokens). The keep-alive task logs this within a day, and `/admin/youtube/status` shows it on demand. Run the consent flow again (§3, Option B), then retry the failed upload jobs; they resume with the parts not yet uploaded. See "Keeping the token alive" in §3.
 
-**YouTube `uploadLimitExceeded` / `quotaExceeded`.** The daily limits reset at midnight Pacific time. The job fails after 3 attempts; retry it the next day and it resumes with the parts not yet uploaded.
+**YouTube `uploadLimitExceeded` / `quotaExceeded`.** The job isn't retried; it is rescheduled: it stays `queued`, with `notBefore` set to when the limit should lift and the reason in `lastError`. The API quota (`quotaExceeded`) starts again at midnight Pacific, so it waits until then. Google doesn't say when a channel's upload limit (`uploadLimitExceeded`) lifts, so it waits a day. It resumes with the parts not yet uploaded. After 3 reschedules in a row with nothing uploaded in between, it fails; a manual retry then gets 3 more. The dashboard's quota count leaves out calls YouTube refused this way.
 
 **The API returns stale data after a worker update.** Responses are cached for `ARCHIVE_CACHE_TTL_SECONDS` (5 min). Chat cursor pages are cached for 24h, because finished VODs don't change.
 
