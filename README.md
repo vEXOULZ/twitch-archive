@@ -153,7 +153,7 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_MAX_ATTEMPTS` † | `3` | Tries of a failing step before its job is marked `failed` |
 | `ARCHIVE_MONITOR_INTERVAL_SECONDS` † | `30` | How often Helix is checked for a live stream |
 | `ARCHIVE_HLS_POLL_INTERVAL_SECONDS` | `60` | VOD playlist polling while the stream is live |
-| `ARCHIVE_HLS_NO_CHANGE_THRESHOLD` | `10` | Unchanged polls before the capture is considered complete |
+| `ARCHIVE_HLS_NO_CHANGE_THRESHOLD` | `10` | Unchanged polls before the capture is considered complete; also the polls of an ended VOD with segments that still fail before the capture step fails |
 | `ARCHIVE_LIVE_POLL_INTERVAL_SECONDS` | `2` | Live playlist polling |
 | `ARCHIVE_LIVE_END_THRESHOLD` | `90` | Polls with no new segments before the recorder checks whether the stream ended |
 | `ARCHIVE_SEGMENT_CONCURRENCY` | `4` | Parallel segment downloads |
