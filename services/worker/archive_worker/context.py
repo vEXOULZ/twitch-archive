@@ -13,7 +13,7 @@ from archive_common.models import Job, Vod
 from archive_common.twitch.gql import Gql
 from archive_common.twitch.helix import Helix
 from sqlalchemy import update
-from vex_platform.jobs import StepContext, StepError, StepRefused
+from vex_platform.jobs import StepContext, StepDeferred, StepError, StepRefused
 
 from .doomtp import Doomtp
 from .events import JOB_LOGGER, UNITS, JobEvents
@@ -44,7 +44,8 @@ class Deps:
 
 # StepError: an expected failure with a readable message (no traceback in last_error).
 # StepRefused: a step that must not run on this VOD; the job fails at once instead of retrying.
-__all__ = ["Deps", "JobContext", "StepError", "StepRefused"]
+# StepDeferred: a step that can't run before a set time (a YouTube daily limit); the job waits until then.
+__all__ = ["Deps", "JobContext", "StepDeferred", "StepError", "StepRefused"]
 
 
 class JobContext:
