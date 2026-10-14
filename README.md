@@ -149,7 +149,7 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_PREVIEWS_FETCH_PAUSE_SECONDS` † | `60` | Pause between two YouTube downloads of the previews backfill |
 | `ARCHIVE_PREVIEWS_YTDLP_ARGS` | `[]` | Extra yt-dlp arguments for those downloads, e.g. `["--cookies","/secrets/yt.txt"]` |
 | `ARCHIVE_DRY_RUN` | `false` | Same as `run --dry-run` |
-| `ARCHIVE_RUNNER_CONCURRENCY` † | `3` | Jobs run at once |
+| `ARCHIVE_RUNNER_CONCURRENCY` † | `3` | Jobs run at once. Whatever this is, the heavy ffmpeg operations (remux, cut, mute, blackout or blur, preview sheets) run one of a kind at a time: a job that needs one another job is running waits for it |
 | `ARCHIVE_MAX_ATTEMPTS` † | `3` | Tries of a failing step before its job is marked `failed` |
 | `ARCHIVE_MONITOR_INTERVAL_SECONDS` † | `30` | How often Helix is checked for a live stream |
 | `ARCHIVE_HLS_POLL_INTERVAL_SECONDS` | `60` | VOD playlist polling while the stream is live |
@@ -168,7 +168,7 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_ADMIN_AUTH_CLIENT_ID` / `ARCHIVE_ADMIN_AUTH_CLIENT_SECRET` | `vods-admin` / – | This worker's client registration in vexoulz-auth |
 | `ARCHIVE_ADMIN_AUTH_REDIRECT_URL` | – | `/admin/signin/callback` as browsers reach it (through the dashboard's proxy); registered with vexoulz-auth |
 | `ARCHIVE_ADMIN_AUTH_CODE_REDIRECT_URL` | `ARCHIVE_ADMIN_AUTH_REDIRECT_URL` | The client's **first** redirect URI registered with vexoulz-auth, which a code from its `POST /v1/codes` carries. Set it only if that isn't the callback above. See [Sign-in from a site's page](#sign-in-from-a-sites-page-post-adminsession-code) |
-| `ARCHIVE_ADMIN_SITE_ORIGINS` | `[]` | Site origins (JSON list, e.g. `["https://vods.example.net"]`) whose pages may call `/admin/session` with cookies. CORS answers only them, and `POST /admin/session {code}` refuses any other `Origin` |
+| `ARCHIVE_ADMIN_SITE_ORIGINS` | `[]` | Site origins (JSON list, e.g. `["https://vods.example.net"]`) whose pages may call `/admin/session` with cookies. CORS answers only them, and `POST /admin/session {code}` refuses any other `Origin`. The origin of `ARCHIVE_ADMIN_AUTH_REDIRECT_URL` (the site this worker serves through its proxy) is always included |
 | `ARCHIVE_API_INTERNAL_URL` | `http://127.0.0.1:<api port>`; `http://api:<api port>` in `compose.yaml` | Where `/admin/health` checks archive-api |
 | `ARCHIVE_MERGE_CANDIDATE_MINUTES` | `30` | `merge-candidates` lists VODs that started up to this long after a VOD ended; see [Merging and splitting VODs](#merging-and-splitting-vods) |
 | `ARCHIVE_GOOGLE_CLIENT_ID` / `ARCHIVE_GOOGLE_CLIENT_SECRET` | – | Google OAuth client for YouTube |
@@ -588,7 +588,7 @@ redirect URI the code carries: `ARCHIVE_ADMIN_AUTH_CODE_REDIRECT_URL`), then:
 | `200` `{"admin": true, "authenticated": true, "csrf", "expiresAt", "passwordLogin", "twitchLogin", "user"}` + the `archive_admin` cookie | The user is in `ARCHIVE_ADMIN_TWITCH_IDS`. The same session, cookie and once-a-minute check with vexoulz-auth as `/admin/signin/callback` makes; send `csrf` as `X-CSRF-Token` on writes |
 | `200` `{"admin": false}`, no cookie | Signed in, but not an admin |
 | `400` `invalid_code` | The code is missing, unknown, expired (codes last 60 seconds), already used, or its vexoulz-auth session has ended. A wrong `ARCHIVE_ADMIN_AUTH_CODE_REDIRECT_URL` looks like this too |
-| `403` `origin_not_allowed` | The request's `Origin` isn't in `ARCHIVE_ADMIN_SITE_ORIGINS`. The code is not redeemed |
+| `403` `origin_not_allowed` | The request's `Origin` is neither in `ARCHIVE_ADMIN_SITE_ORIGINS` nor `ARCHIVE_ADMIN_AUTH_REDIRECT_URL`'s. The code is not redeemed |
 | `404` `signin_off` | Twitch sign-in isn't configured |
 | `502` `misconfigured` | vexoulz-auth refused the worker's client id or secret |
 | `503` `unavailable` | vexoulz-auth couldn't be reached or is rate-limiting; try again |
