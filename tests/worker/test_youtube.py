@@ -276,8 +276,60 @@ async def test_own_channel_signup_required_is_no_channel(yt, monkeypatch):
     monkeypatch.setattr(yt, "_service", lambda: service(signup))
     assert await yt.own_channel() is None
     monkeypatch.setattr(yt, "_service", lambda: service(other))
-    with pytest.raises(HttpError):
+    with pytest.raises(youtube.YouTubeLimitError):
         await yt.own_channel()
+    assert yt.spent == ["channels.list"]  # the refused call isn't counted
+
+
+UPLOAD_LIMIT = (
+    b'{"error": {"message": "The user has exceeded the number of videos they may upload.", "details": '
+    b'[{"message": "The user has exceeded the number of videos they may upload.", "domain": "youtube.video", '
+    b'"reason": "uploadLimitExceeded"}]}}'
+)
+QUOTA = b'{"error": {"message": "quota", "errors": [{"domain": "youtube.quota", "reason": "quotaExceeded"}]}}'
+
+
+@pytest.mark.parametrize(
+    ("status", "content", "expected"),
+    [
+        (400, UPLOAD_LIMIT, "uploadLimitExceeded"),
+        (403, QUOTA, "quotaExceeded"),
+        (403, b'{"error": {"message": "no", "errors": [{"reason": "forbidden"}]}}', None),
+        (500, b"<html>backend error</html>", None),
+    ],
+)
+def test_limit_reason(status, content, expected):
+    assert youtube.limit_reason(HttpError(SimpleNamespace(status=status, reason="x"), content)) == expected
+    assert youtube.limit_reason(ValueError("quotaExceeded")) is None
+
+
+def test_a_limit_is_retried_when_it_lifts():
+    now = dt.datetime(2026, 10, 14, 13, tzinfo=dt.UTC)
+    refused = HttpError(SimpleNamespace(status=400, reason="x"), UPLOAD_LIMIT)
+    upload = youtube.YouTubeLimitError("uploadLimitExceeded", "videos.insert", refused)
+    assert "upload limit" in str(upload)
+    assert upload.retry_at(now) == now + dt.timedelta(hours=24, minutes=5)
+    quota = youtube.YouTubeLimitError("quotaExceeded", "videos.insert", refused)
+    assert quota.retry_at(now) == dt.datetime(2026, 10, 15, 7, 5, tzinfo=dt.UTC)  # midnight Pacific (PDT) + 5 min
+
+
+async def test_counted_counts_only_calls_that_ran(yt):
+    def ok():
+        return "done"
+
+    def refused():
+        raise HttpError(SimpleNamespace(status=403, reason="Forbidden"), QUOTA)
+
+    def failed():
+        raise HttpError(SimpleNamespace(status=500, reason="Error"), b"{}")
+
+    assert await youtube._counted("videos.update", ok) == "done"
+    with pytest.raises(youtube.YouTubeLimitError) as limit:
+        await youtube._counted("videos.insert", refused)
+    assert limit.value.reason == "quotaExceeded" and limit.value.call == "videos.insert"
+    with pytest.raises(HttpError):
+        await youtube._counted("videos.delete", failed)
+    assert yt.spent == ["videos.update", "videos.delete"]
 
 
 async def test_check_unconfigured(settings):

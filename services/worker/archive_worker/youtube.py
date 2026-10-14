@@ -45,6 +45,56 @@ STATE_KEY = "youtube_oauth"
 AUDIT_TARGET = "youtube"
 CHUNK = 64 * 1024 * 1024
 RETRIABLE_STATUS = {500, 502, 503, 504}
+# Errors that another try today won't fix: the project's daily API quota, or the channel's own limit on uploads.
+LIMIT_REASONS = ("quotaExceeded", "dailyLimitExceeded", "uploadLimitExceeded")
+
+
+class YouTubeLimitError(RuntimeError):
+    """YouTube refused a call for a daily limit (``reason``, one of ``LIMIT_REASONS``)."""
+
+    def __init__(self, reason: str, call: str, exc: HttpError) -> None:
+        what = "the channel's upload limit" if reason == "uploadLimitExceeded" else "the daily API quota"
+        super().__init__(f"YouTube refused {call}: {what} is used up ({reason})")
+        self.reason = reason
+        self.call = call
+        self.__cause__ = exc
+
+    def retry_at(self, now: dt.datetime | None = None) -> dt.datetime:
+        """When trying again can work: the API quota starts again at midnight Pacific; Google doesn't say when
+        an upload limit lifts, so a day after it was hit. A few minutes' margin either way."""
+        now = now or dt.datetime.now(dt.UTC)
+        if self.reason == "uploadLimitExceeded":
+            return now + dt.timedelta(hours=24, minutes=5)
+        return youtube_quota.resets_at(now) + dt.timedelta(minutes=5)
+
+
+def limit_reason(exc: BaseException) -> str | None:
+    """The ``LIMIT_REASONS`` entry an HttpError carries, if any (in ``error.errors`` or ``error.details``)."""
+    if not isinstance(exc, HttpError):
+        return None
+    found: list[Any] = list(exc.error_details) if isinstance(exc.error_details, list) else []
+    try:
+        error = json.loads(exc.content).get("error") or {}
+        found += error.get("errors") or []
+    except (ValueError, AttributeError):
+        pass
+    reasons = [d.get("reason") for d in found if isinstance(d, dict)]
+    return next((r for r in reasons if r in LIMIT_REASONS), None)
+
+
+async def _counted(call: str, fn: Callable[[], Any]) -> Any:
+    """Run ``fn`` (a blocking API call) in a thread and count ``call`` against the quota, unless YouTube refused it
+    for a daily limit: that is raised as ``YouTubeLimitError`` and not counted, since the call never ran."""
+    try:
+        result = await asyncio.to_thread(fn)
+    except HttpError as exc:
+        reason = limit_reason(exc)
+        if reason:
+            raise YouTubeLimitError(reason, call, exc) from exc
+        await youtube_quota.spend(call)
+        raise
+    await youtube_quota.spend(call)
+    return result
 
 
 NO_CHANNEL = (
@@ -348,9 +398,8 @@ class YouTube:
         """The channel uploads go to (the connected account's own), or None if the account has none.
         One quota unit."""
         service = await self._service()  # type: ignore[no-untyped-call]
-        await youtube_quota.spend("channels.list")
         try:
-            resp = await asyncio.to_thread(service.channels().list(part="snippet", mine=True).execute)
+            resp = await _counted("channels.list", service.channels().list(part="snippet", mine=True).execute)
         except HttpError as exc:
             if "youtubeSignupRequired" in str(exc):
                 return None
@@ -401,8 +450,8 @@ class YouTube:
         }
         media = MediaFileUpload(str(path), chunksize=CHUNK, resumable=True, mimetype="video/mp4")
         request = service.videos().insert(part="id,snippet,status", body=body, media_body=media, notifySubscribers=True)
-        await youtube_quota.spend("videos.insert")
-        return await asyncio.to_thread(self._resumable, request, path, on_progress)
+        result: dict[str, Any] = await _counted("videos.insert", lambda: self._resumable(request, path, on_progress))
+        return result
 
     def _resumable(self, request, path: Path, on_progress: Callable[[int], None] | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
         response = None
@@ -439,25 +488,22 @@ class YouTube:
 
     async def get_snippet(self, video_id: str, service=None) -> dict[str, Any] | None:  # type: ignore[no-untyped-def]
         service = service or await self._service()  # type: ignore[no-untyped-call]
-        await youtube_quota.spend("videos.list")
-        resp = await asyncio.to_thread(service.videos().list(part="snippet", id=video_id).execute)
+        resp = await _counted("videos.list", service.videos().list(part="snippet", id=video_id).execute)
         items = resp.get("items") or []
         return items[0]["snippet"] if items else None
 
     async def videos(self, ids: list[str]) -> dict[str, dict[str, Any]]:
         """The status and contentDetails of up to 50 videos, by id; the ones YouTube doesn't return are left out."""
         service = await self._service()  # type: ignore[no-untyped-call]
-        await youtube_quota.spend("videos.list")
         request = service.videos().list(part="status,contentDetails", id=",".join(ids), maxResults=len(ids))
-        resp = await asyncio.to_thread(request.execute)
+        resp = await _counted("videos.list", request.execute)
         return {str(v["id"]): v for v in resp.get("items") or []}
 
     async def delete(self, video_id: str) -> bool:
         """Delete one of the channel's videos (50 quota units). False when YouTube no longer has it."""
         service = await self._service()  # type: ignore[no-untyped-call]
-        await youtube_quota.spend("videos.delete")
         try:
-            await asyncio.to_thread(service.videos().delete(id=video_id).execute)
+            await _counted("videos.delete", service.videos().delete(id=video_id).execute)
         except HttpError as exc:
             if exc.resp.status == 404:
                 return False
@@ -478,8 +524,7 @@ class YouTube:
                 "categoryId": snippet.get("categoryId", "20"),
             },
         }
-        await youtube_quota.spend("videos.update")
-        await asyncio.to_thread(service.videos().update(part="snippet", body=body).execute)
+        await _counted("videos.update", service.videos().update(part="snippet", body=body).execute)
 
 
 async def import_legacy_token(path: Path) -> None:

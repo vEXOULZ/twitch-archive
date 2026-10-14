@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -103,7 +103,7 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
     { name = "tenacity", specifier = ">=8.5" },
     { name = "tzdata", specifier = ">=2024.1" },
-    { name = "vex-platform", extras = ["sqlalchemy"], url = "https://github.com/vEXOULZ/vex-platform/archive/refs/tags/v0.6.0.tar.gz" },
+    { name = "vex-platform", extras = ["sqlalchemy"], url = "https://github.com/vEXOULZ/vex-platform/archive/refs/tags/v0.7.0.tar.gz" },
 ]
 
 [[package]]
@@ -1793,8 +1793,8 @@ wheels = [
 
 [[package]]
 name = "vex-platform"
-version = "0.6.0"
-source = { url = "https://github.com/vEXOULZ/vex-platform/archive/refs/tags/v0.6.0.tar.gz" }
+version = "0.7.0"
+source = { url = "https://github.com/vEXOULZ/vex-platform/archive/refs/tags/v0.7.0.tar.gz" }
 dependencies = [
     { name = "fastapi" },
     { name = "procrastinate" },
@@ -1802,7 +1802,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "structlog" },
 ]
-sdist = { hash = "sha256:398b66030018819387620d4312f39bd9db7a4f7656a12abf02e5f60b20d4ee59" }
+sdist = { hash = "sha256:b563db2653ef1614a5fd1aaf16da91228b06931c8efbe8b3d06dd4de6f77d2c4" }
 
 [package.optional-dependencies]
 sqlalchemy = [
