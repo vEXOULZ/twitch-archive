@@ -6,6 +6,7 @@ import pytest
 import respx
 from archive_common.twitch.gql import GQL_URL, ViewerAuth
 from archive_worker import hls
+from archive_worker.context import StepError
 from archive_worker.steps import capture as cap
 
 
@@ -72,6 +73,79 @@ async def test_sync_prefers_unmuted_copies(make_ctx):
     assert (ctx.hls_dir / "1.ts").read_bytes() == b"unmuted-original"
     # a second pass downloads nothing new
     assert await cap._sync_segments(ctx, hls.parse_media(PLAYLIST), base) == (0, 0)
+
+
+UNMUTED = """#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10.000,
+0.ts
+#EXTINF:10.000,
+1-unmuted.ts
+#EXTINF:10.000,
+2-unmuted.ts
+#EXT-X-ENDLIST
+"""
+
+
+@respx.mock
+async def test_sync_takes_the_muted_copy_twitch_serves(make_ctx):
+    # Twitch's playlist names unmuted segments its CDN refuses; only the -muted copies are served.
+    ctx = make_ctx()
+    base = "https://cdn.example/h/chunked"
+    respx.get(f"{base}/0.ts").respond(200, content=b"zero")
+    respx.get(f"{base}/1-unmuted.ts").respond(403)
+    respx.get(f"{base}/2-unmuted.ts").respond(403)
+    respx.get(f"{base}/1-muted.ts").respond(200, content=b"muted1")
+    respx.get(f"{base}/2-muted.ts").respond(404)
+
+    assert await cap._sync_segments(ctx, hls.parse_media(UNMUTED), base) == (3, 1)
+    local = (ctx.hls_dir / "index.m3u8").read_text()
+    assert "\n1-muted.ts\n" in local and "unmuted" not in local and "2-" not in local
+    assert (ctx.hls_dir / "1-muted.ts").read_bytes() == b"muted1"
+
+    respx.get(f"{base}/2-muted.ts").respond(200, content=b"muted2")
+    assert await cap._sync_segments(ctx, hls.parse_media(UNMUTED), base) == (1, 0)
+    assert "\n2-muted.ts\n" in (ctx.hls_dir / "index.m3u8").read_text()
+    assert await cap._sync_segments(ctx, hls.parse_media(UNMUTED), base) == (0, 0)
+
+
+async def test_capture_of_an_ended_vod_stops_retrying_segments(make_ctx, settings, monkeypatch):
+    settings.hls_poll_interval_seconds = 0
+    settings.hls_no_change_threshold = 3
+    ctx = make_ctx("archive", "100", {"stream_id": "555"})
+    monkeypatch.setattr(ctx.deps.helix, "get_video", _video, raising=False)
+    monkeypatch.setattr(type(ctx.deps.helix), "configured", True, raising=False)
+    pl = hls.parse_media(UNMUTED)
+    polls = []
+
+    async def fetch(ctx):
+        return pl, "https://cdn.example/h/chunked"
+
+    async def sync(ctx, pl, base):
+        polls.append(1)
+        (ctx.hls_dir).mkdir(parents=True, exist_ok=True)
+        (ctx.hls_dir / "index.m3u8").write_text("#EXTM3U\n")
+        return 1, 1
+
+    async def offline(ctx, stream_id=None):
+        return False
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(cap, "_fetch_vod_playlist", fetch)
+    monkeypatch.setattr(cap, "_sync_segments", sync)
+    monkeypatch.setattr(cap, "_still_live", offline)
+    monkeypatch.setattr(ctx, "update_vod", nothing)
+    monkeypatch.setattr(ctx, "refuse_if_spliced", nothing)
+
+    with pytest.raises(StepError, match="1 segment"):
+        await cap.capture(ctx)
+    assert len(polls) == 3
+
+
+async def _video(vod_id):
+    return {"id": vod_id, "stream_id": "555"}
 
 
 LIVE_1 = """#EXTM3U

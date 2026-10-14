@@ -88,6 +88,17 @@ async def _fetch_vod_playlist(ctx: JobContext) -> tuple[hls.MediaPlaylist, str]:
     return hls.parse_media(text), hls.base_url(url)
 
 
+def _muted_copy(url: str, dest: Path, exc: BaseException) -> tuple[str, Path] | None:
+    """Where the muted copy of a refused ``-unmuted`` segment is: Twitch's playlist can keep naming an
+    unmuted segment its CDN refuses (403) on every poll, while the ``-muted`` one is served."""
+    if not (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 403):
+        return None
+    muted = hls.muted_name(dest.name)
+    if muted == dest.name:
+        return None
+    return url.replace(dest.name, muted), dest.with_name(muted)
+
+
 async def _sync_segments(ctx: JobContext, pl: hls.MediaPlaylist, base: str) -> tuple[int, int]:
     """Download missing segments and rewrite the local playlist. Returns (missing, failed)."""
     d = ctx.hls_dir
@@ -104,13 +115,27 @@ async def _sync_segments(ctx: JobContext, pl: hls.MediaPlaylist, base: str) -> t
     for seg in pl.segments:
         name = hls.local_name(seg.uri)
         plain = hls.unmuted_name(name)
+        muted = hls.muted_name(name)
         if plain in have:
             name = plain  # captured before Twitch muted it
+        elif muted in have:
+            name = muted  # Twitch refused the unmuted copy (_muted_copy)
         elif name not in have:
             todo.append((_abs(base, seg.uri), d / name))
         entries.append((name, seg.duration, False))
 
-    failures = await _download_all(todo, ctx.settings.segment_concurrency) if todo else []
+    concurrency = ctx.settings.segment_concurrency
+    failures = await _download_all(todo, concurrency) if todo else []
+    urls = {dest: url for url, dest in todo}
+    copies = {dest: copy for dest, exc in failures if (copy := _muted_copy(urls[dest], dest, exc))}
+    if copies:
+        lost = {dest for dest, _ in await _download_all(list(copies.values()), concurrency)}
+        got = {dest.name: copy.name for dest, (_, copy) in copies.items() if copy not in lost}
+        if got:
+            ctx.log.warning("Twitch refused %d unmuted segment(s); captured their muted copies", len(got))
+            failures = [(dest, exc) for dest, exc in failures if dest.name not in got]
+            entries = [(got.get(name, name), dur, disc) for name, dur, disc in entries]
+            have.update(got.values())
     for dest, exc in failures[:5]:
         ctx.log.warning("segment %s failed: %s", dest.name, exc)
     failed = {dest.name for dest, _ in failures}
@@ -131,6 +156,7 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
     await ctx.refuse_if_spliced()
     last_sig = None
     no_change = 0
+    stuck = 0  # polls of the ended VOD that still had failed segments
     errors = 0
     while True:
         video, fetched = await asyncio.gather(
@@ -170,10 +196,14 @@ async def capture(ctx: JobContext, *, one_shot: bool = False) -> None:
         if video is None:
             ctx.log.info("VOD %s no longer on Twitch; capture finished", vod_id)
             break
-        if pl.ended and not failed:
-            if not await _still_live(ctx, str(video.get("stream_id"))):
+        if pl.ended and not await _still_live(ctx, str(video.get("stream_id"))):
+            if not failed:
                 ctx.log.info("VOD playlist ended and the stream is offline; capture finished")
                 break
+            # The VOD is complete, so a segment that keeps failing won't come: fail rather than poll forever.
+            stuck += 1
+            if stuck >= s.hls_no_change_threshold:
+                raise StepError(f"{failed} segment(s) of the ended VOD still failed after {stuck} polls")
         sig = (len(pl.segments), pl.segments[-1].uri if pl.segments else None)
         no_change = no_change + 1 if sig == last_sig and not failed else 0
         last_sig = sig
