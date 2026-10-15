@@ -10,7 +10,7 @@ from archive_common.db import get_sessionmaker
 from archive_common.models import Job, Vod
 from archive_worker import jobs
 from archive_worker.admin import create_admin_app
-from archive_worker.storage import StorageError, folder_path, scan
+from archive_worker.storage import TRASH, Storage, StorageError, folder_path, scan
 from pydantic import SecretStr
 from sqlalchemy import delete, func, select
 
@@ -30,6 +30,7 @@ def test_scan_counts_files_and_bytes(tmp_path):
     put(tmp_path / "live" / "2" / "2.mp4", 5)
     put(tmp_path / "vods" / "stray-file", 1)  # not a folder: left out
     (tmp_path / "other").mkdir()  # not an area
+    put(tmp_path / "vods" / TRASH / "3-1" / "3.mp4", 9)  # being removed: not listed
     got = {(f.area, f.name): (f.bytes, f.files) for f in scan(tmp_path)}
     assert got == {("vods", "1"): (120, 2), ("live", "2"): (5, 1)}
 
@@ -141,18 +142,58 @@ async def test_storage_view_and_delete(world, app, settings):
         assert (await c.delete("/admin/storage/vods/a%20b", headers=KEY)).status_code == 400
         assert (await c.delete("/admin/storage/nope/x", headers=KEY)).status_code == 404
 
-        # Cached until refreshed; a delete drops the cache.
+        # Cached until refreshed; a delete drops the cache and reports the size the dashboard showed.
         put(settings.data_dir / "vods" / ORPHAN / "more.bin", 5)
         assert {f["path"]: f for f in (await c.get("/admin/storage", headers=KEY)).json()["folders"]}[f"vods/{ORPHAN}"][
             "bytes"
         ] == 30
         r = await c.delete(f"/admin/storage/vods/{ORPHAN}", headers=KEY)
-        assert r.status_code == 200 and r.json() == {"path": f"vods/{ORPHAN}", "bytes": 35, "files": 2}
-        assert not (settings.data_dir / "vods" / ORPHAN).exists()
+        assert r.status_code == 200 and r.json() == {"path": f"vods/{ORPHAN}", "bytes": 30, "files": 1}
+        assert not (settings.data_dir / "vods" / ORPHAN).exists()  # moved to the trash before answering
+        assert (await c.delete(f"/admin/storage/vods/{ORPHAN}", headers=KEY)).status_code == 404
         paths = [f["path"] for f in (await c.get("/admin/storage", headers=KEY)).json()["folders"]]
         assert f"vods/{ORPHAN}" not in paths and f"vods/{KEPT}" in paths
 
     async with get_sessionmaker()() as s:
         row = (await s.execute(select(AUDIT_LOG).where(AUDIT_LOG.c.id > world))).one()
     assert (row.action, row.target) == ("storage.delete", f"storage:vods/{ORPHAN}")
-    assert row.detail == {"path": f"vods/{ORPHAN}", "bytes": 35, "files": 2}
+    assert row.detail == {"path": f"vods/{ORPHAN}", "bytes": 30, "files": 1}
+
+
+async def test_delete_answers_before_the_files_are_removed(tmp_path, monkeypatch, db):
+    """Removing a VOD's files can outlast a proxy's timeout: the folder leaves at once, the files go after."""
+    import asyncio
+
+    from archive_worker import storage as storage_mod
+
+    put(tmp_path / "vods" / "slow" / "slow.mp4", 40)
+    put(tmp_path / "vods" / "slow" / "hls" / "0.ts", 2)
+    release = asyncio.Event()
+    removed: list[str] = []
+    real = storage_mod.remove
+
+    def slow_remove(path):
+        asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
+        removed.append(path.name)
+        real(path)
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(storage_mod, "remove", slow_remove)
+    store = Storage(tmp_path)
+    assert await store.delete("vods", "slow") == {"path": "vods/slow", "bytes": 42, "files": 2}  # never scanned: walked
+    assert not (tmp_path / "vods" / "slow").exists()
+    assert [p.name.split("-")[0] for p in (tmp_path / "vods" / TRASH).iterdir()] == ["slow"]
+    assert store.removing == 1 and removed == []
+    assert [f.name for f in await store.folders(refresh=True)] == []  # the trash is not a folder of its own
+    release.set()
+    await store.wait_removed()
+    assert store.removing == 0 and list((tmp_path / "vods" / TRASH).iterdir()) == []
+
+
+async def test_a_restart_empties_the_trash(tmp_path):
+    put(tmp_path / "vods" / TRASH / "1-123" / "1.mp4", 5)
+    put(tmp_path / "live" / TRASH / "2-456" / "hls" / "0.ts", 5)
+    store = Storage(tmp_path)
+    assert store.empty_trash() == 2
+    await store.wait_removed()
+    assert list((tmp_path / "vods" / TRASH).iterdir()) == [] and list((tmp_path / "live" / TRASH).iterdir()) == []

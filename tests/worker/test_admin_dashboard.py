@@ -610,6 +610,7 @@ async def test_twitch_import_queues_paused_archive_jobs(vod, app, monkeypatch):
             for added in body["added"]:
                 job = await jobs.get(added["jobId"])
                 assert (job.kind, job.state, job.step) == ("archive", "paused", "capture")
+                assert job.payload["manual"] is True  # for force_upload_manual
             async with get_sessionmaker()() as s:
                 assert (await s.get(Vod, NEW_VOD)).title == f"title {NEW_VOD}"
             again = (await c.post("/admin/twitch/import", headers=KEY, json={"vodIds": [vod]})).json()
@@ -660,6 +661,7 @@ async def test_health(vod, app, monkeypatch, respx_mock):
         "quota": {"used": 0, "limit": 10_000, "resetsAt": h["youtube"]["quota"]["resetsAt"], "calls": {}},
     }
     assert h["live"]["live"] is True and h["live"]["streamId"] == str(STREAM) and h["live"]["startedAt"]
+    assert (h["doomtp"]["configured"], h["doomtp"]["ok"], h["doomtp"]["listening"]) == (False, None, None)
     assert set(h["jobs"]["counts"]) == set(jobs.STATES) and h["jobs"]["counts"]["failed"] >= 1
     assert h["jobs"]["recentFailures"][0]["id"] == job.id and len(h["jobs"]["recentFailures"]) <= 5
 
@@ -833,6 +835,6 @@ async def test_rearchive_queues_a_replacing_upload(vod, app):
     async with get_sessionmaker()() as s:
         rows = (await s.execute(select(RUNS).where(RUNS.c.id.in_([whole["jobId"], part["jobId"]])))).all()
     a, b = sorted(rows, key=lambda r: r.id)
-    assert (a.kind, a.payload) == ("download", {"type": "vod", "replace": True})
+    assert (a.kind, a.payload) == ("download", {"type": "vod", "manual": True, "replace": True})
     assert b.kind == "reupload"
-    assert b.payload == {"type": "vod", "replace": True, "start_part": 2, "end_part": 2}
+    assert b.payload == {"type": "vod", "manual": True, "replace": True, "start_part": 2, "end_part": 2}

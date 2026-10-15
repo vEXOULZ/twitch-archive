@@ -137,11 +137,12 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_DOOMTP_API_KEY` | empty | A read-scope key for the bot's log. With it, moderation entries and removed messages are saved too (flagged `deleted_at`/`cleared_at`); without it, the public log |
 | `ARCHIVE_LIVE_RECORD` † | `false` | Record the live stream itself; see [§5](#5-live-recordings-and-multitrack) |
 | `ARCHIVE_MULTI_TRACK` † | `false` | With `LIVE_RECORD`, also upload the VOD copy (unlisted). Ignored when `LIVE_RECORD` is off |
+| `ARCHIVE_FORCE_UPLOAD_MANUAL` † | `false` | With `LIVE_RECORD` and without `MULTI_TRACK`, still upload the VOD copy of archives started from the dashboard (see "Which copies are uploaded") |
 | `ARCHIVE_YOUTUBE_UPLOAD` † | `true` | |
 | `ARCHIVE_YOUTUBE_PUBLIC` † | `false` | Public instead of unlisted, for the main copy: the live copy when `LIVE_RECORD` is on, the VOD copy otherwise (§5) |
 | `ARCHIVE_YOUTUBE_DESCRIPTION` † | `VOD` | Last line of every description |
 | `ARCHIVE_YOUTUBE_KEEPALIVE_HOURS` † | `24` | How often the worker refreshes the YouTube token; see [§3](#3-youtube-oauth-setup) |
-| `ARCHIVE_RESTRICTED_GAMES` † | `[]` | Chapters of these games are left out of uploads ("No category": chapters without one) |
+| `ARCHIVE_RESTRICTED_GAMES` † | `[]` | Chapters of these games are left out of uploads ("No category": chapters without one, including the stretches Twitch's chapters leave out, which the chapters step fills with one) |
 | `ARCHIVE_MANUAL_STEPS` † | `{}` | Steps a job pauses before until you resume it, per job kind, e.g. `{"archive":["upload"]}`; see [Manual steps](#manual-steps) |
 | `ARCHIVE_SPLIT_DURATION` † | `10800` | Maximum YouTube part length in seconds |
 | `ARCHIVE_KEEP_HLS` / `ARCHIVE_KEEP_MP4` † | `false` | Keep files after upload |
@@ -332,7 +333,7 @@ curl -s "${H[@]}" -X PATCH "$A/admin/settings" -d '{"keep_hls":true,"runner_conc
 curl -s "${H[@]}" -X DELETE "$A/admin/settings/keep_hls"   # back to the env value
 ```
 
-- Keys are the setting names without `ARCHIVE_`, in lower case. `GET` answers `{data: [{key, value, default, overridden, type, group, applies, help, min, max, updatedAt, updatedBy}]}`; `manual_steps` also carries `choices` (every kind's steps). `multi_track` carries `requires: "live_record"`: it does nothing while that is off, so the dashboard can disable it. `PATCH` and `DELETE` answer the same.
+- Keys are the setting names without `ARCHIVE_`, in lower case. `GET` answers `{data: [{key, value, default, overridden, type, group, applies, help, min, max, updatedAt, updatedBy}]}`; `manual_steps` also carries `choices` (every kind's steps). `multi_track` and `force_upload_manual` carry `requires: "live_record"`: they do nothing while that is off, so the dashboard can disable it. `PATCH` and `DELETE` answer the same.
 - **Types:** `bool`, `int` and `float` (within `min`–`max`), `text`, `list` (names) and `steps` (`{kind: [step, ...]}`, checked like `ARCHIVE_MANUAL_STEPS`). A `PATCH` with any refused value changes nothing (400).
 - **`applies`:** `now` settings are read on every use: the monitor's next check (`vod_download`, `live_record`, `monitor_interval_seconds`), the runner's next pick (`runner_concurrency`, `max_attempts`), the next step boundary (`manual_steps`), the next token refresh (`youtube_keepalive_hours`) and the next dashboard load (`youtube_daily_quota`: the limit the dashboard counts the worker's YouTube API units against; Google shows no remaining quota, so the worker adds up what it spends itself, from midnight Pacific) and the YouTube check's next look (`youtube_check_hours`: how often every upload is checked on YouTube, 50 per `videos.list` unit: still there, not rejected or blocked, as long as uploaded, no part missing, and how much of the VOD the uploads hold; 0 leaves it to the dashboard's Check now; `GET /admin/youtube/videos` has the last result). `next job` settings are read when a job starts or resumes, so a running job finishes with what it started with.
 - Both changes are audited with `{before, after}`. Secrets, keys, URLs, paths, the channel and the database are never editable here.
@@ -368,7 +369,7 @@ curl -s "${H[@]}" -X DELETE "$A/admin/storage/vods/123" # delete a folder's file
 
 - `GET` answers `{disk: {total, used, free}, folders: [{area, name, path, bytes, files, modifiedAt, vod, jobs: {active, last}, stale}], cacheSeconds}`. `vod` is the VOD the folder belongs to (`{id, title, hidden}`, or `null`); `jobs` are the jobs working in it. Sizes are cached for 30 seconds (and dropped after a delete).
 - A folder is **stale** when no job for it is queued, running or paused, and either no VOD belongs to it or its last job failed or was cancelled.
-- `DELETE` answers `{path, bytes, files}` (what was freed) and is audited with it. It is refused (`409`) while a job for the folder is queued, running or paused, and only takes a folder name directly under `vods/` or `live/` (no symlinks). Paths are always relative to the data directory.
+- `DELETE` answers `{path, bytes, files}` (what it frees, as the last scan measured it) and is audited with it. The folder moves into its area's `.trash/` before the answer and its files are removed in the background, since removing a VOD's files can outlast a proxy's timeout; the disk's free space catches up once they are gone, and whatever a restart interrupted is removed when the worker starts. It is refused (`409`) while a job for the folder is queued, running or paused, and only takes a folder name directly under `vods/` or `live/` (no symlinks). Paths are always relative to the data directory.
 
 ### Recipes
 
@@ -628,6 +629,8 @@ curl -s "${H[@]}" -X POST "$A/admin/twitch/import" -d '{"vodIds":["123","456"]}'
 curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 ```
 
+`/admin/health`'s `doomtp` is the connection to doomtp-bot for the dashboard: `{configured, keyed, login, ok, listening, since, error, checkedAt}`. It asks the bot's `/log/coverage` about the last five minutes, at most once a minute: `ok` is whether the bot answered (`null` without `ARCHIVE_DOOMTP_URL`), `listening` whether it is in the channel's chat right now and `since` since when (or when it left), and `error` what went wrong (`HTTP 403: the log isn't public and no key is set`, `ConnectError` …).
+
 - **Health** refreshes the YouTube token at most every 10 minutes; `/admin/youtube/status` always does.
 - **Job events** keep about the last 1000 entries per job. `capture`, `split` and `upload` add `progress` (`{"done", "total", "unit"}`, unit `parts`, `bytes` or `percent`).
 - **Chapters** must be sorted, must not overlap, must have `length > 0` and must end inside the VOD. They are stored in the legacy shape, with `image` filled in at 40x53 for older readers. `"locked": true` makes the automatic `chapters` step skip the VOD. `POST /admin/chapters` with `{"force": true}` (or a job payload with `"force": true`) overrides the lock.
@@ -664,6 +667,8 @@ curl -s "${H[@]}" "$A/admin/audit?before=&limit=50"     # who changed what
 | false | – | VOD copy | the VOD copy |
 | true | false | **live copy only**: no `archive` job runs; the `live` job saves the VOD's chapters, chat and emotes | the live copy |
 | true | true | both | the live copy (the VOD copy stays unlisted) |
+
+`FORCE_UPLOAD_MANUAL` (†, default off) changes the middle row for archives started from the dashboard (added from Twitch, `/admin/hls/download`, `/admin/download`, `/admin/reupload`, a re-archive, DMCA): their VOD copy is uploaded too, and is the main copy (public with `YOUTUBE_PUBLIC`) while the VOD has no live upload, as for a stream the live recording missed. The monitor's own jobs are unchanged.
 
 The frontend (`YoutubeVod.js`) plays `live` entries whenever a VOD has any, and falls back to `vod` entries otherwise. Chat sync works the same way for both.
 

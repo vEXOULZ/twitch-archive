@@ -20,13 +20,26 @@ from .metadata import file_chapters, part_gaps, vod_duration
 YOUTUBE_MAX_DEFERRALS = 3
 
 
+def _forced(ctx: JobContext) -> bool:
+    """A VOD copy uploaded although live_record is on without multi_track: the job was started from
+    the dashboard and ``force_upload_manual`` is on."""
+    s = ctx.settings
+    return (
+        ctx.video_type == "vod"
+        and s.live_record
+        and not s.multi_track
+        and s.force_upload_manual
+        and ctx.payload.get("manual") is True
+    )
+
+
 def _publishing_disabled(ctx: JobContext) -> str | None:
     s = ctx.settings
     if s.dry_run:
         return "dry run"
     if not s.youtube_upload:
         return "youtube_upload is off"
-    if ctx.video_type == "vod" and s.live_record and not s.multi_track:
+    if ctx.video_type == "vod" and s.live_record and not s.multi_track and not _forced(ctx):
         return "live_record is on without multi_track: only the live copy is uploaded"
     return None
 
@@ -72,7 +85,11 @@ async def upload(ctx: JobContext) -> None:
     vod = await ctx.get_vod()
     total = int(ctx.payload.get("total_parts") or len(ctx.payload["parts"]))
     description = planning.base_description(s.domain_name, vod.id, vod.title, s.youtube_description)
-    status = planning.privacy(ctx.video_type, s.youtube_public, s.live_record)
+    # A forced VOD copy is the main one while the VOD has no live upload (the recording missed the stream).
+    has_live = any(e.get("type") == "live" for e in vod.youtube or [])
+    status = planning.privacy(ctx.video_type, s.youtube_public, s.live_record and (has_live or not _forced(ctx)))
+    if _forced(ctx):
+        ctx.log.info("force_upload_manual: uploading the VOD copy of an archive started from the dashboard")
     uploaded: dict[str, dict[str, Any]] = ctx.payload.setdefault("uploaded", {})
     all_parts = planning.plan_parts(
         await vod_duration(ctx, vod), file_chapters(ctx, vod), s.restricted_games, s.split_duration
