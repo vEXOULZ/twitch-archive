@@ -66,6 +66,15 @@ ENTRIES = (
         requires="live_record",
     ),
     Entry(
+        "force_upload_manual",
+        "bool",
+        "Capture",
+        "next job",
+        "Without multi_track, still upload the VOD copy of archives started from Manage (added from Twitch,"
+        " re-downloaded), as the main copy when there is no live one",
+        requires="live_record",
+    ),
+    Entry(
         "monitor_interval_seconds", "int", "Capture", "now", "How often Twitch is checked for a live stream", 5, 3600
     ),
     Entry("youtube_upload", "bool", "YouTube", "next job", "Upload to YouTube"),

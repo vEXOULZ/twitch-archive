@@ -11,13 +11,17 @@ a follow's ``followed_at``, coverage sessions, and gaps as ``from``/``to``), the
 from __future__ import annotations
 
 import datetime as dt
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from archive_common import http
 from archive_common.config import Settings
 
 PAGE_LIMIT = 500
+STATUS_WINDOW_MS = 5 * 60_000  # the stretch /coverage is asked about for the dashboard's tile
+STATUS_MAX_AGE = 60.0  # seconds a status is reused for
 _TIMES = ("at", "received_at", "deleted_at", "cleared_at")
 
 
@@ -65,9 +69,21 @@ def v1_coverage(body: dict[str, Any]) -> dict[str, Any]:
     return out  # type: ignore[return-value]
 
 
+def status_from_coverage(body: dict[str, Any]) -> dict[str, Any]:
+    """Whether the bot is in the channel's chat now, and since when, from a v2 coverage answer
+    over the last few minutes: an open session means listening; otherwise the newest session's end."""
+    sessions = body.get("sessions") or []
+    open_ = [s for s in sessions if s.get("ended_at") is None]
+    if open_:
+        return {"listening": True, "since": max(s.get("started_at") or "" for s in open_) or None}
+    ended = [s.get("ended_at") for s in sessions if s.get("ended_at")]
+    return {"listening": False, "since": max(ended) if ended else None}
+
+
 class Doomtp:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._status: tuple[float, dict[str, Any]] | None = None
 
     @property
     def configured(self) -> bool:
@@ -106,3 +122,39 @@ class Doomtp:
             headers=self._headers(),
         )
         return v1_coverage(resp.json())
+
+    async def status(self, max_age: float = STATUS_MAX_AGE) -> dict[str, Any]:
+        """The connection to doomtp-bot for the dashboard: whether it is set up, answers, and is in the
+        channel's chat now. Asked at most every ``max_age`` seconds; never raises."""
+        if self._status and time.monotonic() - self._status[0] < max_age:
+            return self._status[1]
+        out: dict[str, Any] = {
+            "configured": self.configured,
+            "keyed": self.keyed,
+            "login": self.settings.doomtp_login or self.settings.twitch_username,
+            "ok": None,
+            "listening": None,
+            "since": None,
+            "error": None,
+            "checkedAt": dt.datetime.now(dt.UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        }
+        if self.configured:
+            now = round(time.time() * 1000)
+            try:
+                resp = await http.request(
+                    "GET",
+                    self._url("/coverage"),
+                    attempts=1,
+                    params={"since": _iso(now - STATUS_WINDOW_MS)},
+                    headers=self._headers(),
+                    timeout=10,
+                )
+                out |= {"ok": True, **status_from_coverage(resp.json())}
+            except httpx.HTTPStatusError as exc:
+                code = exc.response.status_code
+                why = {401: "the API key was refused", 403: "the log isn't public and no key is set"}.get(code, "")
+                out |= {"ok": False, "error": f"HTTP {code}" + (f": {why}" if why else "")}
+            except Exception as exc:  # unreachable, timeout, not JSON
+                out |= {"ok": False, "error": type(exc).__name__}
+        self._status = (time.monotonic(), out)
+        return out

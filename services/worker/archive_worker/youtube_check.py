@@ -128,6 +128,7 @@ def vod_report(
     planned: float,
     entries: Iterable[dict[str, Any]],
     videos: dict[str, dict[str, Any]],
+    created_at: dt.datetime | None = None,
 ) -> dict[str, Any]:
     """One VOD: each copy's parts and how much they hold, its best share of the VOD, and the problems."""
     copies: list[dict[str, Any]] = []
@@ -162,6 +163,7 @@ def vod_report(
     return {
         "id": vod_id,
         "title": title,
+        "createdAt": iso_utc(created_at),  # the dashboard shows recent VODs' problems first
         "seconds": round(seconds),
         "planned": round(planned),
         "share": best["share"] if best else 0.0,
@@ -192,7 +194,8 @@ async def check(videos: Videos, settings: Settings, now: dt.datetime | None = No
     for v in vods:
         seconds = float(hhmmss_to_seconds(v.duration) or 0)
         plan = planning.plan_parts(seconds, v.chapters, settings.restricted_games, settings.split_duration)
-        reports.append(vod_report(v.id, v.title, seconds, sum(p.duration for p in plan), v.youtube or [], found))
+        planned = sum(p.duration for p in plan)
+        reports.append(vod_report(v.id, v.title, seconds, planned, v.youtube or [], found, v.created_at))
     problems = [r for r in reports if r["issues"]]
     result = {
         "checkedAt": iso_utc(now or dt.datetime.now(dt.UTC)),

@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     chat_download: bool = True
     live_record: bool = False
     multi_track: bool = False
+    # With live_record on and multi_track off, still upload the VOD copy of an archive started from the
+    # dashboard (added from Twitch, re-downloaded): a stream the live recording missed has no other copy.
+    force_upload_manual: bool = False
     youtube_upload: bool = True
     youtube_public: bool = False
     youtube_description: str = "VOD"

@@ -1,5 +1,6 @@
 """Whether the uploads are still on YouTube and whole (youtube_check.py)."""
 
+import datetime as dt
 from typing import Any
 
 from archive_worker import youtube_check as yc
@@ -69,6 +70,9 @@ def test_report_counts_the_best_copy_and_skips_bad_parts():
     assert r["share"] == live["share"] == 7000 / 7200
     assert kinds(r["issues"]) == ["removed"]  # live plus its ad breaks covers the plan
     assert r["issues"][0] | {"type": "vod", "part": 2, "video": "v2"} == r["issues"][0]
+    assert r["createdAt"] is None
+    at = dt.datetime(2026, 10, 1, 12, tzinfo=dt.UTC)
+    assert yc.vod_report("100", "t", 7200, 7200, entries, videos, at)["createdAt"] == "2026-10-01T12:00:00+00:00"
 
 
 def test_report_flags_missing_parts_and_incomplete_copies():

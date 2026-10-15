@@ -627,7 +627,7 @@ def create_admin_app(
 
     def type_payload(vod: Vod, body: dict[str, Any]) -> dict[str, Any]:
         t = vtype(body)
-        payload: dict[str, Any] = {"type": t}
+        payload: dict[str, Any] = {"type": t, "manual": True}  # started from the dashboard (force_upload_manual)
         if t == "live":
             if not vod.stream_id:
                 raise AdminError(400, "Vod has no stream_id; cannot locate the live recording")
@@ -711,8 +711,13 @@ def create_admin_app(
                 log.exception("health: YouTube quota lookup failed")
                 return None
 
-        db, api, yt, viewer, used = await asyncio.gather(
-            db_state(), api_ok(), deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE), viewer_check(), quota()
+        db, api, yt, viewer, used, bot = await asyncio.gather(
+            db_state(),
+            api_ok(),
+            deps.youtube.cached_check(YOUTUBE_CHECK_MAX_AGE),
+            viewer_check(),
+            quota(),
+            deps.doomtp.status(),
         )
         db_ok = db is not None
         counts, failures, live = db or ({st: 0 for st in jobs.STATES}, [], None)
@@ -730,6 +735,7 @@ def create_admin_app(
                 "quota": used,
             },
             "twitchViewer": viewer,
+            "doomtp": bot,
             "live": {
                 "live": live is not None,
                 "streamId": str(live.id) if live else None,
@@ -1399,7 +1405,8 @@ def create_admin_app(
             if await vod_exists(vod_id) is None:
                 await upsert_vod(video)
             vod = await require_vod(vod_id)
-            job = await enqueue("archive", vod.id, {"type": "vod", "stream_id": vod.stream_id}, paused=paused)
+            payload = {"type": "vod", "stream_id": vod.stream_id, "manual": True}
+            job = await enqueue("archive", vod.id, payload, paused=paused)
             added.append({"vodId": vod_id, "jobId": job.id})
         state = "paused" if paused else "queued"
         return _ok(f"{len(added)} archive job(s) {state}, {len(skipped)} skipped", added=added, skipped=skipped)
@@ -1448,7 +1455,7 @@ def create_admin_app(
             vod = await require_vod(body["vodId"])
         if await jobs.find_active("archive", vod_id=vod.id):
             raise AdminError(409, f"An archive job for {vod.id} is already running")
-        job = await enqueue("archive", vod.id, {"type": "vod", "stream_id": vod.stream_id})
+        job = await enqueue("archive", vod.id, {"type": "vod", "stream_id": vod.stream_id, "manual": True})
         return _ok(f"Downloading {vod.id} via HLS..", job)
 
     @app.post("/admin/reupload", dependencies=auth)
