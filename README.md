@@ -142,7 +142,7 @@ See [Troubleshooting](#8-operations-and-troubleshooting) for how to find new val
 | `ARCHIVE_YOUTUBE_PUBLIC` † | `false` | Public instead of unlisted, for the main copy: the live copy when `LIVE_RECORD` is on, the VOD copy otherwise (§5) |
 | `ARCHIVE_YOUTUBE_DESCRIPTION` † | `VOD` | Last line of every description |
 | `ARCHIVE_YOUTUBE_KEEPALIVE_HOURS` † | `24` | How often the worker refreshes the YouTube token; see [§3](#3-youtube-oauth-setup) |
-| `ARCHIVE_RESTRICTED_GAMES` † | `[]` | Chapters of these games are left out of uploads ("No category": chapters without one) |
+| `ARCHIVE_RESTRICTED_GAMES` † | `[]` | Chapters of these games are left out of uploads ("No category": chapters without one, including the stretches Twitch's chapters leave out, which the chapters step fills with one) |
 | `ARCHIVE_MANUAL_STEPS` † | `{}` | Steps a job pauses before until you resume it, per job kind, e.g. `{"archive":["upload"]}`; see [Manual steps](#manual-steps) |
 | `ARCHIVE_SPLIT_DURATION` † | `10800` | Maximum YouTube part length in seconds |
 | `ARCHIVE_KEEP_HLS` / `ARCHIVE_KEEP_MP4` † | `false` | Keep files after upload |
@@ -369,7 +369,7 @@ curl -s "${H[@]}" -X DELETE "$A/admin/storage/vods/123" # delete a folder's file
 
 - `GET` answers `{disk: {total, used, free}, folders: [{area, name, path, bytes, files, modifiedAt, vod, jobs: {active, last}, stale}], cacheSeconds}`. `vod` is the VOD the folder belongs to (`{id, title, hidden}`, or `null`); `jobs` are the jobs working in it. Sizes are cached for 30 seconds (and dropped after a delete).
 - A folder is **stale** when no job for it is queued, running or paused, and either no VOD belongs to it or its last job failed or was cancelled.
-- `DELETE` answers `{path, bytes, files}` (what was freed) and is audited with it. It is refused (`409`) while a job for the folder is queued, running or paused, and only takes a folder name directly under `vods/` or `live/` (no symlinks). Paths are always relative to the data directory.
+- `DELETE` answers `{path, bytes, files}` (what it frees, as the last scan measured it) and is audited with it. The folder moves into its area's `.trash/` before the answer and its files are removed in the background, since removing a VOD's files can outlast a proxy's timeout; the disk's free space catches up once they are gone, and whatever a restart interrupted is removed when the worker starts. It is refused (`409`) while a job for the folder is queued, running or paused, and only takes a folder name directly under `vods/` or `live/` (no symlinks). Paths are always relative to the data directory.
 
 ### Recipes
 

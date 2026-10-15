@@ -237,6 +237,12 @@ def create_admin_app(
     helix = deps.helix
     app = FastAPI(title="archive-worker admin", docs_url=None, redoc_url=None, openapi_url=None)
 
+    async def empty_trash() -> None:
+        if left := storage.empty_trash():
+            log.info("storage: removing %d folder(s) an earlier run deleted", left)
+
+    app.router.on_startup.append(empty_trash)
+
     @app.exception_handler(AdminError)
     async def _admin_error(_req: Request, exc: AdminError) -> JSONResponse:
         return JSONResponse({"error": True, "msg": exc.msg, **exc.extra}, status_code=exc.status, headers=exc.headers)
