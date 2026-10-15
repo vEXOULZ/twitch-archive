@@ -209,3 +209,25 @@ def test_recording_gaps_leave_out_what_a_cut_already_removes() -> None:
     timeline: list[list[float]] = [[0, 1000, 100], [100, 1200, 100]]  # hole at VOD [100, 200)
     gaps = planning.recording_gaps(300, 1000, timeline, [(150, 250)], [150])
     assert gaps == [[[100, 50]]]
+
+
+def test_stretches_without_a_category_become_no_category_chapters():
+    # Twitch leaves the stretches without a category out of the moments: before the first, between two, after the last.
+    edges = [_edge(600_000, 1_200_000, "Chess"), _edge(2_400_000, 600_000, "Artifact", "2")]
+    chapters = planning.chapters_from_moments(edges, 4000, [planning.NO_CATEGORY])
+    assert [(c["name"], c["start"], c["end"], c["restricted"]) for c in chapters] == [
+        (None, 0, 600, True),
+        ("Chess", 600, 1200, False),
+        (None, 1800, 600, True),
+        ("Artifact", 2400, 600, False),
+        (None, 3000, 1000, True),
+    ]
+    assert planning.plan_parts(4000, chapters, [planning.NO_CATEGORY], 10_800) == [
+        Part(1, 600, 1800),
+        Part(2, 2400, 3000),
+    ]
+    # Not listed: the same chapters, nothing cut.
+    assert [c["restricted"] for c in planning.chapters_from_moments(edges, 4000, [])] == [False] * 5
+    # Back to back (within a second of rounding) and to the end: nothing added.
+    whole = [_edge(0, 1_000_400, "Chess"), _edge(1_000_000, 0, "Go", "3")]
+    assert [c["name"] for c in planning.chapters_from_moments(whole, 2000, [planning.NO_CATEGORY])] == ["Chess", "Go"]

@@ -46,6 +46,26 @@ def chapters_from_moments(
                 restricted_game(name, restricted_games),
             )
         )
+    return fill_gaps(out, vod_duration, restricted_games)
+
+
+GAP_TOLERANCE = 1.0  # seconds between two chapters that are rounding, not a stretch without one
+
+
+def fill_gaps(chapters: list[dict[str, Any]], vod_duration: float, restricted_games: list[str]) -> list[dict[str, Any]]:
+    """The chapters in order, with a "No category" chapter wherever none covers the VOD. Twitch leaves
+    a stretch without a category out of a VOD's moments, and an uncovered stretch is uploaded, so
+    without these listing "No category" in ``restricted_games`` would not cut it."""
+    out: list[dict[str, Any]] = []
+    t = 0.0
+    for ch in sorted(chapters, key=lambda c: float(c.get("start") or 0)):
+        start = float(ch.get("start") or 0)
+        if start - t > GAP_TOLERANCE:
+            out.append(chapter(None, None, None, t, start - t, restricted_game(None, restricted_games)))
+        out.append(ch)
+        t = max(t, start + float(ch.get("end") or 0))
+    if out and vod_duration - t > GAP_TOLERANCE:
+        out.append(chapter(None, None, None, t, vod_duration - t, restricted_game(None, restricted_games)))
     return out
 
 
