@@ -26,7 +26,7 @@ from pydantic import SecretStr
 from sqlalchemy import delete, select, text, update
 
 BOT = "https://bot.test"
-LOG_URL = f"{BOT}/api/v2/channels/vexoulz/log"
+LOG_URL = f"{BOT}/api/v2/channels/vexouluna/log"
 START = dt.datetime(2001, 3, 4, 20, 0, tzinfo=dt.UTC)
 START_MS = int(START.timestamp() * 1000)
 VOD, VOD2 = "test-bot-chat", "test-bot-chat-2"

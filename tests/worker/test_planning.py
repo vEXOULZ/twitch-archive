@@ -92,11 +92,11 @@ def test_select_parts():
 
 def test_titles_use_local_date():
     created = dt.datetime(2026, 2, 21, 1, 30, tzinfo=dt.UTC)  # 20th in Sao Paulo
-    assert planning.video_title("vexoulz", "vod", created, "America/Sao_Paulo", 1, 1) == (
-        "vexoulz Twitch VOD - 2026-02-20"
+    assert planning.video_title("vexouluna", "vod", created, "America/Sao_Paulo", 1, 1) == (
+        "vexouluna Twitch VOD - 2026-02-20"
     )
-    assert planning.video_title("vexoulz", "live", created, "America/Sao_Paulo", 2, 3) == (
-        "vexoulz Twitch Live VOD - 2026-02-20 PART 2"
+    assert planning.video_title("vexouluna", "live", created, "America/Sao_Paulo", 2, 3) == (
+        "vexouluna Twitch Live VOD - 2026-02-20 PART 2"
     )
 
 

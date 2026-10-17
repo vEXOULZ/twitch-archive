@@ -5,17 +5,17 @@ from archive_worker import hls
 MASTER = """#EXTM3U
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="chunked",NAME="1080p60 (source)",AUTOSELECT=YES,DEFAULT=YES
 #EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,CODECS="avc1.64002A,mp4a.40.2",VIDEO="chunked",FRAME-RATE=60.000
-https://d1m7jfoe9zdc1j.cloudfront.net/abc_vexoulz_1/chunked/index-dvr.m3u8
+https://d1m7jfoe9zdc1j.cloudfront.net/abc_vexouluna_1/chunked/index-dvr.m3u8
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="720p60",NAME="720p60",AUTOSELECT=YES,DEFAULT=YES
 #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,VIDEO="720p60"
-https://d1m7jfoe9zdc1j.cloudfront.net/abc_vexoulz_1/720p60/index-dvr.m3u8
+https://d1m7jfoe9zdc1j.cloudfront.net/abc_vexouluna_1/720p60/index-dvr.m3u8
 """
 
 MASTER_NO_CHUNKED = """#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,VIDEO="1080p60"
-https://host.example/abc_vexoulz_1/1080p60/index-dvr.m3u8
+https://host.example/abc_vexouluna_1/1080p60/index-dvr.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,VIDEO="720p60"
-https://host.example/abc_vexoulz_1/720p60/index-dvr.m3u8
+https://host.example/abc_vexouluna_1/720p60/index-dvr.m3u8
 """
 
 
@@ -29,14 +29,14 @@ def test_parse_master():
 
 def test_candidates_prefer_chunked():
     urls = hls.twitch_variant_candidates(hls.parse_master(MASTER))
-    assert urls == ["https://d1m7jfoe9zdc1j.cloudfront.net/abc_vexoulz_1/chunked/index-dvr.m3u8"]
+    assert urls == ["https://d1m7jfoe9zdc1j.cloudfront.net/abc_vexouluna_1/chunked/index-dvr.m3u8"]
 
 
 def test_candidates_derive_chunked_then_1080p():
     urls = hls.twitch_variant_candidates(hls.parse_master(MASTER_NO_CHUNKED))
     assert urls == [
-        "https://host.example/abc_vexoulz_1/chunked/index-dvr.m3u8",
-        "https://host.example/abc_vexoulz_1/1080p60/index-dvr.m3u8",
+        "https://host.example/abc_vexouluna_1/chunked/index-dvr.m3u8",
+        "https://host.example/abc_vexouluna_1/1080p60/index-dvr.m3u8",
     ]
 
 
@@ -44,7 +44,7 @@ def test_usher_urls():
     url = hls.vod_master_url("123", '{"a":1}', "sig")
     assert url.startswith("https://usher.ttvnw.net/vod/v2/123.m3u8?")
     assert "platform=web" in url and "transcode_mode=cbr_v1" in url and "nauthsig=sig" in url
-    assert "/api/channel/hls/vexoulz.m3u8?" in hls.live_master_url("VexOulz", "t", "s")
+    assert "/api/channel/hls/vexouluna.m3u8?" in hls.live_master_url("VexouLuna", "t", "s")
 
 
 VOD_PLAYLIST = """#EXTM3U

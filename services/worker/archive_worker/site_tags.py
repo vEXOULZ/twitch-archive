@@ -30,7 +30,7 @@ PATTERNS = ("stripes", "checks")
 PATTERN_SIZE = (2, 40)
 COMPUTED = ("new", "updated")  # the site works these out (from dates): never stored on a VOD
 
-# The site's isTagColor (vexoulz-vods src/lib/vodTags.ts): it goes into CSS custom properties, so
+# The site's isTagColor (vods-core src/app/lib/tagRules.ts): it goes into CSS custom properties, so
 # nothing that could load or run something (url(), image-set(), quotes, escapes, ";", ":", braces).
 COLOR_MAX = 160
 COLOR_FUNCS = {"rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color", "color-mix"}

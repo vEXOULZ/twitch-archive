@@ -22,8 +22,8 @@ def settings(tmp_path) -> Settings:
     return Settings(
         data_dir=tmp_path,
         twitch_id="38656648",
-        twitch_username="vexoulz",
-        channel="vexoulz",
+        twitch_username="vexouluna",
+        channel="vexouluna",
         domain_name="vods.example.net",
         restricted_games=["Artifact"],
         split_duration=10800,
