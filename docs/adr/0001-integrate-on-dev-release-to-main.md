@@ -25,7 +25,7 @@ for "what was running last week" other than a commit sha.
   `pyproject.toml`. After the merge, a `vX.Y.Z` tag on `main` names it:
   `gh release create vX.Y.Z --target main --generate-notes`. CI refuses a tag that disagrees with that
   version.
-- **Images:** CI publishes `ghcr.io/vexoulz/twitch-archive-api` and `-worker`. A push to `main` publishes
+- **Images:** CI publishes `ghcr.io/vexouluna/twitch-archive-api` and `-worker`. A push to `main` publishes
   `:main`, a push to `dev` publishes `:dev`, and a tag publishes `:vX.Y.Z`; each also gets its `:<sha>`.
   Until the server pulls these images it keeps building `main` from its checkout, which is the same code.
 - **Rolling back** is reverting on `main` today, and pinning `TAG` to the previous `:vX.Y.Z` once the

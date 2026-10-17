@@ -18,7 +18,7 @@ jobs:
       setup: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
   # One image per service, from the targets of the root Dockerfile. A push to main or dev publishes
-  # ghcr.io/vexoulz/twitch-archive-api and -worker as :main / :dev; a tag vX.Y.Z as :vX.Y.Z.
+  # ghcr.io/vexouluna/twitch-archive-api and -worker as :main / :dev; a tag vX.Y.Z as :vX.Y.Z.
   image:
     needs: ci
     uses: vexouLuna/conventions/.github/workflows/publish-image.yml@v2.1.0
