@@ -8,12 +8,12 @@ on:
 
 jobs:
   conventions:
-    uses: vexouLuna/conventions/.github/workflows/conventions-check.yml@v2.1.0
+    uses: vexouLuna/conventions/.github/workflows/conventions-check.yml@v2.1.1
     secrets: inherit
 
   ci:
     # The database and contract tests skip here: they need a restored copy of the live DB.
-    uses: vexouLuna/conventions/.github/workflows/python-ci.yml@v2.1.0
+    uses: vexouLuna/conventions/.github/workflows/python-ci.yml@v2.1.1
     with:
       setup: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
@@ -21,7 +21,7 @@ jobs:
   # ghcr.io/vexouluna/twitch-archive-api and -worker as :main / :dev; a tag vX.Y.Z as :vX.Y.Z.
   image:
     needs: ci
-    uses: vexouLuna/conventions/.github/workflows/publish-image.yml@v2.1.0
+    uses: vexouLuna/conventions/.github/workflows/publish-image.yml@v2.1.1
     permissions:
       contents: read
       packages: write
@@ -31,7 +31,7 @@ jobs:
 
   image-worker:
     needs: ci
-    uses: vexouLuna/conventions/.github/workflows/publish-image.yml@v2.1.0
+    uses: vexouLuna/conventions/.github/workflows/publish-image.yml@v2.1.1
     permissions:
       contents: read
       packages: write
