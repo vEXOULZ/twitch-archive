@@ -308,7 +308,7 @@ class AdminSession(Base):
     csrf: Mapped[str] = mapped_column(Text, nullable=False)
     actor: Mapped[str] = mapped_column(Text, nullable=False)  # password | twitch:<id>
     twitch_user: Mapped[Any] = mapped_column(JSONB(none_as_null=True))
-    sid: Mapped[str | None] = mapped_column(Text)  # the vexoulz-auth session behind a Twitch sign-in
+    sid: Mapped[str | None] = mapped_column(Text)  # the vex-auth session behind a Twitch sign-in
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     checked_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

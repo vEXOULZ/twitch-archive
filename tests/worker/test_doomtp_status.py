@@ -5,7 +5,7 @@ import respx
 from archive_worker.doomtp import Doomtp, status_from_coverage
 from pydantic import SecretStr
 
-COVERAGE = "https://bot.test/api/v2/channels/vexoulz/log/coverage"
+COVERAGE = "https://bot.test/api/v2/channels/vexouluna/log/coverage"
 
 
 def test_listening_is_an_open_session():
@@ -33,7 +33,7 @@ async def test_status_reads_coverage_and_is_cached(settings, respx_mock):
     assert (st["configured"], st["keyed"], st["login"], st["ok"], st["listening"], st["since"]) == (
         True,
         True,
-        "vexoulz",
+        "vexouluna",
         True,
         True,
         "2026-10-15T10:00:00Z",

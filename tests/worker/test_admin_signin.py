@@ -1,4 +1,4 @@
-"""The admin password is local-only; Twitch sign-in through vexoulz-auth (faked here) works from anywhere."""
+"""The admin password is local-only; Twitch sign-in through vex-auth (faked here) works from anywhere."""
 
 import json
 from typing import Any
@@ -14,7 +14,7 @@ from archive_worker.admin_signin import (
     PendingStates,
     SignedIn,
     SignInError,
-    VexoulzAuth,
+    VexAuth,
     safe_next,
     with_admin,
 )
@@ -33,7 +33,7 @@ class Clock:
 
 
 class FakeAuth:
-    """vexoulz-auth as the worker sees it: codes to users, and which sessions are still signed in."""
+    """vex-auth as the worker sees it: codes to users, and which sessions are still signed in."""
 
     def __init__(self) -> None:
         self.codes: dict[str, SignedIn] = {}
@@ -195,7 +195,7 @@ async def test_state_must_be_ours_and_used_once(admin, fake):
         assert error_of(r) == "expired"
 
 
-async def test_errors_from_vexoulz_auth_reach_the_login_page(admin, fake):
+async def test_errors_from_vex_auth_reach_the_login_page(admin, fake):
     async with admin() as c:
         start = await c.get("/admin/signin")
         state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
@@ -329,7 +329,7 @@ async def test_code_sign_in_refuses_a_bad_code_with_problem_details(admin, fake)
             assert problem_code(await c.post("/admin/session", json=missing, headers=SITE), 400) == "invalid_code"
         assert (await c.get("/admin/session")).json()["authenticated"] is False
 
-        fake.refuse = "expired"  # what VexoulzAuth makes of invalid_grant (expired, used, signed out meanwhile)
+        fake.refuse = "expired"  # what VexAuth makes of invalid_grant (expired, used, signed out meanwhile)
         r = await c.post("/admin/session", json={"code": fake.approve(ALICE)}, headers=SITE)
         assert problem_code(r, 400) == "invalid_code"
         fake.refuse = "misconfigured"
@@ -347,7 +347,7 @@ async def test_code_sign_in_refuses_other_origins(admin, fake):
         r = await c.post("/admin/session", json={"code": code}, headers=evil)
         assert problem_code(r, 403) == "origin_not_allowed"
         assert "access-control-allow-origin" not in r.headers
-        assert code in fake.codes and fake.fetched == []  # never sent to vexoulz-auth
+        assert code in fake.codes and fake.fetched == []  # never sent to vex-auth
 
         preflight = {"Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"}
         refused = await c.options("/admin/session", headers={**evil, **preflight})
@@ -377,7 +377,7 @@ async def test_code_sign_in_accepts_its_own_site(admin, deps, fake):
         assert problem_code(other, 403) == "origin_not_allowed"
 
 
-async def test_code_session_is_rechecked_with_vexoulz_auth(deps, fake):
+async def test_code_session_is_rechecked_with_vex_auth(deps, fake):
     from archive_worker.admin_signin import CHECK_S
 
     deps.settings.admin_twitch_ids = ["100"]
@@ -414,13 +414,13 @@ async def test_twitch_sign_in_off_without_settings(deps):
 
 
 def test_client_is_built_only_when_fully_configured(settings):
-    assert VexoulzAuth.from_settings(settings) is None
+    assert VexAuth.from_settings(settings) is None
     settings.admin_auth_url = "https://auth.test/"
     settings.admin_auth_client_secret = SecretStr("s")
     settings.admin_auth_redirect_url = "https://vods.test/backend-admin/admin/signin/callback"
-    assert VexoulzAuth.from_settings(settings) is None  # nobody is allowed in yet
+    assert VexAuth.from_settings(settings) is None  # nobody is allowed in yet
     settings.admin_twitch_ids = ["100"]
-    client = VexoulzAuth.from_settings(settings)
+    client = VexAuth.from_settings(settings)
     assert client is not None
     url = urlsplit(client.authorize_url("st"))
     assert (url.scheme, url.netloc, url.path) == ("https", "auth.test", "/authorize")
@@ -431,7 +431,7 @@ def test_client_is_built_only_when_fully_configured(settings):
     }
     assert client.code_redirect_uri == client.redirect_uri
     settings.admin_auth_code_redirect_url = "https://vods.test/first"
-    built = VexoulzAuth.from_settings(settings)
+    built = VexAuth.from_settings(settings)
     assert built is not None and built.code_redirect_uri == "https://vods.test/first"
 
 
@@ -442,7 +442,7 @@ async def test_a_fetched_code_is_redeemed_with_the_first_registered_redirect_uri
         bodies.append(json.loads(request.content))
         return httpx.Response(200, json={"user": ALICE, "sid": "s1", "expiresAt": "x"})
 
-    client = VexoulzAuth(
+    client = VexAuth(
         "https://auth.test",
         "",
         "vods-admin",
@@ -456,7 +456,7 @@ async def test_a_fetched_code_is_redeemed_with_the_first_registered_redirect_uri
     assert [b["redirect_uri"] for b in bodies] == ["https://vods.test/cb", "https://vods.test/first"]
 
 
-async def test_client_talks_to_vexoulz_auth():
+async def test_client_talks_to_vex_auth():
     seen = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -469,7 +469,7 @@ async def test_client_talks_to_vexoulz_auth():
             return httpx.Response(404, json={"active": False})
         return httpx.Response(500)
 
-    client = VexoulzAuth(
+    client = VexAuth(
         "https://auth.test",
         "http://auth:8090",
         "vods-admin",
@@ -500,7 +500,7 @@ async def test_refusals_say_why(status, body, reason):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, json=body) if body else httpx.Response(status, text="bad gateway")
 
-    client = VexoulzAuth(
+    client = VexAuth(
         "https://auth.test", "", "vods-admin", "sec", "https://vods.test/cb", transport=httpx.MockTransport(handler)
     )
     with pytest.raises(SignInError) as caught:
@@ -512,7 +512,7 @@ async def test_unreachable_is_unavailable():
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route")
 
-    client = VexoulzAuth(
+    client = VexAuth(
         "https://auth.test", "", "vods-admin", "sec", "https://vods.test/cb", transport=httpx.MockTransport(handler)
     )
     with pytest.raises(SignInError) as caught:

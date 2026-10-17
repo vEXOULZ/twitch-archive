@@ -18,7 +18,7 @@ def _token_response(request: httpx.Request) -> httpx.Response:
 
 MASTER = """#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,VIDEO="1080p60"
-https://cdn.example/h_vexoulz_1/1080p60/index-dvr.m3u8
+https://cdn.example/h_vexouluna_1/1080p60/index-dvr.m3u8
 """
 
 
@@ -26,11 +26,11 @@ https://cdn.example/h_vexoulz_1/1080p60/index-dvr.m3u8
 async def test_variant_falls_back_to_1080p_on_403(make_ctx):
     respx.post(GQL_URL).mock(side_effect=_token_response)
     respx.get(url__startswith="https://usher.ttvnw.net/vod/v2/100.m3u8").respond(200, text=MASTER)
-    chunked = respx.get("https://cdn.example/h_vexoulz_1/chunked/index-dvr.m3u8").respond(403)
-    respx.get("https://cdn.example/h_vexoulz_1/1080p60/index-dvr.m3u8").respond(200, text="#EXTM3U")
+    chunked = respx.get("https://cdn.example/h_vexouluna_1/chunked/index-dvr.m3u8").respond(403)
+    respx.get("https://cdn.example/h_vexouluna_1/1080p60/index-dvr.m3u8").respond(200, text="#EXTM3U")
     url, text = await cap._resolve_variant(make_ctx())
     assert chunked.called
-    assert url == "https://cdn.example/h_vexoulz_1/1080p60/index-dvr.m3u8"
+    assert url == "https://cdn.example/h_vexouluna_1/1080p60/index-dvr.m3u8"
     assert text == "#EXTM3U"
 
 
@@ -38,7 +38,7 @@ async def test_variant_falls_back_to_1080p_on_403(make_ctx):
 async def test_variant_other_errors_propagate(make_ctx):
     respx.post(GQL_URL).mock(side_effect=_token_response)
     respx.get(url__startswith="https://usher.ttvnw.net/vod/v2/100.m3u8").respond(200, text=MASTER)
-    respx.get("https://cdn.example/h_vexoulz_1/chunked/index-dvr.m3u8").respond(404)
+    respx.get("https://cdn.example/h_vexouluna_1/chunked/index-dvr.m3u8").respond(404)
     with pytest.raises(httpx.HTTPStatusError):
         await cap._resolve_variant(make_ctx())
 
@@ -177,14 +177,14 @@ https://edge.example/s13.ts
 @respx.mock
 async def test_live_record_skips_ads_and_handles_rollover(make_ctx, settings, monkeypatch):
     settings.live_poll_interval_seconds = 0
-    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexoulz"})
+    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexouluna"})
 
     async def no_save():
         return None
 
     monkeypatch.setattr(ctx, "save", no_save)
     respx.post(GQL_URL).mock(side_effect=_token_response)
-    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexoulz.m3u8").respond(
+    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexouluna.m3u8").respond(
         200, text='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,VIDEO="chunked"\nhttps://edge.example/live.m3u8\n'
     )
     respx.get("https://edge.example/live.m3u8").mock(
@@ -209,7 +209,7 @@ async def test_live_record_skips_ads_and_handles_rollover(make_ctx, settings, mo
 @respx.mock
 async def test_live_record_warns_when_the_linked_account_still_gets_ads(make_ctx, settings, monkeypatch, caplog):
     settings.live_poll_interval_seconds = 0
-    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexoulz"})
+    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexouluna"})
 
     async def no_save():
         return None
@@ -220,7 +220,7 @@ async def test_live_record_warns_when_the_linked_account_still_gets_ads(make_ctx
     monkeypatch.setattr(ctx, "save", no_save)
     ctx.deps.gql.viewer = viewer
     respx.post(GQL_URL).mock(side_effect=_token_response)
-    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexoulz.m3u8").respond(
+    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexouluna.m3u8").respond(
         200, text='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,VIDEO="chunked"\nhttps://edge.example/live.m3u8\n'
     )
     respx.get("https://edge.example/live.m3u8").mock(
@@ -246,14 +246,14 @@ def _timed(text: str, times: dict[str, str]) -> str:
 @respx.mock
 async def test_live_record_saves_where_its_gaps_are(make_ctx, settings, monkeypatch):
     settings.live_poll_interval_seconds = 0
-    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexoulz"})
+    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexouluna"})
 
     async def no_save():
         return None
 
     monkeypatch.setattr(ctx, "save", no_save)
     respx.post(GQL_URL).mock(side_effect=_token_response)
-    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexoulz.m3u8").respond(
+    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexouluna.m3u8").respond(
         200, text='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,VIDEO="chunked"\nhttps://edge.example/live.m3u8\n'
     )
     times = {
@@ -276,14 +276,14 @@ async def test_live_record_saves_where_its_gaps_are(make_ctx, settings, monkeypa
 @respx.mock
 async def test_live_record_indexes_a_batch_in_order_and_skips_failures(make_ctx, settings, monkeypatch):
     settings.live_poll_interval_seconds = 0
-    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexoulz"})
+    ctx = make_ctx("live", None, {"type": "live", "stream_id": "555", "login": "vexouluna"})
 
     async def no_save():
         return None
 
     monkeypatch.setattr(ctx, "save", no_save)
     respx.post(GQL_URL).mock(side_effect=_token_response)
-    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexoulz.m3u8").respond(
+    respx.get(url__startswith="https://usher.ttvnw.net/api/channel/hls/vexouluna.m3u8").respond(
         200, text='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,VIDEO="chunked"\nhttps://edge.example/live.m3u8\n'
     )
     respx.get("https://edge.example/live.m3u8").mock(

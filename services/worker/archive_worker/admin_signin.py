@@ -1,18 +1,18 @@
-"""Twitch sign-in for the admin dashboard, through vexoulz-auth (the shared *.vexoul.net sign-in).
+"""Twitch sign-in for the admin dashboard, through vex-auth (the shared *.vexoul.net sign-in).
 
-The browser goes to vexoulz-auth's ``/authorize`` with a one-time ``state``. It comes back to
+The browser goes to vex-auth's ``/authorize`` with a one-time ``state``. It comes back to
 ``/admin/signin/callback`` with a code, which this worker trades (with its client secret) for the
-Twitch user and a vexoulz-auth session id. Only ``ARCHIVE_ADMIN_TWITCH_IDS`` get a dashboard session.
+Twitch user and a vex-auth session id. Only ``ARCHIVE_ADMIN_TWITCH_IDS`` get a dashboard session.
 The session id is checked again every ``CHECK_S`` seconds, so "sign out everywhere" on any site
 ends the dashboard session too.
 
 A *quiet* sign-in (``/admin/signin?quiet=1``) is the site checking whether someone already signed in
-to the site is an admin: vexoulz-auth answers at once for a signed-in browser, and the callback always
+to the site is an admin: vex-auth answers at once for a signed-in browser, and the callback always
 goes back to ``next`` with ``admin=1`` (a dashboard session was made) or ``admin=0`` (anything else),
 never to the login page.
 
 A *code* sign-in (``POST /admin/session {code}``) needs no redirect at all: the site mints a code with
-vexoulz-auth's ``POST /v1/codes`` from the browser and hands it over, and the worker redeems it like
+vex-auth's ``POST /v1/codes`` from the browser and hands it over, and the worker redeems it like
 the callback's. Such a code carries the client's first registered redirect URI (``code_redirect_uri``),
 not the callback's.
 """
@@ -33,12 +33,12 @@ STATE_TTL_S = 600
 STATE_COOKIE = "archive_signin"
 CHECK_S = 60
 #: The ``auth_error`` values the login page knows how to explain.
-#: ``misconfigured``: vexoulz-auth refused this worker itself (wrong client secret, unknown client).
+#: ``misconfigured``: vex-auth refused this worker itself (wrong client secret, unknown client).
 ERRORS = ("denied", "expired", "twitch", "not_allowed", "unavailable", "misconfigured")
 
 
 class SignInError(Exception):
-    """vexoulz-auth refused the code or could not be reached. ``reason`` is the ``auth_error`` to show."""
+    """vex-auth refused the code or could not be reached. ``reason`` is the ``auth_error`` to show."""
 
     def __init__(self, msg: str, reason: str = "unavailable") -> None:
         super().__init__(msg)
@@ -46,17 +46,17 @@ class SignInError(Exception):
 
 
 def _refusal(r: httpx.Response) -> SignInError:
-    """Why vexoulz-auth turned down a code: the worker's setup, the code itself, or a passing problem."""
+    """Why vex-auth turned down a code: the worker's setup, the code itself, or a passing problem."""
     try:
         code = r.json().get("error")
     except ValueError:
         code = None
-    msg = f"vexoulz-auth refused the code ({r.status_code} {code or 'no error code'})"
+    msg = f"vex-auth refused the code ({r.status_code} {code or 'no error code'})"
     if r.status_code == 400 and code == "invalid_grant":
-        return SignInError(msg, "expired")  # used, expired, or the vexoulz-auth session ended meanwhile
+        return SignInError(msg, "expired")  # used, expired, or the vex-auth session ended meanwhile
     if r.status_code == 429 or r.status_code >= 500:
         return SignInError(msg, "unavailable")
-    # 401 invalid_client: ARCHIVE_ADMIN_AUTH_CLIENT_ID/SECRET don't match vexoulz-auth's client list.
+    # 401 invalid_client: ARCHIVE_ADMIN_AUTH_CLIENT_ID/SECRET don't match vex-auth's client list.
     return SignInError(msg, "misconfigured")
 
 
@@ -75,11 +75,11 @@ class AuthClient(Protocol):
         ...
 
     async def active(self, sid: str) -> bool:
-        """Whether the vexoulz-auth session is still signed in. Raises SignInError if unsure."""
+        """Whether the vex-auth session is still signed in. Raises SignInError if unsure."""
         ...
 
 
-class VexoulzAuth:
+class VexAuth:
     def __init__(
         self,
         public_url: str,
@@ -102,7 +102,7 @@ class VexoulzAuth:
         )
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> VexoulzAuth | None:
+    def from_settings(cls, settings: Settings) -> VexAuth | None:
         secret = settings.admin_auth_client_secret.get_secret_value()
         if not (settings.admin_auth_url and secret and settings.admin_auth_redirect_url and settings.admin_twitch_ids):
             return None
@@ -124,7 +124,7 @@ class VexoulzAuth:
         try:
             r = await self._http.post("/v1/token", json={"code": code, "redirect_uri": redirect_uri})
         except httpx.HTTPError as exc:
-            raise SignInError(f"vexoulz-auth unreachable: {exc}") from exc
+            raise SignInError(f"vex-auth unreachable: {exc}") from exc
         if r.status_code != 200:
             raise _refusal(r)
         body = r.json()
@@ -134,11 +134,11 @@ class VexoulzAuth:
         try:
             r = await self._http.get(f"/v1/sessions/{sid}")
         except httpx.HTTPError as exc:
-            raise SignInError(f"vexoulz-auth unreachable: {exc}") from exc
+            raise SignInError(f"vex-auth unreachable: {exc}") from exc
         if r.status_code == 404:
             return False
         if r.status_code != 200:
-            raise SignInError(f"vexoulz-auth answered {r.status_code}")
+            raise SignInError(f"vex-auth answered {r.status_code}")
         return bool(r.json().get("active"))
 
 
@@ -150,7 +150,7 @@ class Pending(NamedTuple):
 
 @dataclass
 class PendingStates:
-    """Sign-ins on their way through vexoulz-auth: state → where to go afterwards. One use each."""
+    """Sign-ins on their way through vex-auth: state → where to go afterwards. One use each."""
 
     ttl_s: float = STATE_TTL_S
     limit: int = 1000

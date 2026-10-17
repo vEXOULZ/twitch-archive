@@ -3,7 +3,7 @@
 One admin password (``ARCHIVE_ADMIN_PASSWORD``), hashed with scrypt at startup
 and compared in constant time. Without a password, password login is off and only
 the API key works. A session can also come from Twitch sign-in (see admin_signin);
-it then carries the Twitch user and the vexoulz-auth session id it depends on.
+it then carries the Twitch user and the vex-auth session id it depends on.
 
 Sessions are kept in a ``SessionStore``: the ``admin_sessions`` table in the worker
 (``DbSessionStore``, so a restart doesn't sign the dashboard out), or memory in tests.
@@ -50,7 +50,7 @@ class Session:
     expires_at: float
     actor: str = "password"  # what the audit log records: "password" or "twitch:<id>"
     user: dict[str, Any] | None = None  # the Twitch user, for a Twitch sign-in
-    sid: str | None = None  # the vexoulz-auth session behind it
+    sid: str | None = None  # the vex-auth session behind it
     checked_at: float = 0.0  # when sid was last confirmed signed in
 
 
@@ -195,7 +195,7 @@ class AdminAuth:
         return session
 
     async def checked(self, session: Session, at: float) -> None:
-        """Note that the session's vexoulz-auth sign-in was confirmed at ``at``."""
+        """Note that the session's vex-auth sign-in was confirmed at ``at``."""
         session.checked_at = at
         await self.store.checked(token_hash(session.token), at)
 

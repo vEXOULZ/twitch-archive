@@ -131,16 +131,16 @@ class Settings(BaseSettings):
         "192.168.0.0/16",  # conventions:allow-infra
         "fc00::/7",
     ]
-    # Twitch sign-in through vexoulz-auth: on when admin_auth_url, the client secret, the redirect URL
+    # Twitch sign-in through vex-auth: on when admin_auth_url, the client secret, the redirect URL
     # and at least one Twitch user id are set. Only those users get in.
     admin_twitch_ids: list[str] = []
-    admin_auth_url: str = ""  # vexoulz-auth as browsers reach it
+    admin_auth_url: str = ""  # vex-auth as browsers reach it
     admin_auth_internal_url: str = ""  # as this worker reaches it; empty = admin_auth_url
     admin_auth_client_id: str = "vods-admin"
     admin_auth_client_secret: SecretStr = SecretStr("")
-    # This worker's /admin/signin/callback as browsers reach it; registered with vexoulz-auth.
+    # This worker's /admin/signin/callback as browsers reach it; registered with vex-auth.
     admin_auth_redirect_url: str = ""
-    # The redirect URI a code from vexoulz-auth's POST /v1/codes carries: the client's first registered
+    # The redirect URI a code from vex-auth's POST /v1/codes carries: the client's first registered
     # one. Empty = admin_auth_redirect_url.
     admin_auth_code_redirect_url: str = ""
     # Site origins (e.g. https://vods.example.net) that may call /admin/session from the browser, with

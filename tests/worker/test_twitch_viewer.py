@@ -21,7 +21,7 @@ DEVICE_TOKEN = "device-access-stand-in"
 PASTED_TOKEN = "pasted-cookie-stand-in"
 REFRESHED_TOKEN = "refreshed-access-stand-in"
 CLIENT = "test-client-id"
-VIEWER = ViewerAuth(client_id=CLIENT, token=DEVICE_TOKEN, login="vexoulz")
+VIEWER = ViewerAuth(client_id=CLIENT, token=DEVICE_TOKEN, login="vexouluna")
 
 
 def _token(request: httpx.Request) -> httpx.Response:
@@ -43,8 +43,8 @@ def _gql(settings, auth: ViewerAuth | None) -> Gql:
 @respx.mock
 async def test_live_token_is_asked_for_as_the_linked_account(settings):
     route = respx.post(GQL_URL).mock(side_effect=_token)
-    tok = await _gql(settings, VIEWER).live_access_token("vexoulz")
-    assert tok.viewer == "vexoulz"
+    tok = await _gql(settings, VIEWER).live_access_token("vexouluna")
+    assert tok.viewer == "vexouluna"
     sent = route.calls.last.request.headers
     assert sent["Authorization"] == f"OAuth {DEVICE_TOKEN}" and sent["Client-Id"] == CLIENT
 
@@ -65,7 +65,7 @@ async def test_a_refused_viewer_token_falls_back_to_anonymous(settings):
         return _token(request)
 
     route = respx.post(GQL_URL).mock(side_effect=refuse_signed_in)
-    tok = await _gql(settings, VIEWER).live_access_token("vexoulz")
+    tok = await _gql(settings, VIEWER).live_access_token("vexouluna")
     assert tok.viewer is None and route.call_count == 2
     assert "Authorization" not in route.calls.last.request.headers
 
@@ -79,7 +79,7 @@ async def test_a_failing_viewer_lookup_never_stops_a_recording(settings):
         raise OSError("database down")
 
     gql.viewer = broken
-    assert (await gql.live_access_token("vexoulz")).viewer is None
+    assert (await gql.live_access_token("vexouluna")).viewer is None
 
 
 # ── With the database ─────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ def _validate(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"status": 401, "message": "invalid access token"})
     client = "web-client" if token == PASTED_TOKEN else CLIENT
     return httpx.Response(
-        200, json={"client_id": client, "login": "vexoulz", "user_id": "38656648", "scopes": [], "expires_in": 0}
+        200, json={"client_id": client, "login": "vexouluna", "user_id": "38656648", "scopes": [], "expires_in": 0}
     )
 
 
@@ -153,12 +153,12 @@ async def test_link_with_the_device_flow_then_unlink(clean, deps, make_service, 
         entered = True
         done = (await c.get(poll, headers=key)).json()
         assert done["state"] == "linked"
-        assert done["status"]["valid"] is True and done["status"]["login"] == "vexoulz"
+        assert done["status"]["valid"] is True and done["status"]["login"] == "vexouluna"
         assert done["status"]["method"] == "device" and "token" not in done["status"]
         assert (await c.get(poll, headers=key)).json()["state"] == "failed"  # a flow links once
 
         auth = await deps.viewer.auth()
-        assert auth == ViewerAuth(client_id=CLIENT, token=DEVICE_TOKEN, login="vexoulz")
+        assert auth == ViewerAuth(client_id=CLIENT, token=DEVICE_TOKEN, login="vexouluna")
         health = (await c.get("/admin/health", headers=key)).json()
         assert health["twitchViewer"]["linked"] is True and health["twitchViewer"]["checkedAt"]
 
@@ -167,7 +167,7 @@ async def test_link_with_the_device_flow_then_unlink(clean, deps, make_service, 
 
     rows = await _audit()
     assert [r["action"] for r in rows] == ["twitch_viewer.link.start", "twitch_viewer.link", "twitch_viewer.unlink"]
-    assert rows[1]["after"]["login"] == "vexoulz" and rows[2]["before"]["login"] == "vexoulz"
+    assert rows[1]["after"]["login"] == "vexouluna" and rows[2]["before"]["login"] == "vexouluna"
     assert DEVICE_TOKEN not in json.dumps([r["before"] for r in rows] + [r["after"] for r in rows], default=str)
 
 
@@ -195,7 +195,7 @@ async def test_link_by_pasting_a_token(clean, deps, make_service, respx_mock):
         assert ok["valid"] is True and ok["method"] == "paste" and ok["clientId"] == "web-client"
 
     # The token goes with the client id it was issued to, which GQL wants.
-    assert await deps.viewer.auth() == ViewerAuth(client_id="web-client", token=PASTED_TOKEN, login="vexoulz")
+    assert await deps.viewer.auth() == ViewerAuth(client_id="web-client", token=PASTED_TOKEN, login="vexouluna")
     rows = await _audit()
     assert [r["action"] for r in rows] == ["twitch_viewer.paste"]
     assert PASTED_TOKEN not in json.dumps(rows, default=str)
@@ -204,13 +204,13 @@ async def test_link_by_pasting_a_token(clean, deps, make_service, respx_mock):
 async def test_an_expiring_token_is_refreshed(clean, settings, respx_mock):
     soon = (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)).isoformat()
     await twitch_viewer.save_token(
-        {"token": DEVICE_TOKEN, "refreshToken": "r1", "clientId": CLIENT, "login": "vexoulz", "expiresAt": soon}
+        {"token": DEVICE_TOKEN, "refreshToken": "r1", "clientId": CLIENT, "login": "vexouluna", "expiresAt": soon}
     )
     refresh = respx_mock.post(twitch_viewer.TOKEN_URL).respond(
         json={"access_token": REFRESHED_TOKEN, "refresh_token": "r2", "expires_in": 14000}
     )
     viewer = twitch_viewer.TwitchViewer(settings)
-    assert (await viewer.auth()) == ViewerAuth(client_id=CLIENT, token=REFRESHED_TOKEN, login="vexoulz")
+    assert (await viewer.auth()) == ViewerAuth(client_id=CLIENT, token=REFRESHED_TOKEN, login="vexouluna")
     assert parse_qs(refresh.calls.last.request.content.decode())["refresh_token"] == ["r1"]
     stored = await twitch_viewer.load_token()
     assert stored is not None and stored["refreshToken"] == "r2" and stored["expiresAt"] > soon
@@ -221,7 +221,7 @@ async def test_an_expiring_token_is_refreshed(clean, settings, respx_mock):
 async def test_an_expired_token_that_cannot_refresh_is_not_sent(clean, settings, respx_mock):
     past = (dt.datetime.now(dt.UTC) - dt.timedelta(seconds=60)).isoformat()
     await twitch_viewer.save_token(
-        {"token": DEVICE_TOKEN, "refreshToken": "r1", "clientId": CLIENT, "login": "vexoulz", "expiresAt": past}
+        {"token": DEVICE_TOKEN, "refreshToken": "r1", "clientId": CLIENT, "login": "vexouluna", "expiresAt": past}
     )
     respx_mock.post(twitch_viewer.TOKEN_URL).respond(400, json={"status": 400, "message": "Invalid refresh token"})
     viewer = twitch_viewer.TwitchViewer(settings)

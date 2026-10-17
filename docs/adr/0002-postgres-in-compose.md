@@ -11,7 +11,7 @@ on the same host (`127.0.0.1:5432`). So the stack wasn't self-contained: a new h
 server installed and configured by hand, the schema and role steps needed root on that host
 (`deploy/apply-roles.sh` ran `psql` as the `postgres` user), and an operator had to remember to run them
 after a release that changed `migrations/`. Host networking also gave both containers every port on the
-host. doomtp-bot and vexoulz-auth, the other two Python services, already run Postgres 17 as a compose
+host. doomtp-bot and vex-auth, the other two Python services, already run Postgres 17 as a compose
 service.
 
 ## Decision

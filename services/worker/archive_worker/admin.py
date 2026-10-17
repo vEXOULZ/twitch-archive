@@ -75,7 +75,7 @@ from .admin_signin import (
     AuthClient,
     PendingStates,
     SignInError,
-    VexoulzAuth,
+    VexAuth,
     safe_next,
     with_admin,
 )
@@ -228,7 +228,7 @@ def create_admin_app(
     sessions: SessionStore | None = None,
     runtime: RuntimeSettings | None = None,
 ) -> FastAPI:
-    """``signin``: the vexoulz-auth client; by default built from the settings (None when not configured).
+    """``signin``: the vex-auth client; by default built from the settings (None when not configured).
     ``sessions``: where dashboard sessions are kept; the worker passes the database's, tests leave memory.
     ``runtime``: the dashboard's setting overrides, already loaded; by default a fresh one over ``deps.settings``."""
     settings = deps.settings
@@ -273,7 +273,7 @@ def create_admin_app(
     login_limiter = LoginLimiter()
     trusted_proxies = parse_networks(settings.admin_trusted_proxies)
     password_networks = parse_password_networks(settings.admin_password_networks)
-    signin = signin or VexoulzAuth.from_settings(settings)
+    signin = signin or VexAuth.from_settings(settings)
     twitch_ids = {str(i) for i in settings.admin_twitch_ids}
     pending = PendingStates()
     site_origins = {o.strip().rstrip("/").lower() for o in settings.admin_site_origins if o.strip()}
@@ -292,8 +292,8 @@ def create_admin_app(
     started_at = dt.datetime.now(dt.UTC)
 
     async def live_session(token: str | None) -> Session | None:
-        """The cookie's session, unless it has expired or its vexoulz-auth session was signed out.
-        If vexoulz-auth can't be reached, the session stands and is checked again next time."""
+        """The cookie's session, unless it has expired or its vex-auth session was signed out.
+        If vex-auth can't be reached, the session stands and is checked again next time."""
         session = await passwords.session(token)
         if session is None or session.sid is None or signin is None:
             return session
@@ -467,7 +467,7 @@ def create_admin_app(
         return response
 
     async def code_login(request: Request, code: Any) -> Response:
-        """``POST /admin/session {code}``: a Twitch sign-in from a code the site minted with vexoulz-auth's
+        """``POST /admin/session {code}``: a Twitch sign-in from a code the site minted with vex-auth's
         ``POST /v1/codes``, without a redirect. An admin gets the dashboard session the callback would
         make; anyone else ``{"admin": false}`` and no cookie. Refusals are problem details."""
         origin = request.headers.get("origin")
@@ -485,8 +485,8 @@ def create_admin_app(
             if exc.reason == "expired":
                 return refused(400, "invalid_code", "The code is unknown, expired or already used")
             if exc.reason == "misconfigured":
-                return refused(502, "misconfigured", "vexoulz-auth refused this worker's client credentials")
-            return refused(503, "unavailable", "vexoulz-auth could not be reached; try again")
+                return refused(502, "misconfigured", "vex-auth refused this worker's client credentials")
+            return refused(503, "unavailable", "vex-auth could not be reached; try again")
         user_id = str(signed_in.user.get("id", ""))
         if user_id not in twitch_ids:
             # Every signed-in viewer's check: not worth a warning.
@@ -502,7 +502,7 @@ def create_admin_app(
         response.set_cookie(SESSION_COOKIE, session.token, max_age=int(passwords.ttl_s), **cookie)
         return response
 
-    # ── Twitch sign-in (through vexoulz-auth) ─────────────────────────────
+    # ── Twitch sign-in (through vex-auth) ─────────────────────────────
     # The callback is reached through a redirect from another site, which a SameSite=Strict
     # cookie would not be sent on, so the state cookie is Lax. The session cookie stays Strict:
     # it is set here and only read by the dashboard's own requests.

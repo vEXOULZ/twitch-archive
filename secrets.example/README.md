@@ -19,6 +19,6 @@ URLs and SQL as they are, so they must be URL-safe.
 | `archive_twitch_client_secret` | api, worker | | Twitch app; `/v2/badges` in the api |
 | `archive_admin_api_key` | worker | | Admin API bearer key (`openssl rand -hex 32`) |
 | `archive_admin_password` | worker | | Dashboard password; empty turns password login off |
-| `archive_admin_auth_client_secret` | worker | | Twitch sign-in through vexoulz-auth; empty turns it off |
+| `archive_admin_auth_client_secret` | worker | | Twitch sign-in through vex-auth; empty turns it off |
 | `archive_google_client_secret` | worker | | YouTube uploads |
 | `archive_doomtp_api_key` | worker | | doomtp-bot read-scope key; empty uses the public log |
